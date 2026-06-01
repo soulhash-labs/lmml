@@ -911,6 +911,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lmml-compat"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "lmml-detect"
 version = "0.1.0"
 dependencies = [

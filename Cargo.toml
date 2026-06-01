@@ -8,6 +8,7 @@ description = "Turnkey TUI for managing llama.cpp locally — auto-detect, build
 members = [
     ".",
     "crates/lmml-detect",
+    "crates/lmml-compat",
 ]
 resolver = "2"
 
