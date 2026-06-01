@@ -127,6 +127,7 @@ pub struct SystemProfile {
 
 impl SystemProfile {
     /// Run all probes concurrently and return the combined profile.
+    #[tracing::instrument]
     pub async fn detect() -> SystemProfile {
         let runner = RealCommandRunner;
         let disk_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -236,6 +237,7 @@ impl SystemProfile {
 }
 
 /// Detect a full system profile with an injected command runner.
+#[tracing::instrument(skip(runner), fields(disk_path = %disk_path.display()))]
 pub async fn detect_with_runner<R>(runner: &R, disk_path: PathBuf) -> SystemProfile
 where
     R: CommandRunner + Sync,
@@ -256,7 +258,7 @@ where
 
     let cuda = cuda_compatibility(nvcc.as_ref().map(|info| &info.version), &gpus);
 
-    SystemProfile {
+    let profile = SystemProfile {
         compiler,
         cmake,
         git,
@@ -267,7 +269,9 @@ where
         cpu,
         memory,
         disk,
-    }
+    };
+    tracing::info!(backend = ?profile.recommended_backend(), "system detection completed");
+    profile
 }
 
 /// C++ compiler information and C++17 probe result.

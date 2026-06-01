@@ -139,6 +139,7 @@ impl ModelRegistry {
     }
 
     /// Download a model URL into `models_dir`, resuming a partial file when present.
+    #[tracing::instrument(skip(self, on_progress), fields(models_dir = %self.models_dir.display(), url = %url))]
     pub async fn download(
         &self,
         url: &str,
@@ -164,6 +165,7 @@ impl ModelRegistry {
             .await
             .map(|metadata| metadata.len())
             .unwrap_or(0);
+        tracing::info!(filename = %filename, resumed_from, "model download starting");
 
         let mut request = client.get(url);
         if let Some(range) = range_header(resumed_from) {
@@ -177,6 +179,7 @@ impl ModelRegistry {
         }
         let append = resumed_from > 0 && response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
         if resumed_from > 0 && !append {
+            tracing::warn!("server ignored range request; restarting download from byte 0");
             resumed_from = 0;
         }
 
@@ -210,6 +213,7 @@ impl ModelRegistry {
         tokio::fs::rename(&part_path, &final_path)
             .await
             .map_err(DownloadError::Io)?;
+        tracing::info!(path = %final_path.display(), bytes_received, "model download completed");
         parse_model_file(&final_path, false)
             .await
             .ok_or_else(|| DownloadError::InvalidDownloadedFile(final_path))
@@ -297,6 +301,7 @@ pub struct HfModelResult {
 }
 
 /// Search Hugging Face for GGUF model files.
+#[tracing::instrument(fields(keywords = %query.keywords, max_results = query.max_results))]
 pub async fn search_huggingface(query: HfSearchQuery) -> Result<Vec<HfModelResult>, HfError> {
     let client = reqwest::Client::new();
     search_huggingface_with_client(query, client).await

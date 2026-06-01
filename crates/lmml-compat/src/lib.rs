@@ -84,6 +84,7 @@ pub struct LlamaBinaryCapabilities {
 
 impl LlamaBinaryCapabilities {
     /// Run `llama-server --version` and `llama-server --help` to detect flags.
+    #[tracing::instrument(fields(binary = %binary.display()))]
     pub async fn probe(binary: &Path) -> Result<Self, CompatError> {
         probe_with_runner(&RealCommandRunner, binary).await
     }
@@ -96,6 +97,7 @@ impl LlamaBinaryCapabilities {
 }
 
 /// Probe a llama-server binary with an injected command runner.
+#[tracing::instrument(skip(runner), fields(binary = %binary.display()))]
 pub async fn probe_with_runner<R>(
     runner: &R,
     binary: &Path,
@@ -122,7 +124,13 @@ where
         None
     };
 
-    Ok(capabilities_from_flags(version, flags))
+    let caps = capabilities_from_flags(version, flags);
+    tracing::info!(
+        version = ?caps.version,
+        flags = caps.flags.len(),
+        "llama-server capabilities probed"
+    );
+    Ok(caps)
 }
 
 /// Stable internal server configuration, independent of llama.cpp flag spelling.

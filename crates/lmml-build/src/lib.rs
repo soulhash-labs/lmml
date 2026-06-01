@@ -100,9 +100,11 @@ pub trait BuildRunner {
 pub struct RealBuildRunner;
 
 impl BuildRunner for RealBuildRunner {
+    #[tracing::instrument(skip(self), fields(source_dir = %config.source_dir.display(), clean = config.clean))]
     async fn run(&self, config: BuildConfig) -> mpsc::Receiver<BuildEvent> {
         let (tx, rx) = mpsc::channel(256);
         tokio::spawn(async move {
+            tracing::debug!("real build runner task spawned");
             run_build(config, tx).await;
         });
         rx
@@ -265,10 +267,12 @@ async fn check_for_update_with_git(source_dir: &Path) -> Result<UpdateCheck, Bui
 }
 
 async fn run_build(config: BuildConfig, tx: mpsc::Sender<BuildEvent>) {
+    tracing::info!(source_dir = %config.source_dir.display(), clean = config.clean, "build started");
     let started = Instant::now();
     let mut log_tail = LogTail::new(config.log_tail_lines);
     let result = run_build_inner(&config, &tx, &mut log_tail, started).await;
     if let Err(error) = result {
+        tracing::error!(error = %error, "build failed");
         send_event(
             &tx,
             BuildEvent::Failed {
@@ -347,6 +351,7 @@ async fn run_build_inner(
             server.display()
         )));
     }
+    tracing::info!(binary = %server.display(), elapsed_ms = started.elapsed().as_millis(), "build completed");
 
     send_event(
         tx,

@@ -43,6 +43,7 @@ impl EventLoop {
     }
 
     /// Run until the app requests quit.
+    #[tracing::instrument(skip(self, app))]
     pub async fn run(&mut self, app: &mut App) -> Result<(), EventLoopError> {
         let mut tick = tokio::time::interval(Duration::from_millis(100));
         loop {
@@ -56,6 +57,7 @@ impl EventLoop {
     }
 
     /// Process one terminal/background event tick.
+    #[tracing::instrument(skip(self, app), level = "trace")]
     pub async fn tick(&mut self, app: &mut App) -> Result<(), EventLoopError> {
         self.poll_terminal()?;
         self.drain_events(app).await;
@@ -83,6 +85,7 @@ impl EventLoop {
 
     async fn drain_events(&mut self, app: &mut App) {
         while let Ok(event) = self.app_rx.try_recv() {
+            tracing::trace!(event = ?event, "handling app event");
             match &event {
                 AppEvent::ServerStarted(Ok(handle)) => {
                     self.server_handle = Some(handle.clone());
@@ -113,11 +116,13 @@ impl EventLoop {
     }
 
     async fn dispatch_action(&mut self, app: &mut App, action: Action) {
+        tracing::debug!(action = ?action, "dispatching action");
         match action {
             Action::RunDetect => {
                 app.dispatch(Action::RunDetect);
                 let tx = self.app_tx.clone();
                 tokio::spawn(async move {
+                    tracing::debug!("detect task started");
                     let profile = lmml_detect::SystemProfile::detect().await;
                     let _ignored = tx.send(AppEvent::DetectComplete(Box::new(profile))).await;
                 });
@@ -127,6 +132,7 @@ impl EventLoop {
                 let tx = self.app_tx.clone();
                 let source_dir = app.state.build.source_dir.clone();
                 tokio::spawn(async move {
+                    tracing::debug!(source_dir = %source_dir.display(), "update check task started");
                     let update = if source_dir.exists() {
                         lmml_build::check_for_update(&source_dir).await
                     } else {
@@ -145,6 +151,7 @@ impl EventLoop {
                     aliases: app.state.model.aliases.clone(),
                 };
                 tokio::spawn(async move {
+                    tracing::debug!("model scan task started");
                     let models = registry.scan().await;
                     let _ignored = tx.send(AppEvent::ModelScanComplete(models)).await;
                 });
@@ -153,6 +160,7 @@ impl EventLoop {
                 app.dispatch(Action::SearchHf(query.clone()));
                 let tx = self.app_tx.clone();
                 tokio::spawn(async move {
+                    tracing::debug!(query = ?query, "huggingface search task started");
                     match lmml_models::search_huggingface(query).await {
                         Ok(results) => {
                             let _ignored = tx.send(AppEvent::HfSearchResults(results)).await;
@@ -174,6 +182,7 @@ impl EventLoop {
                     aliases: app.state.model.aliases.clone(),
                 };
                 tokio::spawn(async move {
+                    tracing::debug!(url = %result.url, "model download task started");
                     let progress_tx = tx.clone();
                     let downloaded = registry
                         .download(&result.url, move |progress| {
@@ -191,6 +200,7 @@ impl EventLoop {
                 let tx = self.app_tx.clone();
                 let config = app.build_config(clean);
                 tokio::spawn(async move {
+                    tracing::debug!("build task started");
                     let runner = RealBuildRunner;
                     let mut build_rx = runner.run(config).await;
                     while let Some(event) = build_rx.recv().await {
@@ -214,6 +224,7 @@ impl EventLoop {
                 let config = app.server_config(&model);
                 let binary = app.state.build.binary.clone();
                 tokio::spawn(async move {
+                    tracing::debug!(binary = %binary.display(), "server start task started");
                     let (log_tx, mut log_rx) = mpsc::channel(256);
                     let log_app_tx = tx.clone();
                     tokio::spawn(async move {
@@ -277,6 +288,7 @@ impl EventLoop {
                 let tx = self.app_tx.clone();
                 let binary = app.state.build.binary.clone();
                 tokio::spawn(async move {
+                    tracing::debug!(binary = %binary.display(), "server capability probe task started");
                     let result = lmml_compat::LlamaBinaryCapabilities::probe(&binary)
                         .await
                         .map_err(|error| error.to_string());

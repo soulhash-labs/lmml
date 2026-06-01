@@ -13,6 +13,7 @@ use thiserror::Error;
 
 const APP_DIR_NAME: &str = "lmml";
 const STATE_FILE_NAME: &str = "state.toml";
+const LOG_FILE_NAME: &str = "lmml.log";
 
 /// Complete persisted application state.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +47,16 @@ impl AppState {
             env::var_os("HOME"),
             env::var_os("USERPROFILE"),
         )
+    }
+
+    /// Return the default debug log path, respecting `$XDG_DATA_HOME`.
+    pub fn log_path() -> PathBuf {
+        default_data_dir_from_env(
+            env::var_os("XDG_DATA_HOME"),
+            env::var_os("HOME"),
+            env::var_os("USERPROFILE"),
+        )
+        .join(LOG_FILE_NAME)
     }
 
     /// Reset the default state file to default values.
@@ -364,6 +375,16 @@ mod tests {
         assert_eq!(
             state_path_from_env(None, Some("/home/user".into()), None),
             PathBuf::from("/home/user/.config/lmml/state.toml")
+        );
+    }
+
+    #[test]
+    fn log_path_respects_xdg_data_home() {
+        let data_dir =
+            default_data_dir_from_env(Some("/tmp/data".into()), Some("/home/user".into()), None);
+        assert_eq!(
+            data_dir.join(LOG_FILE_NAME),
+            PathBuf::from("/tmp/data/lmml/lmml.log")
         );
     }
 

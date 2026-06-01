@@ -7,3 +7,4 @@ description = "llama.cpp server compatibility layer for lmml"
 [dependencies]
 thiserror = "2"
 tokio = { version = "1", features = ["process", "rt", "macros"] }
+tracing = "0.1"

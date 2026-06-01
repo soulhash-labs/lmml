@@ -65,6 +65,7 @@ impl ServerHandle {
     }
 
     /// Stop the child process, waiting briefly for a graceful exit.
+    #[tracing::instrument(skip(self))]
     pub async fn stop(&self) {
         if let Err(error) = stop_child(self.inner.child.clone()).await {
             let _ignored = self.inner.status_tx.send(ServerStatus::Failed {
@@ -97,6 +98,7 @@ pub struct ServerManager {
 
 impl ServerManager {
     /// Start llama-server for `model` using a stable compat config.
+    #[tracing::instrument(skip(self, model, config, log_tx), fields(binary = %self.binary.display(), model = %model.path.display(), host = %config.host, port = config.port))]
     pub async fn start(
         &self,
         model: &ModelEntry,
@@ -104,6 +106,7 @@ impl ServerManager {
         log_tx: mpsc::Sender<String>,
     ) -> Result<ServerHandle, ServerError> {
         check_port_free(&config.host, config.port).await?;
+        tracing::info!("server start requested");
 
         let mut config = config.clone();
         config.model = model.path.clone();
@@ -139,9 +142,11 @@ impl ServerManager {
         let started_at = Instant::now();
         match wait_for_ready(&config.host, config.port, Duration::from_secs(30)).await {
             Ok(url) => {
+                tracing::info!(url = %url, "server ready");
                 let _ignored = status_tx.send(ServerStatus::Ready { url });
             }
             Err(error) => {
+                tracing::error!(error = %error, "server startup failed");
                 let child = Arc::new(Mutex::new(Some(child)));
                 let _ignored = stop_child(child).await;
                 let reason = error.to_string();
@@ -175,6 +180,7 @@ impl ServerManager {
 }
 
 /// Check whether a host/port can be bound before spawning llama-server.
+#[tracing::instrument]
 pub async fn check_port_free(host: &str, port: u16) -> Result<(), ServerError> {
     match tokio::net::TcpListener::bind((host, port)).await {
         Ok(listener) => {
@@ -186,6 +192,7 @@ pub async fn check_port_free(host: &str, port: u16) -> Result<(), ServerError> {
 }
 
 /// Poll the llama-server health endpoint until it returns a success response.
+#[tracing::instrument]
 pub async fn wait_for_ready(
     host: &str,
     port: u16,
