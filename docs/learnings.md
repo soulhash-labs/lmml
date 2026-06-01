@@ -161,7 +161,34 @@ Where `Action` is an enum of things the app core should do (navigate, spawn task
 
 ## 5. Project State
 
-### Phase 1 — MVP (Completed Items)
+### Current v2 Status
+
+The active product is the crate workspace under `crates/`:
+
+- `lmml-tui` builds the installed `lmml` binary.
+- `lmml-detect`, `lmml-build`, `lmml-models`, `lmml-server`,
+  `lmml-compat`, and `lmml-state` own the runtime subsystems.
+- Current CLI surface is `lmml`, `lmml doctor`, and `lmml smoke`.
+- `--model`, `--port`, `--build`, and `--diagnose` were historical
+  root-package plan items and are not current v2 CLI flags.
+- v0.1.0 release readiness means the tested LAN install flow works for the
+  validated host/target: packaged tarball, `SHA256SUMS` integrity check,
+  `lmml doctor` hard-prereq gate, `lmml smoke`, and installed
+  `lmml-uninstall`.
+- LAN HTTP checksums are integrity-only. They are not authenticity protection
+  until signed checksums or HTTPS-hosted releases exist.
+- ROCm/HIP remains a v2 production gap unless the current crates implement and
+  test the complete probe, build, telemetry, settings, and server flow.
+- Vulkan backend support is current v2 functionality: `lmml-detect` probes
+  `vulkaninfo --summary`, `lmml-build` emits `-DGGML_VULKAN=ON`, and TUI state
+  persists/selects the backend. Vulkan-specific GPU heap polling for VRAM-style
+  telemetry remains open.
+
+### Historical Phase 1 — MVP (Superseded Root-Package Snapshot)
+
+The table below is retained for project memory. It describes earlier
+root-package progress and may not match the current v2 crate workspace. Do not
+use it as a release-readiness source without checking the current crates.
 
 | Area | Status |
 |------|--------|
@@ -189,11 +216,11 @@ Where `Action` is an enum of things the app core should do (navigate, spawn task
 | 🟢 Server performance + live NVIDIA VRAM + binary symlinks + model card | Server screen has a performance panel; Dashboard polls CUDA VRAM via `nvidia-smi`; successful builds link binaries to `~/.lmml/build/bin`; Models details render through `model_card` | ✅ Done (session 5) |
 | 🟢 Restart confirmation + richer metrics + config hot-reload + download retry UX + toolchain check | Server model swap can restart after confirmation; metrics fall back to `/metrics`; config reload runs on ticks; interrupted downloads explain retry/resume; missing rustfmt/clippy warnings appear in build log | ✅ Done (session 6) |
 | 🟢 Metrics persistence | Server health samples are capped and persisted to `~/.lmml/metrics.toml` for later history charts/sparklines | ✅ Done (session 7) |
-| 🟢 Multi-GPU + backend selection | CUDA probe parses all NVIDIA GPUs, CMake receives deduplicated architecture flags, and Settings can force auto/cpu/cuda/rocm/vulkan/metal builds | ✅ Done (session 8) |
+| 🟢 Multi-GPU + backend selection | Historical: CUDA probe parses all NVIDIA GPUs, CMake receives deduplicated architecture flags, and Settings can force auto/cpu/cuda/rocm/vulkan/metal builds. Current v2 now proves Vulkan backend selection/build mapping in crate tests; ROCm remains a v2 gap. | ⚠️ Superseded |
 | 🟢 Toast notifications | Async completions and status transitions now show a short non-blocking toast instead of relying only on logs/modals | ✅ Done (session 9) |
-| 🟢 CLI startup flags | `--model`, `--port`, and `--build` can seed the initial TUI state for scripted launches | ✅ Done (session 10) |
+| 🟢 CLI startup flags | Historical root-package item. Current v2 CLI exposes `lmml`, `lmml doctor`, and `lmml smoke`, not `--model`, `--port`, or `--build`. | ⚠️ Superseded |
 | 🟢 Advanced model filtering | Model search supports plain terms plus `quant:`, `type:`, `size>`, and `size<` filters | ✅ Done (session 11) |
-| 🟢 Diagnostic dump | `--diagnose` writes `~/.lmml/diagnostic.txt` with version, rustc, config path, config, and state | ✅ Done (session 12) |
+| 🟢 Diagnostic dump | Historical root-package item. Current v2 has `doctor` and `smoke`; no `--diagnose` flag. | ⚠️ Superseded |
 
 ### Remaining Low-Priority Items
 
@@ -236,22 +263,24 @@ cargo watch -x run
 
 | File | Purpose |
 |------|---------|
-| `docs/plan.md` | Full architecture plan, screen blueprints, phased delivery |
+| `CLAUDE.md` | Current v2 architecture and implementation contract |
+| `docs/lmml-plan.md` | Current lmml v2 design plan |
 | `docs/learnings.md` | This file — development learnings and project state |
 | `AGENTS.md` | Development guide for AI agents (code style, patterns, contracts) |
-| `src/main.rs` | Entry point, panic hooks, terminal init, probe/model auto-start |
-| `src/app/mod.rs` | App struct, Screen/Message enums, update dispatch, drain_channels |
-| `src/app/config.rs` | Config/state TOML persistence (`~/.lmml/`) |
-| `src/app/state.rs` | AppState — all runtime state for the TUI |
-| `src/app/errors.rs` | Error types with Display impls |
-| `src/tui/mod.rs` | Tui struct, terminal init/restore, event loop |
-| `src/tui/{screen}.rs` | Screen-specific render + handle_event |
-| `src/tui/widgets/*.rs` | Reusable UI components |
-| `src/tui/helpers.rs` | Shared styles, centering, truncation |
-| `src/probe/*.rs` | Hardware detection engine (7 modules) |
-| `src/build/*.rs` | Build pipeline (clone + compile) |
-| `src/models/*.rs` | Model management (scan + download) |
-| `src/server/*.rs` | Server lifecycle (process + config) |
+| `crates/lmml-tui/src/main.rs` | Binary entry point, CLI subcommands, terminal init |
+| `crates/lmml-tui/src/app.rs` | TUI state, actions, key handling, persistent-state coordination |
+| `crates/lmml-tui/src/event_loop.rs` | Terminal/background task multiplexing |
+| `crates/lmml-tui/src/tabs/` | Ratatui tab rendering and snapshots |
+| `crates/lmml-detect/src/lib.rs` | Hardware and hard-prerequisite detection |
+| `crates/lmml-build/src/lib.rs` | llama.cpp source/build orchestration |
+| `crates/lmml-models/src/lib.rs` | GGUF registry, scanning, metadata, download |
+| `crates/lmml-server/src/lib.rs` | llama-server lifecycle |
+| `crates/lmml-compat/src/lib.rs` | llama-server capability probing and argv translation |
+| `crates/lmml-state/src/lib.rs` | Persistent state under XDG config/data directories |
+| `scripts/package-release.sh` | Release artifact packaging and checksums |
+| `scripts/install.sh` | LAN/public installer |
+| `scripts/uninstall.sh` | Installed uninstaller source |
+| `tests/integration/clean_install.sh` | HTTP installer smoke test with isolated HOME |
 
 ---
 
@@ -482,6 +511,11 @@ The tarball includes `scripts/uninstall.sh`, but users should not need the sourc
 
 `lmml doctor` exits `1` only when hard prerequisites fail: compiler/C++17, cmake, git, or disk space. CUDA/GPU absence is a soft warning because CPU-only mode is valid. This keeps `curl | sh` installs successful on CPU-only machines while still surfacing the acceleration gap clearly.
 
+Update after installer hardening: `scripts/install.sh` installs the binary, then
+runs the installed `lmml doctor` and exits non-zero if doctor reports hard
+prereq failures. CPU-only systems still pass when the hard prerequisites are
+present.
+
 ### Smoke Mode Is for Headless Install Validation
 
 The TUI cannot be launched safely from a non-interactive clean-install script. `lmml smoke` loads/creates state, runs the same detection path, checks hard prerequisites, prints a short success line, and exits without entering alternate-screen terminal mode.
@@ -489,7 +523,7 @@ The TUI cannot be launched safely from a non-interactive clean-install script. `
 Clean-machine validation flow:
 
 ```sh
-install.sh
+curl -fsSL http://host:8000/install.sh | BASE_URL=http://host:8000 sh
 lmml doctor
 timeout 5s lmml smoke
 lmml-uninstall
@@ -507,6 +541,21 @@ PATH=$HOME/.local/bin:$PATH
 ```
 
 This proves the default install path and state creation while leaving the real home directory untouched.
+
+The current clean-install script fetches `install.sh` from `BASE_URL` over HTTP
+and invokes the installed `lmml-uninstall`, so it tests the documented LAN path
+rather than a checkout-local installer script.
+
+### Reproducible Packaging Baseline
+
+`scripts/package-release.sh` now requires GNU tar and normalizes release
+archives with sorted entries, numeric owner/group `0:0`, fixed mtimes from
+`SOURCE_DATE_EPOCH`, normalized file modes, `gzip -n`, sorted `SHA256SUMS`, and
+`RELEASE-METADATA` containing version, target, git commit, rustc version, and
+source epoch.
+
+With the same `SOURCE_DATE_EPOCH` and build inputs, two package runs should
+produce the same tarball checksum.
 
 ### Localhost Integration Tests Need Sandbox Escalation
 

@@ -474,6 +474,7 @@ fn backend_name(backend: &lmml_detect::BuildBackend) -> String {
     match backend {
         lmml_detect::BuildBackend::Cuda { .. } => "Cuda",
         lmml_detect::BuildBackend::Metal => "Metal",
+        lmml_detect::BuildBackend::Vulkan => "Vulkan",
         lmml_detect::BuildBackend::CpuAvx2 => "CpuAvx2",
         lmml_detect::BuildBackend::CpuAvx => "CpuAvx",
         lmml_detect::BuildBackend::CpuFallback => "CpuFallback",
@@ -487,6 +488,7 @@ fn backend_archs(backend: &lmml_detect::BuildBackend) -> Vec<String> {
             archs.iter().map(|arch| (*arch).to_string()).collect()
         }
         lmml_detect::BuildBackend::Metal
+        | lmml_detect::BuildBackend::Vulkan
         | lmml_detect::BuildBackend::CpuAvx2
         | lmml_detect::BuildBackend::CpuAvx
         | lmml_detect::BuildBackend::CpuFallback => Vec::new(),

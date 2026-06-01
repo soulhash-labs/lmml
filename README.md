@@ -3,6 +3,10 @@
 lmml is a Rust terminal UI for managing llama.cpp locally: detect hardware,
 build llama.cpp, manage GGUF models, and run the inference server.
 
+Current v0.1.0 release scope is the tested Linux x86_64 LAN install flow. Other
+target tarballs should be built and validated on matching builders before they
+are advertised as release-ready.
+
 ## Install
 
 ### One-line install (Linux / macOS)

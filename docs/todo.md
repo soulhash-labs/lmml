@@ -4,7 +4,47 @@
 
 ---
 
-## Phase 1 — MVP (Complete)
+## Current v2 Status
+
+The active implementation is the Rust workspace under `crates/`, with the
+user-facing binary built from package `lmml-tui` and installed as `lmml`.
+
+Current CLI surface:
+
+- `lmml` launches the TUI.
+- `lmml doctor` runs hard-prerequisite preflight checks and exits non-zero when
+  compiler/C++17, CMake, Git, or disk prerequisites fail.
+- `lmml smoke` runs the headless clean-install startup check.
+
+Not current v2 CLI surface: `--model`, `--port`, `--build`, and `--diagnose`.
+Those entries below are historical root-package plan items and should not be
+used in release notes.
+
+Current production-readiness claim for v0.1.0: LAN install works on tested
+Linux x86_64 host/target with the generated `dist/` artifacts, SHA256 integrity
+checks, hard-prereq doctor gate, installed uninstaller, and clean-install smoke
+test. Broader platform readiness still requires target-specific builder or CI
+validation.
+
+ROCm/HIP is not production-ready in v2. Treat any older completed ROCm rows as
+superseded until `lmml-detect`, `lmml-build`, telemetry, settings, and tests
+prove the full path.
+
+Vulkan backend selection/build support is current v2 functionality: the detect
+crate probes `vulkaninfo --summary`, the build crate emits `-DGGML_VULKAN=ON`,
+and TUI/backend persistence tests cover the mapping. Vulkan-specific GPU heap
+polling for VRAM-style telemetry remains open.
+
+---
+
+## Historical Root-Package Roadmap
+
+The sections below preserve earlier planning context. Some checked items refer
+to the pre-v2/root-package architecture and have been superseded by the current
+crate workspace. Prefer the “Current v2 Status” section above when making
+release claims.
+
+## Phase 1 — MVP (Historical)
 
 - [x] Project scaffold (Cargo.toml, module structure, AGENTS.md)
 - [x] TUI infrastructure (terminal init/restore, event loop, screen dispatch)
@@ -56,7 +96,7 @@
 - [x] Multi-GPU CUDA detection and architecture flags — parses all NVIDIA GPUs and emits `CMAKE_CUDA_ARCHITECTURES`
 - [x] Backend selection UI in settings — auto/cpu/cuda/rocm/vulkan/metal backend override
 - [x] Toast notifications for async events (download complete, build done, server status, config reload)
-- [x] CLI flags (`--model`, `--port`, `--build`, `--diagnose`)
+- [x] CLI flags (`--model`, `--port`, `--build`, `--diagnose`) — historical root-package item; not present in current v2 binary
 - [x] Advanced model filtering (size ranges, quantization facets)
 
 ---
@@ -74,11 +114,11 @@
 
 ---
 
-## Phase 2 — GPU Backend Expansion (In Progress)
+## Phase 2 — GPU Backend Expansion (Historical / Partially Superseded)
 
 - [x] Apple Metal support (probe + build flags)
-- [x] AMD ROCm support (probe + build flags)
-- [x] Vulkan backend support (probe + build flags)
+- [x] AMD ROCm support (probe + build flags) — historical entry; v2 ROCm production support remains open
+- [x] Vulkan backend support (probe + build flags) — current v2 support is covered by `lmml-detect`, `lmml-build`, and `lmml-tui` tests
 - [x] Multi-GPU detection and flag generation
 - [x] BLAS backend detection (OpenBLAS baseline)
 - [x] Cross-compilation awareness (CUDA arch flags per GPU gen)
@@ -103,8 +143,8 @@
 - [x] Advanced model filtering (size ranges, quantization facets)
 - [ ] Edit model path / rename in TUI
 - [ ] Config presets (gaming, workstation, server)
-- [x] CLI flags (`--model`, `--port`, `--build`)
-- [x] `~/.lmml/` diagnostic dump for issue reporting
+- [x] CLI flags (`--model`, `--port`, `--build`) — historical root-package item; current v2 exposes subcommands, not these flags
+- [x] `~/.lmml/` diagnostic dump for issue reporting — historical root-package item; current v2 exposes `doctor` and `smoke`
 - [ ] Crash recovery: persist and restore scrollback
 - [x] Developer toolchain check for missing `rustfmt`/`clippy` components
 
@@ -121,15 +161,17 @@
 - [x] `lmml smoke` subcommand supports headless clean-install validation
 - [x] `scripts/package-release.sh` builds a versioned tarball from `crates/lmml-tui/Cargo.toml`
 - [x] `scripts/package-release.sh` writes `dist/latest`, `dist/SHA256SUMS`, full target-triple tarballs, and LAN-friendly alias tarballs
-- [x] `scripts/install.sh` detects Linux/macOS x86_64/aarch64 targets, checks hard prerequisites, downloads by `BASE_URL`, verifies SHA256, installs `lmml`, installs `lmml-uninstall`, and runs `lmml doctor`
+- [x] `scripts/install.sh` detects Linux/macOS x86_64/aarch64 targets, checks hard prerequisites, downloads by `BASE_URL`, verifies SHA256, installs `lmml`, installs `lmml-uninstall`, runs `lmml doctor`, and exits non-zero if doctor reports hard prerequisite failures
 - [x] `scripts/uninstall.sh` removes `lmml` and `lmml-uninstall`, then optionally removes config/data directories
 - [x] `Makefile` release helpers added (`release`, `dist-serve`, `doctor`, `clean-release`)
 - [x] `README.md` updated with one-line install, LAN install, doctor, launch, and uninstall paths
-- [x] `tests/integration/clean_install.sh` validates install → doctor → smoke → uninstall with an isolated temporary HOME
+- [x] `tests/integration/clean_install.sh` validates documented HTTP install → doctor → smoke → installed `lmml-uninstall` with an isolated temporary HOME
 - [x] LAN-style local install simulation passed from `dist/` over `python3 -m http.server`
+- [x] `scripts/package-release.sh` uses sorted GNU tar entries, normalized owner/group/modes/mtimes, `gzip -n`, `RELEASE-METADATA`, and sorted `SHA256SUMS` for repeatable v0.1.0 artifacts when `SOURCE_DATE_EPOCH` is fixed
 
 ### Release Packaging Follow-ups
 
 - [ ] Build and publish the remaining cross-target tarballs on matching builders or CI runners: `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`, `aarch64-apple-darwin`
 - [ ] Replace README placeholder release URL (`https://your-lan-or-github/install.sh`) with the real public release URL when hosting is chosen
 - [ ] Run `tests/integration/clean_install.sh` on a clean Ubuntu 24.04 x86_64 VM with CUDA drivers before tagging each release
+- [ ] Add signed `SHA256SUMS` verification or HTTPS-hosted public releases before claiming checksum authenticity against tampering

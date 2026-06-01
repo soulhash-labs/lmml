@@ -254,6 +254,10 @@ fn profile() -> lmml_detect::SystemProfile {
             available: false,
             displays: Vec::new(),
         },
+        vulkan: lmml_detect::VulkanSupport {
+            available: false,
+            devices: Vec::new(),
+        },
         cpu: CpuFeatures {
             model: "test".to_string(),
             cores: 2,

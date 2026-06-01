@@ -229,7 +229,7 @@ mod tests {
     use lmml_compat::LlamaBinaryCapabilities;
     use lmml_detect::{
         CmakeInfo, CompilerInfo, CpuFeatures, CudaCompatibility, DiskInfo, GitInfo, GpuInfo,
-        MemInfo, MetalSupport, SystemProfile,
+        MemInfo, MetalSupport, SystemProfile, VulkanSupport,
     };
     use lmml_models::{DownloadProgress, HfModelResult, ModelEntry};
     use lmml_server::ServerStatus;
@@ -488,6 +488,10 @@ mod tests {
                 available: false,
                 displays: Vec::new(),
             },
+            vulkan: VulkanSupport {
+                available: false,
+                devices: Vec::new(),
+            },
             cpu: CpuFeatures {
                 model: "Ryzen".to_string(),
                 cores: 8,
@@ -524,6 +528,10 @@ mod tests {
             metal: MetalSupport {
                 available: false,
                 displays: Vec::new(),
+            },
+            vulkan: VulkanSupport {
+                available: false,
+                devices: Vec::new(),
             },
             cpu: CpuFeatures {
                 model: "generic".to_string(),

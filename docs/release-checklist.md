@@ -3,6 +3,11 @@
 Before tagging a release, this checklist must pass on a clean Ubuntu 24.04
 x86_64 VM with CUDA drivers installed.
 
+Passing this checklist supports a narrow v0.1.0 claim: LAN install works on the
+tested host/target. Do not broaden that into “all platforms production-ready”
+until each target tarball is built and validated on a matching machine or CI
+runner.
+
 ## Required Gates
 
 ```sh

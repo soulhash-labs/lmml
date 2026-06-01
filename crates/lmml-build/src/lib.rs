@@ -223,6 +223,7 @@ pub fn cmake_configure_args(config: &BuildConfig) -> Vec<String> {
             }
         }
         BuildBackend::Metal => args.push("-DGGML_METAL=ON".to_string()),
+        BuildBackend::Vulkan => args.push("-DGGML_VULKAN=ON".to_string()),
         BuildBackend::CpuAvx2 => args.push("-DGGML_AVX2=ON".to_string()),
         BuildBackend::CpuAvx => args.push("-DGGML_AVX=ON".to_string()),
         BuildBackend::CpuFallback => {}
@@ -725,6 +726,7 @@ fn backend_archs(backend: &BuildBackend) -> Vec<String> {
     match backend {
         BuildBackend::Cuda { archs } => archs.iter().map(|arch| (*arch).to_string()).collect(),
         BuildBackend::Metal
+        | BuildBackend::Vulkan
         | BuildBackend::CpuAvx2
         | BuildBackend::CpuAvx
         | BuildBackend::CpuFallback => Vec::new(),
@@ -807,6 +809,7 @@ mod tests {
     fn assembles_backend_specific_flags() {
         let cases = [
             (BuildBackend::Metal, Some("-DGGML_METAL=ON")),
+            (BuildBackend::Vulkan, Some("-DGGML_VULKAN=ON")),
             (BuildBackend::CpuAvx2, Some("-DGGML_AVX2=ON")),
             (BuildBackend::CpuAvx, Some("-DGGML_AVX=ON")),
             (BuildBackend::CpuFallback, None),
@@ -820,6 +823,7 @@ mod tests {
             } else {
                 assert!(!args.iter().any(|arg| arg.starts_with("-DGGML_AVX")));
                 assert!(!args.iter().any(|arg| arg == "-DGGML_METAL=ON"));
+                assert!(!args.iter().any(|arg| arg == "-DGGML_VULKAN=ON"));
             }
         }
     }

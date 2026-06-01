@@ -1,9 +1,9 @@
 //! Hardware and prerequisite detection for lmml.
 //!
 //! This crate probes the local machine for the compiler, build tools, CUDA,
-//! GPU architecture, CPU features, RAM, and disk space needed to build and run
-//! llama.cpp. The main entry point is [`SystemProfile::detect`], which runs the
-//! probes concurrently and returns a complete [`SystemProfile`].
+//! Vulkan, GPU architecture, CPU features, RAM, and disk space needed to build
+//! and run llama.cpp. The main entry point is [`SystemProfile::detect`], which
+//! runs the probes concurrently and returns a complete [`SystemProfile`].
 
 use std::collections::BTreeSet;
 use std::ffi::CString;
@@ -117,6 +117,8 @@ pub struct SystemProfile {
     pub sccache: Option<PathBuf>,
     /// Metal support on macOS.
     pub metal: MetalSupport,
+    /// Vulkan loader/device support.
+    pub vulkan: VulkanSupport,
     /// CPU model, thread count, and instruction features.
     pub cpu: CpuFeatures,
     /// Available system memory.
@@ -146,6 +148,8 @@ impl SystemProfile {
             | CudaCompatibility::NvccMissing => {
                 if self.metal.available {
                     BuildBackend::Metal
+                } else if self.vulkan.available {
+                    BuildBackend::Vulkan
                 } else if self.cpu.avx2 {
                     BuildBackend::CpuAvx2
                 } else if self.cpu.avx {
@@ -249,12 +253,13 @@ where
     let gpus = detect_gpus(runner);
     let sccache = detect_sccache(runner);
     let metal = detect_metal(runner);
+    let vulkan = detect_vulkan(runner);
     let cpu = detect_cpu_features(runner);
     let memory = detect_memory();
     let disk = detect_disk(disk_path);
 
-    let (compiler, cmake, git, nvcc, gpus, sccache, metal, cpu, memory, disk) =
-        tokio::join!(compiler, cmake, git, nvcc, gpus, sccache, metal, cpu, memory, disk);
+    let (compiler, cmake, git, nvcc, gpus, sccache, metal, vulkan, cpu, memory, disk) =
+        tokio::join!(compiler, cmake, git, nvcc, gpus, sccache, metal, vulkan, cpu, memory, disk);
 
     let cuda = cuda_compatibility(nvcc.as_ref().map(|info| &info.version), &gpus);
 
@@ -266,6 +271,7 @@ where
         gpus,
         sccache,
         metal,
+        vulkan,
         cpu,
         memory,
         disk,
@@ -385,6 +391,15 @@ pub struct MetalSupport {
     pub displays: Vec<String>,
 }
 
+/// Vulkan loader and device capability.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VulkanSupport {
+    /// Whether `vulkaninfo` reported at least one Vulkan-capable device.
+    pub available: bool,
+    /// Summary or device lines captured from `vulkaninfo`.
+    pub devices: Vec<String>,
+}
+
 /// CPU model, topology, and instruction features relevant to llama.cpp.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CpuFeatures {
@@ -471,6 +486,8 @@ pub enum BuildBackend {
     },
     /// Apple Metal backend.
     Metal,
+    /// Vulkan backend.
+    Vulkan,
     /// CPU backend with AVX2 acceleration.
     CpuAvx2,
     /// CPU backend with AVX acceleration.
@@ -717,6 +734,36 @@ where
     MetalSupport {
         available: output.success && output.stdout.to_lowercase().contains("metal"),
         displays,
+    }
+}
+
+async fn detect_vulkan<R>(runner: &R) -> VulkanSupport
+where
+    R: CommandRunner + Sync,
+{
+    let output = runner.run("vulkaninfo", &["--summary"], None).await;
+    if !output.success {
+        return VulkanSupport {
+            available: false,
+            devices: Vec::new(),
+        };
+    }
+    let devices = output
+        .stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            line.starts_with("GPU")
+                || line.starts_with("deviceName")
+                || line.starts_with("driverName")
+                || line.starts_with("apiVersion")
+        })
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    VulkanSupport {
+        available: output.stdout.to_lowercase().contains("vulkan")
+            || devices.iter().any(|line| line.contains("GPU")),
+        devices,
     }
 }
 
@@ -1126,7 +1173,7 @@ mod tests {
     }
 
     #[test]
-    fn recommended_backend_prefers_cuda_then_metal_then_cpu() {
+    fn recommended_backend_prefers_cuda_then_metal_then_vulkan_then_cpu() {
         let mut profile = minimal_profile();
         profile.cuda = CudaCompatibility::Compatible {
             archs: vec!["sm_86"],
@@ -1143,6 +1190,10 @@ mod tests {
         assert_eq!(profile.recommended_backend(), BuildBackend::Metal);
 
         profile.metal.available = false;
+        profile.vulkan.available = true;
+        assert_eq!(profile.recommended_backend(), BuildBackend::Vulkan);
+
+        profile.vulkan.available = false;
         profile.cpu.avx2 = true;
         assert_eq!(profile.recommended_backend(), BuildBackend::CpuAvx2);
 
@@ -1152,6 +1203,25 @@ mod tests {
 
         profile.cpu.avx = false;
         assert_eq!(profile.recommended_backend(), BuildBackend::CpuFallback);
+    }
+
+    #[tokio::test]
+    async fn vulkan_probe_detects_summary_devices() {
+        let runner = FakeRunner::default().with(
+            "vulkaninfo",
+            &["--summary"],
+            FakeRunner::success(
+                "Vulkan Instance Version: 1.3.280\nGPU0:\n\tdeviceName = Example GPU\n",
+            ),
+        );
+
+        let support = detect_vulkan(&runner).await;
+
+        assert!(support.available);
+        assert_eq!(
+            support.devices,
+            vec!["GPU0:".to_string(), "deviceName = Example GPU".to_string()]
+        );
     }
 
     #[test]
@@ -1339,6 +1409,10 @@ flags\t\t: fpu sse4_1 sse4_2 avx avx2 avx512f
             metal: MetalSupport {
                 available: false,
                 displays: Vec::new(),
+            },
+            vulkan: VulkanSupport {
+                available: false,
+                devices: Vec::new(),
             },
             cpu: CpuFeatures {
                 model: "CPU".to_string(),

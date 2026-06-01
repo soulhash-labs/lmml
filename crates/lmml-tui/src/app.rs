@@ -1256,6 +1256,7 @@ fn backend_from_state(backend: &str, archs: &[String]) -> BuildBackend {
                 .collect(),
         },
         "Metal" => BuildBackend::Metal,
+        "Vulkan" => BuildBackend::Vulkan,
         "CpuAvx2" => BuildBackend::CpuAvx2,
         "CpuAvx" => BuildBackend::CpuAvx,
         "CpuFallback" => BuildBackend::CpuFallback,
@@ -1267,6 +1268,7 @@ fn backend_name(backend: &BuildBackend) -> String {
     match backend {
         BuildBackend::Cuda { .. } => "Cuda",
         BuildBackend::Metal => "Metal",
+        BuildBackend::Vulkan => "Vulkan",
         BuildBackend::CpuAvx2 => "CpuAvx2",
         BuildBackend::CpuAvx => "CpuAvx",
         BuildBackend::CpuFallback => "CpuFallback",
@@ -1278,6 +1280,7 @@ fn backend_archs(backend: &BuildBackend) -> Vec<String> {
     match backend {
         BuildBackend::Cuda { archs } => archs.iter().map(|arch| (*arch).to_string()).collect(),
         BuildBackend::Metal
+        | BuildBackend::Vulkan
         | BuildBackend::CpuAvx2
         | BuildBackend::CpuAvx
         | BuildBackend::CpuFallback => Vec::new(),
@@ -1287,7 +1290,8 @@ fn backend_archs(backend: &BuildBackend) -> Vec<String> {
 fn next_backend(current: BuildBackend) -> BuildBackend {
     match current {
         BuildBackend::Cuda { .. } => BuildBackend::Metal,
-        BuildBackend::Metal => BuildBackend::CpuAvx2,
+        BuildBackend::Metal => BuildBackend::Vulkan,
+        BuildBackend::Vulkan => BuildBackend::CpuAvx2,
         BuildBackend::CpuAvx2 => BuildBackend::CpuAvx,
         BuildBackend::CpuAvx => BuildBackend::CpuFallback,
         BuildBackend::CpuFallback => BuildBackend::Cuda { archs: Vec::new() },
@@ -1515,6 +1519,10 @@ mod tests {
                 available: false,
                 displays: Vec::new(),
             },
+            vulkan: lmml_detect::VulkanSupport {
+                available: false,
+                devices: Vec::new(),
+            },
             cpu: lmml_detect::CpuFeatures {
                 model: String::new(),
                 cores: 1,
@@ -1672,6 +1680,10 @@ mod tests {
             metal: lmml_detect::MetalSupport {
                 available: false,
                 displays: Vec::new(),
+            },
+            vulkan: lmml_detect::VulkanSupport {
+                available: false,
+                devices: Vec::new(),
             },
             cpu: lmml_detect::CpuFeatures {
                 model: String::new(),
@@ -1907,6 +1919,10 @@ mod tests {
             metal: lmml_detect::MetalSupport {
                 available: false,
                 displays: Vec::new(),
+            },
+            vulkan: lmml_detect::VulkanSupport {
+                available: false,
+                devices: Vec::new(),
             },
             cpu: lmml_detect::CpuFeatures {
                 model: String::new(),

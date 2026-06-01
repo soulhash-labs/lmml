@@ -2,6 +2,7 @@
 
 use lmml_detect::{
     CmakeInfo, CompilerInfo, CudaCompatibility, GitInfo, GpuInfo, MissingPrerequisite,
+    VulkanSupport,
 };
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -59,6 +60,9 @@ fn system_lines(app: &App) -> Vec<Line<'static>> {
         git_line(profile.git.as_ref()),
         cuda_line(&profile.cuda),
     ];
+    if let Some(line) = vulkan_line(&profile.vulkan) {
+        lines.push(line);
+    }
     lines.extend(gpu_lines(&profile.gpus));
     lines.push(badge_line(
         if profile.sccache.is_some() {
@@ -194,6 +198,19 @@ fn cuda_line(cuda: &CudaCompatibility) -> Line<'static> {
     }
 }
 
+fn vulkan_line(vulkan: &VulkanSupport) -> Option<Line<'static>> {
+    if vulkan.available {
+        let devices = if vulkan.devices.is_empty() {
+            "available".to_string()
+        } else {
+            vulkan.devices.join(", ")
+        };
+        Some(badge_line(Badge::Ok, format!("Vulkan: {devices}")))
+    } else {
+        None
+    }
+}
+
 fn gpu_lines(gpus: &[GpuInfo]) -> Vec<Line<'static>> {
     if gpus.is_empty() {
         return vec![badge_line(Badge::Warn, "GPU: none detected".to_string())];
@@ -249,7 +266,7 @@ mod tests {
 
     use lmml_detect::{
         BuildBackend, CmakeInfo, CompilerInfo, CpuFeatures, CudaVersion, DiskInfo, GitInfo,
-        MemInfo, MetalSupport, SystemProfile,
+        MemInfo, MetalSupport, SystemProfile, VulkanSupport,
     };
 
     use super::*;
@@ -287,6 +304,10 @@ mod tests {
             metal: MetalSupport {
                 available: false,
                 displays: Vec::new(),
+            },
+            vulkan: VulkanSupport {
+                available: false,
+                devices: Vec::new(),
             },
             cpu: CpuFeatures {
                 model: "CPU".to_string(),
@@ -334,6 +355,10 @@ mod tests {
             metal: MetalSupport {
                 available: false,
                 displays: Vec::new(),
+            },
+            vulkan: VulkanSupport {
+                available: false,
+                devices: Vec::new(),
             },
             cpu: CpuFeatures {
                 model: "CPU".to_string(),
