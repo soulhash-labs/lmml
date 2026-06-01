@@ -243,6 +243,15 @@ impl App {
         }
     }
 
+    /// User-visible value for a Settings tab field, masking secrets.
+    pub fn settings_field_display_value(&self, field: SettingsField) -> String {
+        match field {
+            SettingsField::ApiKey if self.state.server.api_key.is_empty() => String::new(),
+            SettingsField::ApiKey => "********".to_string(),
+            _ => self.settings_field_value(field),
+        }
+    }
+
     fn next_settings_field(&mut self) {
         let next = (self.selected_settings_field.index() + 1) % SettingsField::ALL.len();
         self.selected_settings_field = SettingsField::ALL[next];
@@ -261,10 +270,17 @@ impl App {
     fn toggle_settings_field(&mut self) {
         match self.selected_settings_field {
             SettingsField::FlashAttn => {
-                self.state.server.flash_attn = !self.state.server.flash_attn
+                self.state.server.flash_attn = !self.state.server.flash_attn;
+                self.save_state_after("Settings updated");
             }
-            SettingsField::Mlock => self.state.server.mlock = !self.state.server.mlock,
-            SettingsField::Jinja => self.state.server.jinja = !self.state.server.jinja,
+            SettingsField::Mlock => {
+                self.state.server.mlock = !self.state.server.mlock;
+                self.save_state_after("Settings updated");
+            }
+            SettingsField::Jinja => {
+                self.state.server.jinja = !self.state.server.jinja;
+                self.save_state_after("Settings updated");
+            }
             SettingsField::Host
             | SettingsField::Port
             | SettingsField::CtxSize
@@ -279,67 +295,253 @@ impl App {
     }
 
     fn apply_settings_edit(&mut self) {
-        let Some(value) = self.settings_edit_buffer.take() else {
+        let Some(value) = self.settings_edit_buffer.clone() else {
             return;
         };
-        match self.selected_settings_field {
-            SettingsField::Host => self.state.server.host = value,
-            SettingsField::Port => self.apply_parsed(value.parse::<u16>(), |server, value| {
-                server.port = value;
-            }),
-            SettingsField::CtxSize => self.apply_parsed(value.parse::<u32>(), |server, value| {
-                server.ctx_size = value;
-            }),
-            SettingsField::NGpuLayers => {
-                self.apply_parsed(value.parse::<i32>(), |server, value| {
-                    server.n_gpu_layers = value;
-                })
+        match validate_setting(self.selected_settings_field, &value) {
+            Ok(validated) => {
+                self.settings_edit_buffer = None;
+                self.settings_validation_error = None;
+                self.apply_validated_setting(validated);
+                self.save_state_after("Settings updated");
             }
-            SettingsField::BatchSize => self.apply_parsed(value.parse::<u32>(), |server, value| {
-                server.batch_size = value;
-            }),
-            SettingsField::UBatchSize => {
-                self.apply_parsed(value.parse::<u32>(), |server, value| {
-                    server.ubatch_size = value;
-                })
-            }
-            SettingsField::Threads => self.apply_parsed(value.parse::<usize>(), |server, value| {
-                server.threads = value;
-            }),
-            SettingsField::FlashAttn => {
-                self.apply_parsed(value.parse::<bool>(), |server, value| {
-                    server.flash_attn = value;
-                });
-            }
-            SettingsField::Mlock => {
-                self.apply_parsed(value.parse::<bool>(), |server, value| {
-                    server.mlock = value;
-                });
-            }
-            SettingsField::ApiKey => self.state.server.api_key = value,
-            SettingsField::Jinja => {
-                self.apply_parsed(value.parse::<bool>(), |server, value| {
-                    server.jinja = value;
-                });
-            }
-            SettingsField::ChatTemplate => self.state.server.chat_template = value,
-            SettingsField::ExtraArgs => {
-                self.state.server.extra_args =
-                    value.split_whitespace().map(ToOwned::to_owned).collect();
+            Err(error) => {
+                self.settings_validation_error = Some(error);
+                self.status_message = "Invalid settings value".to_string();
             }
         }
     }
 
-    fn apply_parsed<T, E>(
-        &mut self,
-        parsed: Result<T, E>,
-        apply: impl FnOnce(&mut lmml_state::ServerConfig, T),
-    ) {
-        match parsed {
-            Ok(value) => apply(&mut self.state.server, value),
-            Err(_error) => {
-                self.status_message = "Invalid settings value".to_string();
-            }
+    fn apply_validated_setting(&mut self, setting: ValidatedSetting) {
+        match setting {
+            ValidatedSetting::Host(value) => self.state.server.host = value,
+            ValidatedSetting::Port(value) => self.state.server.port = value,
+            ValidatedSetting::CtxSize(value) => self.state.server.ctx_size = value,
+            ValidatedSetting::NGpuLayers(value) => self.state.server.n_gpu_layers = value,
+            ValidatedSetting::BatchSize(value) => self.state.server.batch_size = value,
+            ValidatedSetting::UBatchSize(value) => self.state.server.ubatch_size = value,
+            ValidatedSetting::Threads(value) => self.state.server.threads = value,
+            ValidatedSetting::FlashAttn(value) => self.state.server.flash_attn = value,
+            ValidatedSetting::Mlock(value) => self.state.server.mlock = value,
+            ValidatedSetting::ApiKey(value) => self.state.server.api_key = value,
+            ValidatedSetting::Jinja(value) => self.state.server.jinja = value,
+            ValidatedSetting::ChatTemplate(value) => self.state.server.chat_template = value,
+            ValidatedSetting::ExtraArgs(value) => self.state.server.extra_args = value,
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ValidatedSetting {
+    Host(String),
+    Port(u16),
+    CtxSize(u32),
+    NGpuLayers(i32),
+    BatchSize(u32),
+    UBatchSize(u32),
+    Threads(usize),
+    FlashAttn(bool),
+    Mlock(bool),
+    ApiKey(String),
+    Jinja(bool),
+    ChatTemplate(String),
+    ExtraArgs(Vec<String>),
+}
+
+fn validate_setting(field: SettingsField, value: &str) -> Result<ValidatedSetting, String> {
+    match field {
+        SettingsField::Host => validate_host(value).map(ValidatedSetting::Host),
+        SettingsField::Port => {
+            parse_u16_range(value, 1, u16::MAX, "port").map(ValidatedSetting::Port)
+        }
+        SettingsField::CtxSize => {
+            parse_u32_range(value, 1, 1_048_576, "ctx_size").map(ValidatedSetting::CtxSize)
+        }
+        SettingsField::NGpuLayers => {
+            parse_i32_range(value, -1, 999, "n_gpu_layers").map(ValidatedSetting::NGpuLayers)
+        }
+        SettingsField::BatchSize => {
+            parse_u32_range(value, 1, 65_536, "batch_size").map(ValidatedSetting::BatchSize)
+        }
+        SettingsField::UBatchSize => {
+            parse_u32_range(value, 1, 65_536, "ubatch_size").map(ValidatedSetting::UBatchSize)
+        }
+        SettingsField::Threads => {
+            parse_usize_range(value, 1, 1024, "threads").map(ValidatedSetting::Threads)
+        }
+        SettingsField::FlashAttn => {
+            parse_bool(value, "flash_attn").map(ValidatedSetting::FlashAttn)
+        }
+        SettingsField::Mlock => parse_bool(value, "mlock").map(ValidatedSetting::Mlock),
+        SettingsField::ApiKey => Ok(ValidatedSetting::ApiKey(value.to_string())),
+        SettingsField::Jinja => parse_bool(value, "jinja").map(ValidatedSetting::Jinja),
+        SettingsField::ChatTemplate => Ok(ValidatedSetting::ChatTemplate(value.to_string())),
+        SettingsField::ExtraArgs => split_shell_words(value).map(ValidatedSetting::ExtraArgs),
+    }
+}
+
+fn validate_host(value: &str) -> Result<String, String> {
+    let host = value.trim();
+    if host.is_empty() {
+        return Err("host is required".to_string());
+    }
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return Ok(host.to_string());
+    }
+    if host.len() > 253 {
+        return Err("host must be at most 253 characters".to_string());
+    }
+    for label in host.split('.') {
+        if label.is_empty() || label.len() > 63 {
+            return Err("host labels must be 1-63 characters".to_string());
+        }
+        let valid_chars = label
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-');
+        let valid_edges = label
+            .as_bytes()
+            .first()
+            .zip(label.as_bytes().last())
+            .map(|(first, last)| first.is_ascii_alphanumeric() && last.is_ascii_alphanumeric())
+            .unwrap_or(false);
+        if !valid_chars || !valid_edges {
+            return Err("host must be a valid IP address or hostname".to_string());
+        }
+    }
+    Ok(host.to_string())
+}
+
+fn parse_u16_range(value: &str, min: u16, max: u16, name: &str) -> Result<u16, String> {
+    value
+        .trim()
+        .parse::<u16>()
+        .map_err(|_| format!("{name} must be an integer"))
+        .and_then(|parsed| {
+            if (min..=max).contains(&parsed) {
+                Ok(parsed)
+            } else {
+                Err(format!("{name} must be between {min} and {max}"))
+            }
+        })
+}
+
+fn parse_u32_range(value: &str, min: u32, max: u32, name: &str) -> Result<u32, String> {
+    value
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| format!("{name} must be an integer"))
+        .and_then(|parsed| {
+            if (min..=max).contains(&parsed) {
+                Ok(parsed)
+            } else {
+                Err(format!("{name} must be between {min} and {max}"))
+            }
+        })
+}
+
+fn parse_i32_range(value: &str, min: i32, max: i32, name: &str) -> Result<i32, String> {
+    value
+        .trim()
+        .parse::<i32>()
+        .map_err(|_| format!("{name} must be an integer"))
+        .and_then(|parsed| {
+            if (min..=max).contains(&parsed) {
+                Ok(parsed)
+            } else {
+                Err(format!("{name} must be between {min} and {max}"))
+            }
+        })
+}
+
+fn parse_usize_range(value: &str, min: usize, max: usize, name: &str) -> Result<usize, String> {
+    value
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| format!("{name} must be an integer"))
+        .and_then(|parsed| {
+            if (min..=max).contains(&parsed) {
+                Ok(parsed)
+            } else {
+                Err(format!("{name} must be between {min} and {max}"))
+            }
+        })
+}
+
+fn parse_bool(value: &str, name: &str) -> Result<bool, String> {
+    value
+        .trim()
+        .parse::<bool>()
+        .map_err(|_| format!("{name} must be true or false"))
+}
+
+fn split_shell_words(value: &str) -> Result<Vec<String>, String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut chars = value.chars().peekable();
+    let mut quote: Option<char> = None;
+    while let Some(ch) = chars.next() {
+        match (quote, ch) {
+            (None, '\'') | (None, '"') => quote = Some(ch),
+            (Some(active), value) if value == active => quote = None,
+            (None, ch) if ch.is_whitespace() => {
+                if !current.is_empty() {
+                    words.push(std::mem::take(&mut current));
+                }
+            }
+            (_, '\\') => {
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                } else {
+                    return Err("extra_args has a trailing escape".to_string());
+                }
+            }
+            (_, ch) => current.push(ch),
+        }
+    }
+    if quote.is_some() {
+        return Err("extra_args has an unclosed quote".to_string());
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    Ok(words)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validates_host_and_numeric_ranges() {
+        assert!(validate_setting(SettingsField::Host, "127.0.0.1").is_ok());
+        assert!(validate_setting(SettingsField::Host, "lmml.local").is_ok());
+        assert!(validate_setting(SettingsField::Host, "-bad.local").is_err());
+        assert!(validate_setting(SettingsField::Port, "0").is_err());
+        assert!(validate_setting(SettingsField::Port, "65535").is_ok());
+        assert!(validate_setting(SettingsField::CtxSize, "0").is_err());
+        assert!(validate_setting(SettingsField::BatchSize, "65537").is_err());
+        assert!(validate_setting(SettingsField::UBatchSize, "512").is_ok());
+    }
+
+    #[test]
+    fn splits_shell_quoted_extra_args() {
+        assert_eq!(
+            split_shell_words("--flag 'two words' \"three words\" escaped\\ value")
+                .expect("split args"),
+            vec!["--flag", "two words", "three words", "escaped value"]
+        );
+        assert!(split_shell_words("--bad 'open").is_err());
+        assert!(split_shell_words("--bad \\").is_err());
+    }
+
+    #[test]
+    fn masks_api_key_for_display() {
+        let mut app = App::default();
+        app.state.server.api_key = "secret".to_string();
+        assert_eq!(
+            app.settings_field_display_value(SettingsField::ApiKey),
+            "********"
+        );
+        assert_eq!(app.settings_field_value(SettingsField::ApiKey), "secret");
     }
 }

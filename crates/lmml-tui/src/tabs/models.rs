@@ -12,7 +12,7 @@ pub fn render(area: Rect, app: &App, frame: &mut Frame) {
     let mut left = vec![
         Line::from("Press r to scan local models."),
         Line::from("Press / to search Hugging Face. Press D to download selected HF result."),
-        Line::from("Press a to add a model alias."),
+        Line::from("Press a to add a model alias. Press x to delete selected model."),
         Line::from(format!(
             "Models dir: {}",
             app.state.model.models_dir.display()

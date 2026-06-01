@@ -23,7 +23,7 @@ expression: render_app(&app)
 "│  chat_template   [e│r          scan models                                            │                    │"
 "│  extra_args      [e│/          open HF search                                         │                    │"
 "│                    │D          download selected HF result                            │                    │"
-"│                    │a          add model alias                                        │                    │"
+"│Error: port must be │a          add model alias                                        │                    │"
 "│                    │?          close help                                             │                    │"
 "│                    │q/Ctrl+C   quit                                                   │                    │"
 "│                    │                                                                  │                    │"

@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use lmml_build::{BuildEvent, UpdateCheck};
 use lmml_compat::LlamaBinaryCapabilities;
 use lmml_detect::{BuildBackend, SystemProfile};
-use lmml_models::{DownloadProgress, HfModelResult, ModelEntry};
+use lmml_models::{DownloadProgress, HfModelResult, HfSearchQuery, ModelEntry, QuantTier};
 use lmml_server::ServerHandle;
 pub use lmml_server::ServerStatus;
 use lmml_state::AppState as PersistentState;
@@ -88,10 +88,72 @@ pub enum AppEvent {
     DownloadComplete(Result<ModelEntry, String>),
     /// Model scan completed.
     ModelScanComplete(Vec<ModelEntry>),
+    /// Model registry mutation failed.
+    ModelRegistryError(String),
     /// Hugging Face search completed.
     HfSearchResults(Vec<HfModelResult>),
     /// Update check completed.
     UpdateCheckResult(UpdateCheck),
+}
+
+/// Active user-input modal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Modal {
+    /// Path prompt for adding an external model alias.
+    AddAlias {
+        /// Current path input buffer.
+        buffer: String,
+        /// Inline validation error.
+        error: Option<String>,
+    },
+    /// Confirmation prompt for deleting a model.
+    ConfirmDelete {
+        /// Model selected for deletion.
+        model: ModelEntry,
+    },
+    /// Hugging Face search query editor.
+    HfSearch {
+        /// Focused search field.
+        field: HfSearchField,
+        /// Keyword query buffer.
+        keywords: String,
+        /// Optional architecture filter buffer.
+        architecture: String,
+        /// Optional quantization tier filter.
+        quant_filter: Option<QuantTier>,
+        /// Inline validation error.
+        error: Option<String>,
+    },
+}
+
+/// Editable fields in the Hugging Face search modal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HfSearchField {
+    /// Keyword query.
+    Keywords,
+    /// Architecture filter.
+    Architecture,
+    /// Quantization tier filter.
+    Quant,
+}
+
+/// First-run onboarding step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnboardingStep {
+    /// Prompt to scan the system.
+    Scan,
+    /// Hardware summary after detection.
+    HardwareSummary,
+    /// Confirm or choose backend.
+    Backend,
+    /// Choose model directory.
+    ModelsDir,
+    /// Optional starter-model search/download.
+    StarterModel,
+    /// Configure server port.
+    ServerPort,
+    /// Final completion screen.
+    Done,
 }
 
 /// Mutable application state owned by the event loop.
@@ -107,6 +169,16 @@ pub struct App {
     pub show_help: bool,
     /// Whether first-run onboarding should be shown.
     pub first_run_onboarding: bool,
+    /// Current first-run onboarding step.
+    pub onboarding_step: OnboardingStep,
+    /// Backend selected during onboarding.
+    pub onboarding_backend: Option<BuildBackend>,
+    /// Model directory input buffer for onboarding.
+    pub onboarding_models_dir_buffer: String,
+    /// Server port input buffer for onboarding.
+    pub onboarding_port_buffer: String,
+    /// Inline onboarding validation error.
+    pub onboarding_error: Option<String>,
     /// Full detection profile for the current session.
     pub detect_profile: Option<SystemProfile>,
     /// Current server status.
@@ -149,6 +221,12 @@ pub struct App {
     pub selected_settings_field: SettingsField,
     /// Active inline settings edit buffer.
     pub settings_edit_buffer: Option<String>,
+    /// Inline validation error for the Settings tab.
+    pub settings_validation_error: Option<String>,
+    /// Active modal prompt.
+    pub active_modal: Option<Modal>,
+    /// Optional state path override used by integration-style tests.
+    pub state_save_path: Option<PathBuf>,
     /// Last UI status message.
     pub status_message: String,
     /// Current terminal size.
@@ -173,12 +251,19 @@ impl App {
         state: PersistentState,
         first_run_onboarding: bool,
     ) -> Self {
+        let onboarding_models_dir_buffer = state.model.models_dir.to_string_lossy().into_owned();
+        let onboarding_port_buffer = state.server.port.to_string();
         Self {
             state,
             active_tab: Tab::Detect,
             should_quit: false,
             show_help: false,
             first_run_onboarding,
+            onboarding_step: OnboardingStep::Scan,
+            onboarding_backend: None,
+            onboarding_models_dir_buffer,
+            onboarding_port_buffer,
+            onboarding_error: None,
             detect_profile: None,
             server_status: ServerStatus::Stopped,
             server_caps: None,
@@ -200,6 +285,9 @@ impl App {
             update_check: None,
             selected_settings_field: SettingsField::Host,
             settings_edit_buffer: None,
+            settings_validation_error: None,
+            active_modal: None,
+            state_save_path: None,
             status_message: "Ready".to_string(),
             terminal_size: None,
         }
@@ -248,8 +336,15 @@ impl App {
                         .push(format!("Missing {}: {}", missing.name, missing.install));
                 }
                 self.detect_profile = Some(profile);
-                self.first_run_onboarding = false;
+                if self.first_run_onboarding {
+                    self.onboarding_step = OnboardingStep::HardwareSummary;
+                    self.onboarding_backend = self
+                        .detect_profile
+                        .as_ref()
+                        .map(SystemProfile::recommended_backend);
+                }
                 self.status_message = "Detection complete".to_string();
+                self.save_state_after("Detection complete");
                 None
             }
             AppEvent::BuildEvent(event) => {
@@ -314,7 +409,9 @@ impl App {
                     Ok(model) => {
                         self.download_error = None;
                         self.status_message = format!("Downloaded {}", model.name);
+                        self.state.model.last_used = model.path.clone();
                         self.models.push(model);
+                        self.save_state_after("Model downloaded");
                     }
                     Err(error) => {
                         self.download_error = Some(error.clone());
@@ -328,6 +425,10 @@ impl App {
                 self.models = models;
                 self.selected_model = self.selected_model.min(self.models.len().saturating_sub(1));
                 self.status_message = format!("{count} model(s) found");
+                None
+            }
+            AppEvent::ModelRegistryError(error) => {
+                self.status_message = error;
                 None
             }
             AppEvent::HfSearchResults(results) => {
@@ -388,17 +489,26 @@ impl App {
             Action::SelectModel(path) => {
                 self.state.model.last_used = path;
                 self.status_message = "Model selected".to_string();
+                self.save_state_after("Model selected");
             }
             Action::ScanModels => {
                 self.status_message = "Scanning models".to_string();
             }
             Action::OpenHfSearch => {
                 self.hf_search_open = true;
+                self.active_modal = Some(Modal::HfSearch {
+                    field: HfSearchField::Keywords,
+                    keywords: self.hf_query.clone(),
+                    architecture: String::new(),
+                    quant_filter: None,
+                    error: None,
+                });
                 self.status_message = "HF search opened".to_string();
             }
             Action::SearchHf(query) => {
                 self.hf_search_open = true;
                 self.hf_query = query.keywords.clone();
+                self.active_modal = None;
                 self.status_message = format!("Searching: {}", query.keywords);
             }
             Action::DownloadModel(result) => {
@@ -407,16 +517,36 @@ impl App {
                 self.status_message = format!("Downloading {}", result.filename);
             }
             Action::DeleteModel(model) => {
-                self.status_message = format!("Delete requested for {}", model.name);
+                self.active_modal = Some(Modal::ConfirmDelete { model });
+                self.status_message = "Confirm model delete".to_string();
+            }
+            Action::ConfirmDeleteModel(model) => {
+                self.active_modal = None;
+                self.status_message = format!("Deleting {}", model.name);
             }
             Action::AddModelAlias => {
-                self.status_message = "Add alias requested".to_string();
+                self.active_modal = Some(Modal::AddAlias {
+                    buffer: String::new(),
+                    error: None,
+                });
+                self.status_message = "Enter model alias path".to_string();
+            }
+            Action::ConfirmAddModelAlias(path) => {
+                self.active_modal = None;
+                self.status_message = format!("Adding alias {}", path.display());
             }
             Action::CheckForUpdate => {
                 self.status_message = "Checking for updates".to_string();
             }
             Action::UpdateAndRebuild => {
-                self.status_message = "Update and rebuild requested".to_string();
+                self.first_run_onboarding = false;
+                self.build_running = true;
+                self.build_error = None;
+                self.push_build_log("Updating source and starting clean rebuild");
+                self.status_message = match self.state.build.track_mode {
+                    lmml_state::TrackMode::Main => "Updating main and rebuilding".to_string(),
+                    lmml_state::TrackMode::Tag => "Rebuilding pinned ref".to_string(),
+                };
             }
             Action::SaveSettings => {
                 self.status_message = if self.state.save().is_ok() {
@@ -432,6 +562,7 @@ impl App {
                 }
             }
             Action::Quit => {
+                self.save_state_after("State saved");
                 self.should_quit = true;
             }
         }
@@ -440,6 +571,12 @@ impl App {
     fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return Some(Action::Quit);
+        }
+        if self.active_modal.is_some() {
+            return self.handle_modal_key(key);
+        }
+        if self.first_run_onboarding {
+            return self.handle_onboarding_key(key);
         }
         if self.active_tab == Tab::Settings {
             match self.handle_settings_key(key) {
@@ -529,20 +666,314 @@ impl App {
                 }
                 None
             }
-            KeyCode::Char('/') => Some(Action::SearchHf(lmml_models::HfSearchQuery {
-                keywords: self.hf_query.clone(),
-                architecture: None,
-                quant_filter: None,
-                max_results: 20,
-            })),
+            KeyCode::Char('/') if self.active_tab == Tab::Models => Some(Action::OpenHfSearch),
             KeyCode::Char('D') if self.active_tab == Tab::Models => self
                 .hf_results
                 .get(self.selected_hf_result)
                 .cloned()
                 .map(Action::DownloadModel),
-            KeyCode::Char('a') => Some(Action::AddModelAlias),
+            KeyCode::Char('a') if self.active_tab == Tab::Models => Some(Action::AddModelAlias),
+            KeyCode::Char('x') if self.active_tab == Tab::Models => self
+                .models
+                .get(self.selected_model)
+                .cloned()
+                .map(Action::DeleteModel),
             KeyCode::Char('r') if self.active_tab == Tab::Models => Some(Action::ScanModels),
             _ => None,
+        }
+    }
+
+    fn handle_onboarding_key(&mut self, key: KeyEvent) -> Option<Action> {
+        match self.onboarding_step {
+            OnboardingStep::Scan => match key.code {
+                KeyCode::Enter | KeyCode::Char('d') => Some(Action::RunDetect),
+                KeyCode::Esc => {
+                    self.first_run_onboarding = false;
+                    None
+                }
+                _ => None,
+            },
+            OnboardingStep::HardwareSummary => match key.code {
+                KeyCode::Enter => {
+                    self.onboarding_step = OnboardingStep::Backend;
+                    None
+                }
+                KeyCode::Esc => {
+                    self.first_run_onboarding = false;
+                    None
+                }
+                _ => None,
+            },
+            OnboardingStep::Backend => match key.code {
+                KeyCode::Left | KeyCode::Right | KeyCode::Tab => {
+                    self.onboarding_backend = Some(next_backend(
+                        self.onboarding_backend
+                            .clone()
+                            .unwrap_or(BuildBackend::CpuFallback),
+                    ));
+                    None
+                }
+                KeyCode::Enter => {
+                    let backend = self
+                        .onboarding_backend
+                        .clone()
+                        .unwrap_or(BuildBackend::CpuFallback);
+                    self.state.build.backend = backend_name(&backend);
+                    self.state.build.archs = backend_archs(&backend);
+                    self.save_state_after("Backend selected");
+                    self.onboarding_step = OnboardingStep::ModelsDir;
+                    None
+                }
+                KeyCode::Esc => {
+                    self.first_run_onboarding = false;
+                    None
+                }
+                _ => None,
+            },
+            OnboardingStep::ModelsDir => match key.code {
+                KeyCode::Enter => {
+                    let value = self.onboarding_models_dir_buffer.trim();
+                    if value.is_empty() {
+                        self.onboarding_error = Some("models directory is required".to_string());
+                    } else {
+                        self.state.model.models_dir = PathBuf::from(value);
+                        self.save_state_after("Models directory selected");
+                        self.onboarding_error = None;
+                        self.onboarding_step = OnboardingStep::StarterModel;
+                    }
+                    None
+                }
+                KeyCode::Backspace => {
+                    self.onboarding_models_dir_buffer.pop();
+                    self.onboarding_error = None;
+                    None
+                }
+                KeyCode::Char(value) => {
+                    self.onboarding_models_dir_buffer.push(value);
+                    self.onboarding_error = None;
+                    None
+                }
+                KeyCode::Esc => {
+                    self.first_run_onboarding = false;
+                    None
+                }
+                _ => None,
+            },
+            OnboardingStep::StarterModel => match key.code {
+                KeyCode::Char('d') | KeyCode::Char('/') => {
+                    self.onboarding_step = OnboardingStep::ServerPort;
+                    Some(Action::OpenHfSearch)
+                }
+                KeyCode::Enter => {
+                    self.onboarding_step = OnboardingStep::ServerPort;
+                    None
+                }
+                KeyCode::Esc => {
+                    self.first_run_onboarding = false;
+                    None
+                }
+                _ => None,
+            },
+            OnboardingStep::ServerPort => match key.code {
+                KeyCode::Enter => match parse_onboarding_port(&self.onboarding_port_buffer) {
+                    Ok(port) => {
+                        self.state.server.port = port;
+                        self.save_state_after("Server port configured");
+                        self.onboarding_error = None;
+                        self.onboarding_step = OnboardingStep::Done;
+                        None
+                    }
+                    Err(error) => {
+                        self.onboarding_error = Some(error);
+                        None
+                    }
+                },
+                KeyCode::Backspace => {
+                    self.onboarding_port_buffer.pop();
+                    self.onboarding_error = None;
+                    None
+                }
+                KeyCode::Char(value) if value.is_ascii_digit() => {
+                    self.onboarding_port_buffer.push(value);
+                    self.onboarding_error = None;
+                    None
+                }
+                KeyCode::Esc => {
+                    self.first_run_onboarding = false;
+                    None
+                }
+                _ => None,
+            },
+            OnboardingStep::Done => match key.code {
+                KeyCode::Enter | KeyCode::Esc => {
+                    self.first_run_onboarding = false;
+                    self.active_tab = Tab::Build;
+                    None
+                }
+                _ => None,
+            },
+        }
+    }
+
+    fn handle_modal_key(&mut self, key: KeyEvent) -> Option<Action> {
+        match self.active_modal.take() {
+            Some(Modal::AddAlias {
+                mut buffer,
+                mut error,
+            }) => match key.code {
+                KeyCode::Esc => None,
+                KeyCode::Enter => {
+                    let trimmed = buffer.trim();
+                    if trimmed.is_empty() {
+                        error = Some("path is required".to_string());
+                        self.active_modal = Some(Modal::AddAlias { buffer, error });
+                        None
+                    } else {
+                        Some(Action::ConfirmAddModelAlias(PathBuf::from(trimmed)))
+                    }
+                }
+                KeyCode::Backspace => {
+                    buffer.pop();
+                    self.active_modal = Some(Modal::AddAlias {
+                        buffer,
+                        error: None,
+                    });
+                    None
+                }
+                KeyCode::Char(value) => {
+                    buffer.push(value);
+                    self.active_modal = Some(Modal::AddAlias {
+                        buffer,
+                        error: None,
+                    });
+                    None
+                }
+                _ => {
+                    self.active_modal = Some(Modal::AddAlias { buffer, error });
+                    None
+                }
+            },
+            Some(Modal::ConfirmDelete { model }) => match key.code {
+                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => None,
+                KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    Some(Action::ConfirmDeleteModel(model))
+                }
+                _ => {
+                    self.active_modal = Some(Modal::ConfirmDelete { model });
+                    None
+                }
+            },
+            Some(Modal::HfSearch {
+                mut field,
+                mut keywords,
+                mut architecture,
+                mut quant_filter,
+                mut error,
+            }) => match key.code {
+                KeyCode::Esc => None,
+                KeyCode::Tab | KeyCode::Down => {
+                    field = next_hf_field(field);
+                    self.active_modal = Some(Modal::HfSearch {
+                        field,
+                        keywords,
+                        architecture,
+                        quant_filter,
+                        error,
+                    });
+                    None
+                }
+                KeyCode::BackTab | KeyCode::Up => {
+                    field = previous_hf_field(field);
+                    self.active_modal = Some(Modal::HfSearch {
+                        field,
+                        keywords,
+                        architecture,
+                        quant_filter,
+                        error,
+                    });
+                    None
+                }
+                KeyCode::Left | KeyCode::Right if field == HfSearchField::Quant => {
+                    quant_filter = next_quant_filter(quant_filter);
+                    self.active_modal = Some(Modal::HfSearch {
+                        field,
+                        keywords,
+                        architecture,
+                        quant_filter,
+                        error: None,
+                    });
+                    None
+                }
+                KeyCode::Backspace => {
+                    match field {
+                        HfSearchField::Keywords => {
+                            keywords.pop();
+                        }
+                        HfSearchField::Architecture => {
+                            architecture.pop();
+                        }
+                        HfSearchField::Quant => {
+                            quant_filter = None;
+                        }
+                    }
+                    self.active_modal = Some(Modal::HfSearch {
+                        field,
+                        keywords,
+                        architecture,
+                        quant_filter,
+                        error: None,
+                    });
+                    None
+                }
+                KeyCode::Char(value) => {
+                    match field {
+                        HfSearchField::Keywords => keywords.push(value),
+                        HfSearchField::Architecture => architecture.push(value),
+                        HfSearchField::Quant => {
+                            quant_filter = quant_from_char(value).or(quant_filter);
+                        }
+                    }
+                    self.active_modal = Some(Modal::HfSearch {
+                        field,
+                        keywords,
+                        architecture,
+                        quant_filter,
+                        error: None,
+                    });
+                    None
+                }
+                KeyCode::Enter => {
+                    if keywords.trim().is_empty() {
+                        error = Some("keywords are required".to_string());
+                        self.active_modal = Some(Modal::HfSearch {
+                            field,
+                            keywords,
+                            architecture,
+                            quant_filter,
+                            error,
+                        });
+                        None
+                    } else {
+                        Some(Action::SearchHf(HfSearchQuery {
+                            keywords: keywords.trim().to_string(),
+                            architecture: non_empty_filter(&architecture),
+                            quant_filter,
+                            max_results: 20,
+                        }))
+                    }
+                }
+                _ => {
+                    self.active_modal = Some(Modal::HfSearch {
+                        field,
+                        keywords,
+                        architecture,
+                        quant_filter,
+                        error,
+                    });
+                    None
+                }
+            },
+            None => None,
         }
     }
 
@@ -564,12 +995,26 @@ impl App {
                 self.build_running = true;
                 self.push_build_log("Linking");
             }
-            BuildEvent::Completed { binary, .. } => {
+            BuildEvent::Completed {
+                binary,
+                fingerprint,
+                backend,
+                archs,
+                sccache_used,
+                ..
+            } => {
                 self.build_running = false;
                 self.state.build.binary = binary;
+                self.state.build.commit = fingerprint.commit;
+                self.state.build.cmake_hash = lmml_build::hash_to_hex(&fingerprint.cmake_hash);
+                self.state.build.backend = backend_name(&backend);
+                self.state.build.archs = archs;
+                self.state.build.sccache_used = sccache_used;
+                self.state.build.last_built = unix_timestamp_string();
                 self.build_binary = Some(self.state.build.binary.clone());
                 self.build_error = None;
                 self.status_message = "Build complete".to_string();
+                self.save_state_after("Build complete");
             }
             BuildEvent::Failed {
                 last_error,
@@ -581,6 +1026,19 @@ impl App {
                 }
                 self.build_error = Some(last_error.clone());
                 self.status_message = format!("Build failed: {last_error}");
+            }
+            BuildEvent::Cancelled => {
+                self.build_running = false;
+                self.build_error = Some("cancelled".to_string());
+                self.push_build_log("Build cancelled");
+                self.status_message = "Build cancelled".to_string();
+            }
+            BuildEvent::Skipped { reason } => {
+                self.build_running = false;
+                self.build_error = None;
+                self.build_binary = Some(self.state.build.binary.clone());
+                self.push_build_log(format!("Build skipped: {reason}"));
+                self.status_message = "Build up to date".to_string();
             }
         }
     }
@@ -600,6 +1058,11 @@ impl App {
             .detect_profile
             .as_ref()
             .and_then(|profile| profile.sccache.clone());
+        if self.state.build.track_mode == lmml_state::TrackMode::Tag
+            && !self.state.build.commit.is_empty()
+        {
+            config.git_ref = Some(self.state.build.commit.clone());
+        }
         config
     }
 
@@ -666,6 +1129,17 @@ impl App {
         }
     }
 
+    pub(crate) fn save_state_after(&mut self, success_message: &str) {
+        let result = if let Some(path) = &self.state_save_path {
+            self.state.save_to_path(path)
+        } else {
+            self.state.save()
+        };
+        if let Err(error) = result {
+            self.status_message = format!("{success_message}; state save failed: {error}");
+        }
+    }
+
     fn next_tab(&mut self) {
         let next = (self.active_tab.index() + 1) % Tab::ALL.len();
         self.active_tab = Tab::ALL[next];
@@ -708,6 +1182,52 @@ fn backend_from_state(backend: &str, archs: &[String]) -> BuildBackend {
     }
 }
 
+fn backend_name(backend: &BuildBackend) -> String {
+    match backend {
+        BuildBackend::Cuda { .. } => "Cuda",
+        BuildBackend::Metal => "Metal",
+        BuildBackend::CpuAvx2 => "CpuAvx2",
+        BuildBackend::CpuAvx => "CpuAvx",
+        BuildBackend::CpuFallback => "CpuFallback",
+    }
+    .to_string()
+}
+
+fn backend_archs(backend: &BuildBackend) -> Vec<String> {
+    match backend {
+        BuildBackend::Cuda { archs } => archs.iter().map(|arch| (*arch).to_string()).collect(),
+        BuildBackend::Metal
+        | BuildBackend::CpuAvx2
+        | BuildBackend::CpuAvx
+        | BuildBackend::CpuFallback => Vec::new(),
+    }
+}
+
+fn next_backend(current: BuildBackend) -> BuildBackend {
+    match current {
+        BuildBackend::Cuda { .. } => BuildBackend::Metal,
+        BuildBackend::Metal => BuildBackend::CpuAvx2,
+        BuildBackend::CpuAvx2 => BuildBackend::CpuAvx,
+        BuildBackend::CpuAvx => BuildBackend::CpuFallback,
+        BuildBackend::CpuFallback => BuildBackend::Cuda { archs: Vec::new() },
+    }
+}
+
+fn parse_onboarding_port(value: &str) -> Result<u16, String> {
+    match value.trim().parse::<u16>() {
+        Ok(0) => Err("port must be between 1 and 65535".to_string()),
+        Ok(port) => Ok(port),
+        Err(_error) => Err("port must be between 1 and 65535".to_string()),
+    }
+}
+
+fn unix_timestamp_string() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs().to_string())
+        .unwrap_or_else(|_| "0".to_string())
+}
+
 fn owned_arch_to_static(arch: &str) -> Option<&'static str> {
     match arch {
         "sm_37" => Some("sm_37"),
@@ -730,6 +1250,51 @@ fn owned_arch_to_static(arch: &str) -> Option<&'static str> {
         "sm_100a" => Some("sm_100a"),
         _ => None,
     }
+}
+
+fn next_hf_field(field: HfSearchField) -> HfSearchField {
+    match field {
+        HfSearchField::Keywords => HfSearchField::Architecture,
+        HfSearchField::Architecture => HfSearchField::Quant,
+        HfSearchField::Quant => HfSearchField::Keywords,
+    }
+}
+
+fn previous_hf_field(field: HfSearchField) -> HfSearchField {
+    match field {
+        HfSearchField::Keywords => HfSearchField::Quant,
+        HfSearchField::Architecture => HfSearchField::Keywords,
+        HfSearchField::Quant => HfSearchField::Architecture,
+    }
+}
+
+fn next_quant_filter(current: Option<QuantTier>) -> Option<QuantTier> {
+    match current {
+        None => Some(QuantTier::Q4),
+        Some(QuantTier::Q4) => Some(QuantTier::Q5),
+        Some(QuantTier::Q5) => Some(QuantTier::Q6),
+        Some(QuantTier::Q6) => Some(QuantTier::Q8),
+        Some(QuantTier::Q8) => Some(QuantTier::F16),
+        Some(QuantTier::F16) => Some(QuantTier::F32),
+        Some(QuantTier::F32) => None,
+    }
+}
+
+fn quant_from_char(value: char) -> Option<QuantTier> {
+    match value.to_ascii_lowercase() {
+        '4' => Some(QuantTier::Q4),
+        '5' => Some(QuantTier::Q5),
+        '6' => Some(QuantTier::Q6),
+        '8' => Some(QuantTier::Q8),
+        'h' => Some(QuantTier::F16),
+        'f' => Some(QuantTier::F32),
+        _ => None,
+    }
+}
+
+fn non_empty_filter(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 impl Default for App {
@@ -811,9 +1376,39 @@ mod tests {
     fn first_run_enter_starts_build_and_esc_dismisses() {
         let mut app = App::new_with_state_and_first_run(PersistentState::default(), true);
         let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
-        assert_eq!(action, Some(Action::StartBuild));
-        app.dispatch(action.expect("start build action"));
-        assert!(!app.first_run_onboarding);
+        assert_eq!(action, Some(Action::RunDetect));
+        app.handle_event(AppEvent::DetectComplete(Box::new(SystemProfile {
+            compiler: None,
+            cmake: None,
+            git: None,
+            cuda: lmml_detect::CudaCompatibility::NoGpu,
+            gpus: Vec::new(),
+            sccache: None,
+            metal: lmml_detect::MetalSupport {
+                available: false,
+                displays: Vec::new(),
+            },
+            cpu: lmml_detect::CpuFeatures {
+                model: String::new(),
+                cores: 1,
+                threads: 1,
+                avx: false,
+                avx2: false,
+                avx512: false,
+                neon: false,
+                features: Vec::new(),
+            },
+            memory: lmml_detect::MemInfo {
+                total_mb: 1024,
+                available_mb: 512,
+            },
+            disk: lmml_detect::DiskInfo {
+                available_bytes: 8 * 1024 * 1024 * 1024,
+                path: PathBuf::from("."),
+            },
+        })));
+        assert_eq!(app.onboarding_step, OnboardingStep::HardwareSummary);
+        assert!(app.first_run_onboarding);
 
         let mut app = App::new_with_state_and_first_run(PersistentState::default(), true);
         assert_eq!(
@@ -863,6 +1458,72 @@ mod tests {
                 .as_ref()
                 .map(|progress| progress.resumed_from),
             Some(2)
+        );
+    }
+
+    #[test]
+    fn alias_modal_collects_path_and_delete_requires_confirmation() {
+        let mut app = App::default();
+        app.active_tab = Tab::Models;
+
+        let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('a'))));
+        assert_eq!(action, Some(Action::AddModelAlias));
+        app.dispatch(action.expect("alias action"));
+        assert!(matches!(app.active_modal, Some(Modal::AddAlias { .. })));
+
+        for value in "/tmp/model.gguf".chars() {
+            app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char(value))));
+        }
+        let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+        assert_eq!(
+            action,
+            Some(Action::ConfirmAddModelAlias(PathBuf::from(
+                "/tmp/model.gguf"
+            )))
+        );
+
+        app.models = vec![model_entry("delete-me.gguf")];
+        let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('x'))));
+        assert!(matches!(action, Some(Action::DeleteModel(_))));
+        app.dispatch(action.expect("delete action"));
+        assert!(matches!(
+            app.active_modal,
+            Some(Modal::ConfirmDelete { .. })
+        ));
+        let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('y'))));
+        assert!(matches!(action, Some(Action::ConfirmDeleteModel(_))));
+    }
+
+    #[test]
+    fn hf_search_modal_builds_filtered_query() {
+        let mut app = App::default();
+        app.active_tab = Tab::Models;
+        let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('/'))));
+        assert_eq!(action, Some(Action::OpenHfSearch));
+        app.dispatch(action.expect("open hf search"));
+
+        for _ in 0.."gguf".len() {
+            app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Backspace)));
+        }
+        for value in "mistral".chars() {
+            app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char(value))));
+        }
+        app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Tab)));
+        for value in "mistral".chars() {
+            app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char(value))));
+        }
+        app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Tab)));
+        app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('4'))));
+
+        let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+        assert_eq!(
+            action,
+            Some(Action::SearchHf(HfSearchQuery {
+                keywords: "mistral".to_string(),
+                architecture: Some("mistral".to_string()),
+                quant_filter: Some(QuantTier::Q4),
+                max_results: 20,
+            }))
         );
     }
 
@@ -991,6 +1652,36 @@ mod tests {
                 "--api-key not available in this llama-server build".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn significant_events_persist_and_reload_state() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let state_path = tempdir.path().join("state.toml");
+        let mut app = App::default();
+        app.state_save_path = Some(state_path.clone());
+        app.active_tab = Tab::Models;
+
+        let model_path = tempdir.path().join("model.gguf");
+        app.handle_event(AppEvent::DownloadComplete(Ok(ModelEntry {
+            path: model_path.clone(),
+            name: "model".to_string(),
+            size_bytes: 4,
+            quant: "Q4".to_string(),
+            context_length: None,
+            architecture: None,
+            aliased: false,
+        })));
+        app.active_tab = Tab::Settings;
+        app.selected_settings_field = SettingsField::Port;
+        app.settings_edit_buffer = Some("9091".to_string());
+        app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+        app.dispatch(Action::Quit);
+
+        let reloaded =
+            PersistentState::load_from_path(&state_path).expect("reload persisted state");
+        assert_eq!(reloaded.model.last_used, model_path);
+        assert_eq!(reloaded.server.port, 9091);
     }
 
     fn model_entry(path: &str) -> ModelEntry {

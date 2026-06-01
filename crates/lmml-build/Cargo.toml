@@ -6,6 +6,7 @@ description = "llama.cpp build management for lmml"
 
 [dependencies]
 lmml-detect = { path = "../lmml-detect" }
+libc = "0.2"
 sha2 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt", "sync", "time"] }

@@ -4,9 +4,9 @@ use std::io;
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyEventKind};
-use lmml_build::{BuildRunner, RealBuildRunner, UpdateCheck};
+use lmml_build::{RealBuildRunner, UpdateCheck};
 use lmml_server::{ServerHandle, ServerManager};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::action::Action;
 use crate::app::{App, AppEvent};
@@ -24,6 +24,7 @@ pub struct EventLoop {
     app_tx: mpsc::Sender<AppEvent>,
     app_rx: mpsc::Receiver<AppEvent>,
     server_handle: Option<ServerHandle>,
+    build_cancel: Option<watch::Sender<bool>>,
 }
 
 impl EventLoop {
@@ -34,6 +35,7 @@ impl EventLoop {
             app_tx,
             app_rx,
             server_handle: None,
+            build_cancel: None,
         }
     }
 
@@ -96,6 +98,14 @@ impl EventLoop {
                 AppEvent::ServerStatus(lmml_server::ServerStatus::Stopped) => {
                     self.server_handle = None;
                 }
+                AppEvent::BuildEvent(
+                    lmml_build::BuildEvent::Completed { .. }
+                    | lmml_build::BuildEvent::Failed { .. }
+                    | lmml_build::BuildEvent::Cancelled
+                    | lmml_build::BuildEvent::Skipped { .. },
+                ) => {
+                    self.build_cancel = None;
+                }
                 AppEvent::Key(_)
                 | AppEvent::Resize(_, _)
                 | AppEvent::DetectComplete(_)
@@ -106,6 +116,7 @@ impl EventLoop {
                 | AppEvent::DownloadProgress(_)
                 | AppEvent::DownloadComplete(_)
                 | AppEvent::ModelScanComplete(_)
+                | AppEvent::ModelRegistryError(_)
                 | AppEvent::HfSearchResults(_)
                 | AppEvent::UpdateCheckResult(_) => {}
             }
@@ -194,17 +205,128 @@ impl EventLoop {
                     let _ignored = tx.send(AppEvent::DownloadComplete(downloaded)).await;
                 });
             }
+            Action::ConfirmAddModelAlias(path) => {
+                app.dispatch(Action::ConfirmAddModelAlias(path.clone()));
+                let mut registry = lmml_models::ModelRegistry {
+                    models_dir: app.state.model.models_dir.clone(),
+                    aliases: app.state.model.aliases.clone(),
+                };
+                match registry.add_alias(path.clone()) {
+                    Ok(()) => {
+                        app.state.model.aliases = registry.aliases.clone();
+                        if let Err(error) = app.state.save() {
+                            let _ignored = self
+                                .app_tx
+                                .send(AppEvent::ModelRegistryError(format!(
+                                    "alias added but state save failed: {error}"
+                                )))
+                                .await;
+                        }
+                        let tx = self.app_tx.clone();
+                        tokio::spawn(async move {
+                            let models = registry.scan().await;
+                            let _ignored = tx.send(AppEvent::ModelScanComplete(models)).await;
+                        });
+                    }
+                    Err(error) => {
+                        let _ignored = self
+                            .app_tx
+                            .send(AppEvent::ModelRegistryError(format!(
+                                "failed to add alias {}: {error}",
+                                path.display()
+                            )))
+                            .await;
+                    }
+                }
+            }
+            Action::ConfirmDeleteModel(model) => {
+                app.dispatch(Action::ConfirmDeleteModel(model.clone()));
+                let registry = lmml_models::ModelRegistry {
+                    models_dir: app.state.model.models_dir.clone(),
+                    aliases: app.state.model.aliases.clone(),
+                };
+                match registry.delete(&model) {
+                    Ok(()) => {
+                        if app.state.model.last_used == model.path {
+                            app.state.model.last_used = std::path::PathBuf::new();
+                        }
+                        if let Err(error) = app.state.save() {
+                            let _ignored = self
+                                .app_tx
+                                .send(AppEvent::ModelRegistryError(format!(
+                                    "model deleted but state save failed: {error}"
+                                )))
+                                .await;
+                        }
+                        let tx = self.app_tx.clone();
+                        tokio::spawn(async move {
+                            let models = registry.scan().await;
+                            let _ignored = tx.send(AppEvent::ModelScanComplete(models)).await;
+                        });
+                    }
+                    Err(error) => {
+                        let _ignored = self
+                            .app_tx
+                            .send(AppEvent::ModelRegistryError(format!(
+                                "failed to delete {}: {error}",
+                                model.path.display()
+                            )))
+                            .await;
+                    }
+                }
+            }
             Action::StartBuild | Action::CleanBuild | Action::UpdateAndRebuild => {
-                let clean = matches!(action, Action::CleanBuild);
+                let update_and_rebuild = matches!(action, Action::UpdateAndRebuild);
+                let clean = matches!(action, Action::CleanBuild | Action::UpdateAndRebuild);
                 app.dispatch(action);
                 let tx = self.app_tx.clone();
                 let config = app.build_config(clean);
+                let persisted_build = app.state.build.clone();
+                let (cancel_tx, cancel_rx) = watch::channel(false);
+                self.build_cancel = Some(cancel_tx);
                 tokio::spawn(async move {
                     tracing::debug!("build task started");
+                    if update_and_rebuild {
+                        let update = if config.source_dir.exists() {
+                            lmml_build::check_for_update(&config.source_dir).await
+                        } else {
+                            UpdateCheck::Unreachable {
+                                reason: "source directory does not exist; cloning fresh"
+                                    .to_string(),
+                            }
+                        };
+                        let _ignored = tx.send(AppEvent::UpdateCheckResult(update)).await;
+                    }
                     let runner = RealBuildRunner;
-                    let mut build_rx = runner.run(config).await;
+                    if !clean {
+                        if let Ok(fingerprint) = current_fingerprint(&config).await {
+                            if persisted_fingerprint_matches(
+                                &persisted_build,
+                                &config,
+                                &fingerprint,
+                            ) {
+                                let _ignored = tx
+                                    .send(AppEvent::BuildEvent(lmml_build::BuildEvent::Skipped {
+                                        reason: "build fingerprint is up to date".to_string(),
+                                    }))
+                                    .await;
+                                return;
+                            }
+                        }
+                    }
+                    let mut build_rx = runner.run_cancellable(config, cancel_rx).await;
                     while let Some(event) = build_rx.recv().await {
+                        let terminal = matches!(
+                            event,
+                            lmml_build::BuildEvent::Completed { .. }
+                                | lmml_build::BuildEvent::Failed { .. }
+                                | lmml_build::BuildEvent::Cancelled
+                                | lmml_build::BuildEvent::Skipped { .. }
+                        );
                         if tx.send(AppEvent::BuildEvent(event)).await.is_err() {
+                            break;
+                        }
+                        if terminal {
                             break;
                         }
                     }
@@ -311,8 +433,13 @@ impl EventLoop {
                 }
                 app.dispatch(Action::Quit);
             }
-            Action::CancelBuild
-            | Action::SelectModel(_)
+            Action::CancelBuild => {
+                app.dispatch(Action::CancelBuild);
+                if let Some(cancel_tx) = self.build_cancel.take() {
+                    let _ignored = cancel_tx.send(true);
+                }
+            }
+            Action::SelectModel(_)
             | Action::OpenHfSearch
             | Action::DeleteModel(_)
             | Action::AddModelAlias
@@ -325,5 +452,132 @@ impl EventLoop {
 impl Default for EventLoop {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+async fn current_fingerprint(
+    config: &lmml_build::BuildConfig,
+) -> Result<lmml_build::BuildFingerprint, lmml_build::BuildError> {
+    let commit = lmml_build::current_commit(&config.source_dir).await?;
+    let args = lmml_build::cmake_configure_args(config);
+    Ok(lmml_build::build_fingerprint(
+        commit,
+        &args,
+        lmml_build::expected_server_binary(&config.source_dir),
+    ))
+}
+
+fn persisted_fingerprint_matches(
+    persisted: &lmml_state::BuildState,
+    config: &lmml_build::BuildConfig,
+    fingerprint: &lmml_build::BuildFingerprint,
+) -> bool {
+    !fingerprint.needs_rebuild()
+        && persisted.commit == fingerprint.commit
+        && persisted.cmake_hash == lmml_build::hash_to_hex(&fingerprint.cmake_hash)
+        && persisted.backend == backend_name(&config.backend)
+        && persisted.archs == backend_archs(&config.backend)
+        && persisted.sccache_used == config.sccache.is_some()
+}
+
+fn backend_name(backend: &lmml_detect::BuildBackend) -> String {
+    match backend {
+        lmml_detect::BuildBackend::Cuda { .. } => "Cuda",
+        lmml_detect::BuildBackend::Metal => "Metal",
+        lmml_detect::BuildBackend::CpuAvx2 => "CpuAvx2",
+        lmml_detect::BuildBackend::CpuAvx => "CpuAvx",
+        lmml_detect::BuildBackend::CpuFallback => "CpuFallback",
+    }
+    .to_string()
+}
+
+fn backend_archs(backend: &lmml_detect::BuildBackend) -> Vec<String> {
+    match backend {
+        lmml_detect::BuildBackend::Cuda { archs } => {
+            archs.iter().map(|arch| (*arch).to_string()).collect()
+        }
+        lmml_detect::BuildBackend::Metal
+        | lmml_detect::BuildBackend::CpuAvx2
+        | lmml_detect::BuildBackend::CpuAvx
+        | lmml_detect::BuildBackend::CpuFallback => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use lmml_detect::BuildBackend;
+
+    use super::*;
+
+    #[test]
+    fn persisted_fingerprint_skips_when_unchanged_and_rebuilds_on_flag_change() {
+        let binary = std::env::current_exe().expect("current test executable");
+        let mut config =
+            lmml_build::BuildConfig::new(PathBuf::from("/tmp/lmml-src"), BuildBackend::CpuFallback);
+        let args = lmml_build::cmake_configure_args(&config);
+        let fingerprint = lmml_build::build_fingerprint("abc123", &args, binary);
+        let mut persisted = lmml_state::BuildState {
+            commit: "abc123".to_string(),
+            cmake_hash: lmml_build::hash_to_hex(&fingerprint.cmake_hash),
+            backend: "CpuFallback".to_string(),
+            binary: fingerprint.binary.clone(),
+            ..lmml_state::BuildState::default()
+        };
+
+        assert!(persisted_fingerprint_matches(
+            &persisted,
+            &config,
+            &fingerprint
+        ));
+
+        config
+            .extra_cmake_flags
+            .push("-DGGML_NATIVE=ON".to_string());
+        let changed_args = lmml_build::cmake_configure_args(&config);
+        let changed =
+            lmml_build::build_fingerprint("abc123", &changed_args, fingerprint.binary.clone());
+        persisted.cmake_hash = lmml_build::hash_to_hex(&fingerprint.cmake_hash);
+
+        assert!(!persisted_fingerprint_matches(
+            &persisted, &config, &changed
+        ));
+    }
+
+    #[test]
+    fn persisted_fingerprint_rebuilds_when_backend_or_sccache_changes() {
+        let binary = std::env::current_exe().expect("current test executable");
+        let config = lmml_build::BuildConfig::new(
+            PathBuf::from("/tmp/lmml-src"),
+            BuildBackend::Cuda {
+                archs: vec!["sm_86"],
+            },
+        );
+        let args = lmml_build::cmake_configure_args(&config);
+        let fingerprint = lmml_build::build_fingerprint("abc123", &args, binary);
+        let mut persisted = lmml_state::BuildState {
+            commit: "abc123".to_string(),
+            cmake_hash: lmml_build::hash_to_hex(&fingerprint.cmake_hash),
+            backend: "CpuFallback".to_string(),
+            binary: fingerprint.binary.clone(),
+            ..lmml_state::BuildState::default()
+        };
+
+        assert!(!persisted_fingerprint_matches(
+            &persisted,
+            &config,
+            &fingerprint
+        ));
+
+        persisted.backend = "Cuda".to_string();
+        persisted.archs = vec!["sm_86".to_string()];
+        persisted.sccache_used = true;
+
+        assert!(!persisted_fingerprint_matches(
+            &persisted,
+            &config,
+            &fingerprint
+        ));
     }
 }

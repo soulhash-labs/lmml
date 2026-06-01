@@ -14,7 +14,7 @@ use lmml_detect::BuildBackend;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::io::AsyncBufReadExt;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 const LLAMA_CPP_URL: &str = "https://github.com/ggml-org/llama.cpp.git";
 const DEFAULT_LOG_TAIL_LINES: usize = 500;
@@ -79,6 +79,14 @@ pub enum BuildEvent {
         binary: PathBuf,
         /// Total elapsed build time.
         elapsed: Duration,
+        /// Fingerprint describing the source and CMake invocation that produced the binary.
+        fingerprint: BuildFingerprint,
+        /// Backend used for the build.
+        backend: BuildBackend,
+        /// CUDA architectures used for the build.
+        archs: Vec<String>,
+        /// Whether sccache was injected into the build.
+        sccache_used: bool,
     },
     /// Build failed with a human-readable error and recent log lines.
     Failed {
@@ -86,6 +94,13 @@ pub enum BuildEvent {
         last_error: String,
         /// Recent build output.
         log_tail: Vec<String>,
+    },
+    /// Build was cancelled by the caller and the active subprocess was stopped.
+    Cancelled,
+    /// Build was skipped because the persisted fingerprint is already current.
+    Skipped {
+        /// Human-readable reason.
+        reason: String,
     },
 }
 
@@ -105,7 +120,25 @@ impl BuildRunner for RealBuildRunner {
         let (tx, rx) = mpsc::channel(256);
         tokio::spawn(async move {
             tracing::debug!("real build runner task spawned");
-            run_build(config, tx).await;
+            let (_cancel_tx, cancel_rx) = watch::channel(false);
+            run_build(config, tx, cancel_rx).await;
+        });
+        rx
+    }
+}
+
+impl RealBuildRunner {
+    /// Start a build that can be cancelled by setting the watch channel to `true`.
+    #[tracing::instrument(skip(self, cancel_rx), fields(source_dir = %config.source_dir.display(), clean = config.clean))]
+    pub async fn run_cancellable(
+        &self,
+        config: BuildConfig,
+        cancel_rx: watch::Receiver<bool>,
+    ) -> mpsc::Receiver<BuildEvent> {
+        let (tx, rx) = mpsc::channel(256);
+        tokio::spawn(async move {
+            tracing::debug!("cancellable build runner task spawned");
+            run_build(config, tx, cancel_rx).await;
         });
         rx
     }
@@ -165,6 +198,9 @@ pub enum BuildError {
     /// Build verification failed.
     #[error("{0}")]
     Verification(String),
+    /// Build was cancelled by the user.
+    #[error("build cancelled")]
+    Cancelled,
 }
 
 /// Assemble the full CMake configure argv for a build config.
@@ -212,6 +248,11 @@ pub fn cmake_hash(args: &[String]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// Format a SHA-256 hash as lowercase hexadecimal.
+pub fn hash_to_hex(hash: &[u8; 32]) -> String {
+    hash.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// Build a fingerprint from commit, CMake args, and expected binary path.
 pub fn build_fingerprint(
     commit: impl Into<String>,
@@ -223,6 +264,23 @@ pub fn build_fingerprint(
         cmake_hash: cmake_hash(cmake_args),
         binary,
     }
+}
+
+/// Return the expected `llama-server` binary path for a source tree.
+pub fn expected_server_binary(source_dir: &Path) -> PathBuf {
+    source_dir
+        .join("build")
+        .join("bin")
+        .join(binary_name("llama-server"))
+}
+
+/// Resolve the current source checkout commit.
+pub async fn current_commit(source_dir: &Path) -> Result<String, BuildError> {
+    let source_dir = path_arg(source_dir);
+    Ok(run_git(vec!["-C", &source_dir, "rev-parse", "HEAD"])
+        .await?
+        .trim()
+        .to_string())
 }
 
 /// Check whether an existing checkout is behind its upstream remote.
@@ -266,12 +324,19 @@ async fn check_for_update_with_git(source_dir: &Path) -> Result<UpdateCheck, Bui
     })
 }
 
-async fn run_build(config: BuildConfig, tx: mpsc::Sender<BuildEvent>) {
+async fn run_build(
+    config: BuildConfig,
+    tx: mpsc::Sender<BuildEvent>,
+    cancel_rx: watch::Receiver<bool>,
+) {
     tracing::info!(source_dir = %config.source_dir.display(), clean = config.clean, "build started");
     let started = Instant::now();
     let mut log_tail = LogTail::new(config.log_tail_lines);
-    let result = run_build_inner(&config, &tx, &mut log_tail, started).await;
-    if let Err(error) = result {
+    let result = run_build_inner(&config, &tx, &mut log_tail, started, cancel_rx).await;
+    if matches!(result, Err(BuildError::Cancelled)) {
+        tracing::info!("build cancelled");
+        send_event(&tx, BuildEvent::Cancelled).await;
+    } else if let Err(error) = result {
         tracing::error!(error = %error, "build failed");
         send_event(
             &tx,
@@ -289,9 +354,24 @@ async fn run_build_inner(
     tx: &mpsc::Sender<BuildEvent>,
     log_tail: &mut LogTail,
     started: Instant,
+    mut cancel_rx: watch::Receiver<bool>,
 ) -> Result<(), BuildError> {
-    ensure_repo(config, tx, log_tail).await?;
+    ensure_repo(config, tx, log_tail, &mut cancel_rx).await?;
     if let Some(git_ref) = &config.git_ref {
+        stream_command(
+            "git",
+            &[
+                "-C".to_string(),
+                path_arg(&config.source_dir),
+                "fetch".to_string(),
+                "--tags".to_string(),
+                "origin".to_string(),
+            ],
+            tx,
+            log_tail,
+            &mut cancel_rx,
+        )
+        .await?;
         stream_command(
             "git",
             &[
@@ -302,6 +382,7 @@ async fn run_build_inner(
             ],
             tx,
             log_tail,
+            &mut cancel_rx,
         )
         .await?;
     }
@@ -321,8 +402,11 @@ async fn run_build_inner(
     }
 
     send_event(tx, BuildEvent::CmakeConfiguring).await;
+    let commit = current_commit(&config.source_dir).await?;
     let configure_args = cmake_configure_args(config);
-    stream_command("cmake", &configure_args, tx, log_tail).await?;
+    let server = expected_server_binary(&config.source_dir);
+    let fingerprint = build_fingerprint(commit, &configure_args, server.clone());
+    stream_command("cmake", &configure_args, tx, log_tail, &mut cancel_rx).await?;
 
     let build_dir = config.source_dir.join("build");
     let jobs = if config.jobs == 0 {
@@ -340,9 +424,8 @@ async fn run_build_inner(
         "-j".to_string(),
         jobs.to_string(),
     ];
-    stream_command("cmake", &build_args, tx, log_tail).await?;
+    stream_command("cmake", &build_args, tx, log_tail, &mut cancel_rx).await?;
 
-    let server = build_dir.join("bin").join(binary_name("llama-server"));
     let cli = build_dir.join("bin").join(binary_name("llama-cli"));
     verify_binary(&cli).await?;
     if !is_executable(&server) {
@@ -358,6 +441,10 @@ async fn run_build_inner(
         BuildEvent::Completed {
             binary: server,
             elapsed: started.elapsed(),
+            fingerprint,
+            backend: config.backend.clone(),
+            archs: backend_archs(&config.backend),
+            sccache_used: config.sccache.is_some(),
         },
     )
     .await;
@@ -368,6 +455,7 @@ async fn ensure_repo(
     config: &BuildConfig,
     tx: &mpsc::Sender<BuildEvent>,
     log_tail: &mut LogTail,
+    cancel_rx: &mut watch::Receiver<bool>,
 ) -> Result<(), BuildError> {
     if config.source_dir.join("CMakeLists.txt").exists() {
         stream_command(
@@ -380,6 +468,7 @@ async fn ensure_repo(
             ],
             tx,
             log_tail,
+            cancel_rx,
         )
         .await
     } else {
@@ -406,6 +495,7 @@ async fn ensure_repo(
             ],
             tx,
             log_tail,
+            cancel_rx,
         )
         .await
     }
@@ -440,7 +530,11 @@ async fn stream_command(
     args: &[String],
     tx: &mpsc::Sender<BuildEvent>,
     log_tail: &mut LogTail,
+    cancel_rx: &mut watch::Receiver<bool>,
 ) -> Result<(), BuildError> {
+    if *cancel_rx.borrow() {
+        return Err(BuildError::Cancelled);
+    }
     let mut child = tokio::process::Command::new(program)
         .args(args)
         .stdout(Stdio::piped())
@@ -464,6 +558,12 @@ async fn stream_command(
 
     while !stdout_done || !stderr_done {
         tokio::select! {
+            changed = cancel_rx.changed() => {
+                if changed.is_ok() && *cancel_rx.borrow() {
+                    terminate_child(program, &mut child).await?;
+                    return Err(BuildError::Cancelled);
+                }
+            }
             line = stdout.next_line(), if !stdout_done => {
                 match line {
                     Ok(Some(line)) => handle_line(tx, log_tail, line).await,
@@ -491,6 +591,38 @@ async fn stream_command(
         Err(BuildError::Command(format!(
             "{program} exited with {status}"
         )))
+    }
+}
+
+async fn terminate_child(
+    program: &str,
+    child: &mut tokio::process::Child,
+) -> Result<(), BuildError> {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        let result = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+        if result != 0 {
+            tracing::warn!(program, pid, "failed to send SIGTERM to build subprocess");
+        }
+    }
+
+    #[cfg(not(unix))]
+    child
+        .start_kill()
+        .map_err(|error| BuildError::Command(format!("failed to stop {program}: {error}")))?;
+
+    match tokio::time::timeout(Duration::from_secs(3), child.wait()).await {
+        Ok(Ok(_status)) => Ok(()),
+        Ok(Err(error)) => Err(BuildError::Command(format!(
+            "{program} process failed while cancelling: {error}"
+        ))),
+        Err(_elapsed) => {
+            child.start_kill().map_err(|error| {
+                BuildError::Command(format!("failed to kill {program}: {error}"))
+            })?;
+            let _ignored = child.wait().await;
+            Ok(())
+        }
     }
 }
 
@@ -539,6 +671,16 @@ fn binary_name(base: &str) -> String {
         format!("{base}.exe")
     } else {
         base.to_string()
+    }
+}
+
+fn backend_archs(backend: &BuildBackend) -> Vec<String> {
+    match backend {
+        BuildBackend::Cuda { archs } => archs.iter().map(|arch| (*arch).to_string()).collect(),
+        BuildBackend::Metal
+        | BuildBackend::CpuAvx2
+        | BuildBackend::CpuAvx
+        | BuildBackend::CpuFallback => Vec::new(),
     }
 }
 
@@ -713,6 +855,34 @@ mod tests {
                 commits_behind: 1,
                 ..
             }
+        ));
+    }
+
+    #[tokio::test]
+    async fn stream_command_cancels_active_subprocess() {
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let (cancel_tx, mut cancel_rx) = watch::channel(false);
+        let mut log_tail = LogTail::new(8);
+        let args = vec![
+            "-c".to_string(),
+            "trap 'exit 0' TERM; echo started; sleep 30".to_string(),
+        ];
+
+        let task = tokio::spawn(async move {
+            stream_command("sh", &args, &event_tx, &mut log_tail, &mut cancel_rx).await
+        });
+        let first_event = event_rx.recv().await.expect("started event");
+        assert_eq!(
+            first_event,
+            BuildEvent::Compiling {
+                line: "started".to_string()
+            }
+        );
+        cancel_tx.send(true).expect("send cancellation");
+
+        assert!(matches!(
+            task.await.expect("join"),
+            Err(BuildError::Cancelled)
         ));
     }
 

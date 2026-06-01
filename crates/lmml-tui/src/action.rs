@@ -31,8 +31,12 @@ pub enum Action {
     DownloadModel(lmml_models::HfModelResult),
     /// Delete a local model.
     DeleteModel(lmml_models::ModelEntry),
+    /// Confirm deletion of a local model after the user accepts the prompt.
+    ConfirmDeleteModel(lmml_models::ModelEntry),
     /// Add an external model alias.
     AddModelAlias,
+    /// Confirm an external model alias path from the input prompt.
+    ConfirmAddModelAlias(PathBuf),
     /// Check llama.cpp for updates.
     CheckForUpdate,
     /// Update llama.cpp and rebuild.

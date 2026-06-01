@@ -65,6 +65,7 @@
 
 ### 🟡 Medium Priority
 
+- [ ] v2 ROCm/HIP production support — `hipconfig`/`rocminfo` probe, `gfx*` target mapping, `GGML_HIP` CMake flags, ROCm VRAM telemetry, backend settings, and tests. Supersedes older completed root-package ROCm entries for the v2 crate architecture.
 - [ ] Vulkan-specific GPU heap polling for VRAM-style dashboard telemetry
 
 ### 🟢 Minor

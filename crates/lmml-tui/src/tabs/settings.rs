@@ -21,6 +21,13 @@ pub fn render(area: Rect, app: &App, frame: &mut Frame) {
     for field in SettingsField::ALL {
         left.push(settings_line(app, field));
     }
+    if let Some(error) = &app.settings_validation_error {
+        left.push(Line::from(""));
+        left.push(Line::from(vec![Span::styled(
+            format!("Error: {error}"),
+            Style::default().fg(Color::Red),
+        )]));
+    }
 
     let mut right = vec![Line::from(format!(
         "Binary: {}",
@@ -75,17 +82,26 @@ fn settings_line(app: &App, field: SettingsField) -> Line<'static> {
             format!("{:<14}", field.label()),
             Style::default().fg(if selected { Color::White } else { Color::Gray }),
         ),
-        Span::raw(format!("{}  [{}]", app.settings_field_value(field), action)),
+        Span::raw(format!(
+            "{}  [{}]",
+            app.settings_field_display_value(field),
+            action
+        )),
     ])
 }
 
 fn render_edit_modal(area: Rect, field: SettingsField, buffer: &str, frame: &mut Frame) {
     let modal = centered_rect(58, 28, area);
     frame.render_widget(Clear, modal);
+    let visible_buffer = if field == SettingsField::ApiKey && !buffer.is_empty() {
+        "*".repeat(buffer.len())
+    } else {
+        buffer.to_string()
+    };
     let lines = vec![
         Line::from(format!("{}:", field.label())),
         Line::from(""),
-        Line::from(buffer.to_string()),
+        Line::from(visible_buffer),
         Line::from(""),
         Line::from("Enter applies. Esc cancels."),
     ];

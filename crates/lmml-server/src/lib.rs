@@ -105,6 +105,19 @@ impl ServerManager {
         config: &ServerConfig,
         log_tx: mpsc::Sender<String>,
     ) -> Result<ServerHandle, ServerError> {
+        self.start_with_timeout(model, config, log_tx, Duration::from_secs(30))
+            .await
+    }
+
+    /// Start llama-server with an explicit readiness timeout.
+    #[tracing::instrument(skip(self, model, config, log_tx), fields(binary = %self.binary.display(), model = %model.path.display(), host = %config.host, port = config.port))]
+    pub async fn start_with_timeout(
+        &self,
+        model: &ModelEntry,
+        config: &ServerConfig,
+        log_tx: mpsc::Sender<String>,
+        startup_timeout: Duration,
+    ) -> Result<ServerHandle, ServerError> {
         check_port_free(&config.host, config.port).await?;
         tracing::info!("server start requested");
 
@@ -140,7 +153,7 @@ impl ServerManager {
             elapsed: Duration::ZERO,
         });
         let started_at = Instant::now();
-        match wait_for_ready(&config.host, config.port, Duration::from_secs(30)).await {
+        match wait_for_ready(&config.host, config.port, startup_timeout).await {
             Ok(url) => {
                 tracing::info!(url = %url, "server ready");
                 let _ignored = status_tx.send(ServerStatus::Ready { url });

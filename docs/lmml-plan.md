@@ -48,6 +48,15 @@ All library crates are independently testable with no TUI dependency.
 | Available RAM | `sysinfo` crate | `MemInfo` |
 | Available disk | `statvfs` on build dir parent | `DiskInfo` |
 
+> **ROCm production gap:** v2 currently specifies CUDA, Metal, and CPU fallback only.
+> AMD ROCm/HIP support is required before lmml can claim cross-vendor GPU
+> production readiness. The missing scope is: `hipconfig`/`rocminfo` detection,
+> AMD GPU target mapping such as `gfx1030`, CMake flags
+> `-DGGML_HIP=ON -DAMDGPU_TARGETS=...`, ROCm toolkit compatibility checks,
+> VRAM telemetry via `rocm-smi`, Settings/backend selection wiring, and tests.
+> Until this is implemented, AMD GPUs must be shown as unsupported for GPU build
+> acceleration and fall back to CPU with a clear warning.
+
 ### 1.2 CUDA architecture support
 
 lmml supports every CUDA-capable GPU from sm_37 (Kepler, GTX 700 series, 2013) through

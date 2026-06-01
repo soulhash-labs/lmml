@@ -951,6 +951,30 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn delete_removes_model_file() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let model_path = tempdir.path().join("delete-me.gguf");
+        std::fs::write(&model_path, b"fake").expect("write model");
+        let registry = ModelRegistry {
+            models_dir: tempdir.path().to_path_buf(),
+            aliases: Vec::new(),
+        };
+        let entry = ModelEntry {
+            path: model_path.clone(),
+            name: "delete-me".to_string(),
+            size_bytes: 4,
+            quant: "unknown".to_string(),
+            context_length: None,
+            architecture: None,
+            aliased: false,
+        };
+
+        registry.delete(&entry).expect("delete model");
+
+        assert!(!model_path.exists());
+    }
+
     #[tokio::test]
     async fn parse_model_falls_back_to_filename_quant() {
         let tempdir = tempfile::tempdir().expect("tempdir");

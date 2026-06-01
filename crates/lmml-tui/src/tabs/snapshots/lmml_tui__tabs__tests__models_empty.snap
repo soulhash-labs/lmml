@@ -8,7 +8,7 @@ expression: render_app(&app)
 "┌Models──────────────────────────────────────────┐┌Model Details─────────────────────────────────────────────┐"
 "│Press r to scan local models.                   ││Last model:                                               │"
 "│Press / to search Hugging Face. Press D to downl││                                                          │"
-"│Press a to add a model alias.                   ││                                                          │"
+"│Press a to add a model alias. Press x to delete ││                                                          │"
 "│Models dir: $HOME/.local/share/lmml/model││                                                          │"
 "│                                                ││                                                          │"
 "│No models found.                                ││                                                          │"

@@ -3,10 +3,10 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Tabs};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, Tab};
+use crate::app::{App, HfSearchField, Modal, Tab};
 
 pub mod build;
 pub mod detect;
@@ -35,7 +35,10 @@ pub fn render(area: Rect, app: &App, frame: &mut Frame) {
     }
     crate::footer::render(layout[2], app, frame);
     if app.first_run_onboarding {
-        crate::widgets::onboarding::render(area, frame);
+        crate::widgets::onboarding::render(area, app, frame);
+    }
+    if let Some(modal) = &app.active_modal {
+        render_modal(area, modal, frame);
     }
     if app.show_help {
         crate::widgets::help_overlay::render(area, frame);
@@ -90,9 +93,126 @@ fn pane<'a>(title: &'a str, lines: Vec<Line<'a>>) -> Paragraph<'a> {
     Paragraph::new(lines).block(Block::default().title(title).borders(Borders::ALL))
 }
 
+fn render_modal(area: Rect, modal: &Modal, frame: &mut Frame) {
+    let rect = centered_rect(64, 34, area);
+    frame.render_widget(Clear, rect);
+    let (title, lines) = match modal {
+        Modal::AddAlias { buffer, error } => {
+            let mut lines = vec![
+                Line::from("Enter a GGUF file or directory path."),
+                Line::from(""),
+                Line::from(format!("Path: {buffer}")),
+                Line::from(""),
+                Line::from("Enter confirms  Esc cancels"),
+            ];
+            if let Some(error) = error {
+                lines.push(Line::from(vec![Span::styled(
+                    format!("Error: {error}"),
+                    Style::default().fg(Color::Red),
+                )]));
+            }
+            ("Add Model Alias", lines)
+        }
+        Modal::ConfirmDelete { model } => (
+            "Delete Model",
+            vec![
+                Line::from("Delete this model file?"),
+                Line::from(""),
+                Line::from(format!("Name: {}", model.name)),
+                Line::from(format!("Path: {}", model.path.display())),
+                Line::from(""),
+                Line::from("Y/Enter deletes  N/Esc cancels"),
+            ],
+        ),
+        Modal::HfSearch {
+            field,
+            keywords,
+            architecture,
+            quant_filter,
+            error,
+        } => {
+            let mut lines = vec![
+                Line::from("Edit search fields. Tab changes field. Left/Right cycles quant."),
+                Line::from(""),
+                hf_field_line("Keywords", keywords, *field == HfSearchField::Keywords),
+                hf_field_line(
+                    "Architecture",
+                    architecture,
+                    *field == HfSearchField::Architecture,
+                ),
+                hf_field_line(
+                    "Quant",
+                    &quant_label(*quant_filter),
+                    *field == HfSearchField::Quant,
+                ),
+                Line::from(""),
+                Line::from("Enter searches  Esc cancels"),
+            ];
+            if let Some(error) = error {
+                lines.push(Line::from(vec![Span::styled(
+                    format!("Error: {error}"),
+                    Style::default().fg(Color::Red),
+                )]));
+            }
+            ("Hugging Face Search", lines)
+        }
+    };
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .block(Block::default().title(title).borders(Borders::ALL)),
+        rect,
+    );
+}
+
+fn hf_field_line(label: &'static str, value: &str, focused: bool) -> Line<'static> {
+    let prefix = if focused { "> " } else { "  " };
+    Line::from(vec![
+        Span::styled(
+            prefix,
+            Style::default()
+                .fg(if focused { Color::Cyan } else { Color::Gray })
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!("{label}: {value}")),
+    ])
+}
+
+fn quant_label(value: Option<lmml_models::QuantTier>) -> String {
+    match value {
+        None => "any".to_string(),
+        Some(lmml_models::QuantTier::Q4) => "Q4".to_string(),
+        Some(lmml_models::QuantTier::Q5) => "Q5".to_string(),
+        Some(lmml_models::QuantTier::Q6) => "Q6".to_string(),
+        Some(lmml_models::QuantTier::Q8) => "Q8".to_string(),
+        Some(lmml_models::QuantTier::F16) => "F16".to_string(),
+        Some(lmml_models::QuantTier::F32) => "F32".to_string(),
+    }
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(area);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vertical[1])[1]
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::time::Duration;
 
     use lmml_build::UpdateCheck;
     use lmml_compat::LlamaBinaryCapabilities;
@@ -138,6 +258,9 @@ mod tests {
         app.active_tab = Tab::Detect;
         insta::assert_snapshot!("detect_fresh", render_app(&app));
 
+        app.detect_log = vec!["Starting system detection".to_string()];
+        insta::assert_snapshot!("detect_probing", render_app(&app));
+
         app.detect_profile = Some(healthy_profile());
         app.detect_log = vec!["Detected backend: Cuda { archs: [\"sm_86\"] }".to_string()];
         insta::assert_snapshot!("detect_complete_all_green", render_app(&app));
@@ -145,6 +268,10 @@ mod tests {
         app.detect_profile = Some(missing_prereq_profile());
         app.detect_log = vec!["Missing C++ compiler: sudo apt install build-essential".to_string()];
         insta::assert_snapshot!("detect_missing_prereqs", render_app(&app));
+
+        app.detect_profile = Some(cuda_warning_profile());
+        app.detect_log = vec!["Warning: sm_89 requires CUDA >= 11.8; found 11.0".to_string()];
+        insta::assert_snapshot!("detect_cuda_warning", render_app(&app));
     }
 
     #[test]
@@ -161,13 +288,25 @@ mod tests {
         insta::assert_snapshot!("build_running", render_app(&app));
 
         app.build_running = false;
+        app.build_binary = Some(PathBuf::from("/tmp/lmml/llama-server"));
+        app.build_log = vec!["Build complete".to_string()];
+        insta::assert_snapshot!("build_complete", render_app(&app));
+
+        app.build_binary = None;
         app.build_error = Some("cmake failed".to_string());
+        app.build_log = vec!["CMake Error".to_string()];
+        insta::assert_snapshot!("build_failed", render_app(&app));
+
         app.update_check = Some(UpdateCheck::Available {
             current: "abc".to_string(),
             latest: "def".to_string(),
             commits_behind: 3,
         });
-        insta::assert_snapshot!("build_failed_update_available", render_app(&app));
+        insta::assert_snapshot!("build_update_available", render_app(&app));
+
+        app.build_error = None;
+        app.detect_profile = Some(healthy_profile());
+        insta::assert_snapshot!("build_sccache_active", render_app(&app));
     }
 
     #[test]
@@ -179,6 +318,9 @@ mod tests {
         app.models = vec![model_entry("mistral-7b-Q4_K_M.gguf", 4_100_000_000)];
         insta::assert_snapshot!("models_populated", render_app(&app));
 
+        app.detect_profile = Some(healthy_profile());
+        insta::assert_snapshot!("models_vram_fit_badges", render_app(&app));
+
         app.hf_search_open = true;
         app.hf_query = "mistral gguf".to_string();
         app.hf_results = vec![HfModelResult {
@@ -188,6 +330,9 @@ mod tests {
             downloads: 1234,
             url: "https://huggingface.co/org/mistral/resolve/main/mistral.gguf".to_string(),
         }];
+        app.download_progress = None;
+        insta::assert_snapshot!("models_hf_search_open", render_app(&app));
+
         app.download_progress = Some(DownloadProgress {
             bytes_received: 2_000_000_000,
             total_bytes: Some(4_100_000_000),
@@ -202,12 +347,22 @@ mod tests {
         app.active_tab = Tab::Server;
         insta::assert_snapshot!("server_stopped", render_app(&app));
 
+        app.server_status = ServerStatus::Starting {
+            elapsed: Duration::from_millis(500),
+        };
+        insta::assert_snapshot!("server_starting", render_app(&app));
+
         app.models = vec![model_entry("llama.gguf", 2_000_000_000)];
         app.server_status = ServerStatus::Ready {
             url: "http://127.0.0.1:8080".to_string(),
         };
         app.server_log = vec!["server listening".to_string()];
         insta::assert_snapshot!("server_ready", render_app(&app));
+
+        app.server_status = ServerStatus::Failed {
+            reason: "llama-server exited with status 1".to_string(),
+        };
+        insta::assert_snapshot!("server_failed", render_app(&app));
 
         app.server_status = ServerStatus::Failed {
             reason: "port 8080 is already in use".to_string(),
@@ -237,12 +392,33 @@ mod tests {
         insta::assert_snapshot!("settings_modal_unsupported_flags", render_app(&app));
 
         app.settings_edit_buffer = None;
+        app.settings_validation_error = Some("port must be between 1 and 65535".to_string());
+        insta::assert_snapshot!("settings_invalid_inline_error", render_app(&app));
+
+        app.settings_edit_buffer = None;
         app.show_help = true;
         insta::assert_snapshot!("help_overlay", render_app(&app));
 
         app.show_help = false;
         app.first_run_onboarding = true;
-        insta::assert_snapshot!("first_run_onboarding", render_app(&app));
+        app.onboarding_step = crate::app::OnboardingStep::Scan;
+        insta::assert_snapshot!("first_run_onboarding_scan", render_app(&app));
+        app.onboarding_step = crate::app::OnboardingStep::HardwareSummary;
+        app.detect_profile = Some(healthy_profile());
+        insta::assert_snapshot!("first_run_onboarding_hardware", render_app(&app));
+        app.onboarding_step = crate::app::OnboardingStep::Backend;
+        app.onboarding_backend = Some(lmml_detect::BuildBackend::Cuda {
+            archs: vec!["sm_86"],
+        });
+        insta::assert_snapshot!("first_run_onboarding_backend", render_app(&app));
+        app.onboarding_step = crate::app::OnboardingStep::ModelsDir;
+        insta::assert_snapshot!("first_run_onboarding_models_dir", render_app(&app));
+        app.onboarding_step = crate::app::OnboardingStep::StarterModel;
+        insta::assert_snapshot!("first_run_onboarding_starter_model", render_app(&app));
+        app.onboarding_step = crate::app::OnboardingStep::ServerPort;
+        insta::assert_snapshot!("first_run_onboarding_server_port", render_app(&app));
+        app.onboarding_step = crate::app::OnboardingStep::Done;
+        insta::assert_snapshot!("first_run_onboarding_done", render_app(&app));
     }
 
     fn render_app(app: &App) -> String {
@@ -354,6 +530,22 @@ mod tests {
                 path: PathBuf::from("/tmp"),
             },
         }
+    }
+
+    fn cuda_warning_profile() -> SystemProfile {
+        let mut profile = healthy_profile();
+        profile.cuda = CudaCompatibility::ToolkitTooOld {
+            gpu_arch: "sm_89",
+            minimum_toolkit: "11.8",
+            found_toolkit: "11.0".to_string(),
+        };
+        profile.gpus = vec![GpuInfo {
+            name: "NVIDIA RTX 4090".to_string(),
+            memory_total_mb: 24_576,
+            compute_cap: "8.9".to_string(),
+            arch: Some("sm_89"),
+        }];
+        profile
     }
 
     fn model_entry(path: &str, size_bytes: u64) -> ModelEntry {

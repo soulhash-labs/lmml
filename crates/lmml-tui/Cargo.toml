@@ -1,8 +1,16 @@
 [package]
-name = "lmml-tui"
+name = "lmml"
 version = "0.1.0"
 edition = "2021"
 description = "Terminal UI binary for lmml"
+
+[lib]
+name = "lmml_tui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lmml"
+path = "src/main.rs"
 
 [dependencies]
 crossterm = "0.28"
@@ -21,3 +29,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 insta = "1"
+tempfile = "3"
