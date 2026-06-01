@@ -4,8 +4,10 @@
 //! state, background-task status, and persistent state coordination.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::path::PathBuf;
+
 use lmml_build::{BuildEvent, UpdateCheck};
-use lmml_detect::SystemProfile;
+use lmml_detect::{BuildBackend, SystemProfile};
 use lmml_state::AppState as PersistentState;
 
 use crate::action::Action;
@@ -122,6 +124,12 @@ pub struct App {
     pub detect_log: Vec<String>,
     /// Build tab log lines.
     pub build_log: Vec<String>,
+    /// Whether a build is currently running.
+    pub build_running: bool,
+    /// Last completed build binary, if any.
+    pub build_binary: Option<PathBuf>,
+    /// Last build error, if any.
+    pub build_error: Option<String>,
     /// Server tab log lines.
     pub server_log: Vec<String>,
     /// Last update-check result.
@@ -160,6 +168,9 @@ impl App {
             server_status: ServerStatus::Stopped,
             detect_log: Vec::new(),
             build_log: Vec::new(),
+            build_running: false,
+            build_binary: None,
+            build_error: None,
             server_log: Vec::new(),
             update_check: None,
             status_message: "Ready".to_string(),
@@ -260,12 +271,20 @@ impl App {
             }
             Action::StartBuild => {
                 self.first_run_onboarding = false;
-                self.build_log.push("Starting build".to_string());
+                self.build_running = true;
+                self.build_error = None;
+                self.push_build_log("Starting build");
                 self.status_message = "Build requested".to_string();
             }
+            Action::CleanBuild => {
+                self.first_run_onboarding = false;
+                self.build_running = true;
+                self.build_error = None;
+                self.push_build_log("Starting clean build");
+                self.status_message = "Clean build requested".to_string();
+            }
             Action::CancelBuild => {
-                self.build_log
-                    .push("Build cancellation requested".to_string());
+                self.push_build_log("Build cancellation requested");
                 self.status_message = "Cancelling build".to_string();
             }
             Action::StartServer => {
@@ -363,6 +382,7 @@ impl App {
             }
             KeyCode::Char('d') => Some(Action::RunDetect),
             KeyCode::Char('b') => Some(Action::StartBuild),
+            KeyCode::Char('B') => Some(Action::CleanBuild),
             KeyCode::Char('u') => Some(Action::CheckForUpdate),
             KeyCode::Char('s') => match self.active_tab {
                 Tab::Server => Some(Action::StartServer),
@@ -378,28 +398,66 @@ impl App {
     fn handle_build_event(&mut self, event: BuildEvent) {
         match event {
             BuildEvent::Cloning { url } => {
-                self.build_log.push(format!("Cloning {url}"));
+                self.build_running = true;
+                self.push_build_log(format!("Cloning {url}"));
             }
             BuildEvent::CmakeConfiguring => {
-                self.build_log.push("Configuring CMake".to_string());
+                self.build_running = true;
+                self.push_build_log("Configuring CMake");
             }
             BuildEvent::Compiling { line } => {
-                self.build_log.push(line);
+                self.build_running = true;
+                self.push_build_log(line);
             }
             BuildEvent::Linking => {
-                self.build_log.push("Linking".to_string());
+                self.build_running = true;
+                self.push_build_log("Linking");
             }
             BuildEvent::Completed { binary, .. } => {
+                self.build_running = false;
                 self.state.build.binary = binary;
+                self.build_binary = Some(self.state.build.binary.clone());
+                self.build_error = None;
                 self.status_message = "Build complete".to_string();
             }
             BuildEvent::Failed {
                 last_error,
                 log_tail,
             } => {
-                self.build_log.extend(log_tail);
+                self.build_running = false;
+                for line in log_tail {
+                    self.push_build_log(line);
+                }
+                self.build_error = Some(last_error.clone());
                 self.status_message = format!("Build failed: {last_error}");
             }
+        }
+    }
+
+    /// Build a `lmml-build` config from current app state.
+    pub fn build_config(&self, clean: bool) -> lmml_build::BuildConfig {
+        let backend = self
+            .detect_profile
+            .as_ref()
+            .map(SystemProfile::recommended_backend)
+            .unwrap_or_else(|| {
+                backend_from_state(&self.state.build.backend, &self.state.build.archs)
+            });
+        let mut config = lmml_build::BuildConfig::new(self.state.build.source_dir.clone(), backend);
+        config.clean = clean;
+        config.sccache = self
+            .detect_profile
+            .as_ref()
+            .and_then(|profile| profile.sccache.clone());
+        config
+    }
+
+    fn push_build_log(&mut self, line: impl Into<String>) {
+        self.build_log.push(line.into());
+        const MAX_BUILD_LOG_LINES: usize = 500;
+        if self.build_log.len() > MAX_BUILD_LOG_LINES {
+            let overflow = self.build_log.len() - MAX_BUILD_LOG_LINES;
+            self.build_log.drain(0..overflow);
         }
     }
 
@@ -416,6 +474,46 @@ impl App {
             current - 1
         };
         self.active_tab = Tab::ALL[previous];
+    }
+}
+
+fn backend_from_state(backend: &str, archs: &[String]) -> BuildBackend {
+    match backend {
+        "Cuda" => BuildBackend::Cuda {
+            archs: archs
+                .iter()
+                .filter_map(|arch| owned_arch_to_static(arch))
+                .collect(),
+        },
+        "Metal" => BuildBackend::Metal,
+        "CpuAvx2" => BuildBackend::CpuAvx2,
+        "CpuAvx" => BuildBackend::CpuAvx,
+        "CpuFallback" => BuildBackend::CpuFallback,
+        _ => BuildBackend::CpuFallback,
+    }
+}
+
+fn owned_arch_to_static(arch: &str) -> Option<&'static str> {
+    match arch {
+        "sm_37" => Some("sm_37"),
+        "sm_50" => Some("sm_50"),
+        "sm_52" => Some("sm_52"),
+        "sm_53" => Some("sm_53"),
+        "sm_60" => Some("sm_60"),
+        "sm_61" => Some("sm_61"),
+        "sm_62" => Some("sm_62"),
+        "sm_70" => Some("sm_70"),
+        "sm_72" => Some("sm_72"),
+        "sm_75" => Some("sm_75"),
+        "sm_80" => Some("sm_80"),
+        "sm_86" => Some("sm_86"),
+        "sm_87" => Some("sm_87"),
+        "sm_89" => Some("sm_89"),
+        "sm_90" => Some("sm_90"),
+        "sm_90a" => Some("sm_90a"),
+        "sm_100" => Some("sm_100"),
+        "sm_100a" => Some("sm_100a"),
+        _ => None,
     }
 }
 
@@ -458,6 +556,40 @@ mod tests {
         assert_eq!(quit, Some(Action::Quit));
         app.dispatch(quit.expect("quit action"));
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn build_events_update_status_and_cap_log() {
+        let mut app = App::default();
+        for index in 0..505 {
+            app.handle_event(AppEvent::BuildEvent(BuildEvent::Compiling {
+                line: format!("line {index}"),
+            }));
+        }
+        assert_eq!(app.build_log.len(), 500);
+        assert!(app.build_running);
+
+        app.handle_event(AppEvent::BuildEvent(BuildEvent::Failed {
+            last_error: "cmake failed".to_string(),
+            log_tail: vec!["tail".to_string()],
+        }));
+        assert!(!app.build_running);
+        assert_eq!(app.build_error, Some("cmake failed".to_string()));
+    }
+
+    #[test]
+    fn build_config_uses_persisted_backend_and_clean_flag() {
+        let mut app = App::default();
+        app.state.build.backend = "Cuda".to_string();
+        app.state.build.archs = vec!["sm_86".to_string()];
+        let config = app.build_config(true);
+        assert!(config.clean);
+        assert_eq!(
+            config.backend,
+            BuildBackend::Cuda {
+                archs: vec!["sm_86"]
+            }
+        );
     }
 
     #[test]

@@ -4,7 +4,7 @@ use std::io;
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyEventKind};
-use lmml_build::UpdateCheck;
+use lmml_build::{BuildRunner, RealBuildRunner, UpdateCheck};
 use tokio::sync::mpsc;
 
 use crate::action::Action;
@@ -108,8 +108,22 @@ impl EventLoop {
                     let _ignored = tx.send(AppEvent::UpdateCheckResult(update)).await;
                 });
             }
-            Action::StartBuild
-            | Action::CancelBuild
+            Action::StartBuild | Action::CleanBuild | Action::UpdateAndRebuild => {
+                let clean = matches!(action, Action::CleanBuild);
+                app.dispatch(action);
+                let tx = self.app_tx.clone();
+                let config = app.build_config(clean);
+                tokio::spawn(async move {
+                    let runner = RealBuildRunner;
+                    let mut build_rx = runner.run(config).await;
+                    while let Some(event) = build_rx.recv().await {
+                        if tx.send(AppEvent::BuildEvent(event)).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+            Action::CancelBuild
             | Action::StartServer
             | Action::StopServer
             | Action::SelectModel(_)
@@ -118,7 +132,6 @@ impl EventLoop {
             | Action::DownloadModel(_)
             | Action::DeleteModel(_)
             | Action::AddModelAlias
-            | Action::UpdateAndRebuild
             | Action::SaveSettings
             | Action::ShowHelp
             | Action::Quit => app.dispatch(action),

@@ -16,6 +16,7 @@ pub fn render(area: Rect, frame: &mut Frame) {
         Line::from("Shift+Tab  previous tab"),
         Line::from("d          run detect"),
         Line::from("b          start build"),
+        Line::from("B          clean build"),
         Line::from("u          check for update"),
         Line::from("s          start server / save settings"),
         Line::from("/          open HF search"),

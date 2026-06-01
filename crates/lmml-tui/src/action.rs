@@ -9,6 +9,8 @@ pub enum Action {
     RunDetect,
     /// Start a llama.cpp build.
     StartBuild,
+    /// Start a clean llama.cpp build.
+    CleanBuild,
     /// Cancel the running build.
     CancelBuild,
     /// Start llama-server.
