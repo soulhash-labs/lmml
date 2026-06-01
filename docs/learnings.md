@@ -644,3 +644,46 @@ Clean-install source smokes should isolate lmml config/data with a temporary
 `HOME`, but preserve `CARGO_HOME` and `RUSTUP_HOME` from the caller so the test
 uses the developer toolchain instead of pretending the source host has no Rust
 toolchain configured.
+
+### Signed Checksums Need an Explicit Policy
+
+Unsigned `SHA256SUMS` is useful for corruption detection on a trusted LAN, but
+not for authenticity. The installer needs a policy knob:
+
+```sh
+LMML_CHECKSUM_VERIFY=optional|required|off
+```
+
+Use `required` for public or untrusted-network installs with a configured
+minisign public key. Keep `optional` as the LAN/dev default so existing trusted
+LAN bootstrap flows still work while warning when no signature verification is
+performed.
+
+For local-only v0.1.0, real minisign keypair verification is not a release
+blocker. It becomes mandatory when lmml is published outside the trusted
+local/LAN release environment.
+
+---
+
+## 12. Session Summary (2026-06-01) — What We Did
+
+Release hardening moved from review findings to implemented fixes:
+
+- Fixed runtime/TUI truthfulness issues: full build process-group cancellation,
+  explicit backend override semantics, safe running-server model swap, and
+  startup detect/model scan dispatch.
+- Hardened release install paths: default binary install remains the primary
+  path, source-build install is explicit, preflight is mode-aware, and CPU-only
+  nodes must opt in with `LMML_GPU_MODE=cpu-only`.
+- Preserved real GPU probe failure messages in `lmml doctor`, so driver/runtime
+  failures are visible instead of being collapsed into generic "GPU not found"
+  text.
+- Made packaging more reproducible and local-LAN complete: deterministic tarball
+  settings, `RELEASE-METADATA`, source tarball, `preflight.sh`, and sorted
+  `SHA256SUMS`.
+- Added optional signed-checksum support for future/public release needs while
+  keeping local v0.1.0 unblocked by real keypair management.
+
+Key lesson: keep local v0.1.0 claims narrow. The tested claim is local/LAN
+Linux x86_64 install readiness, not broad production readiness across every
+platform, GPU stack, or public distribution threat model.

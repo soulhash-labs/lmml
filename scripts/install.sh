@@ -4,6 +4,7 @@ set -eu
 BASE_URL=${BASE_URL:-https://github.com/YOUR_ORG/lmml/releases/latest}
 VERSION=${VERSION:-}
 INSTALL_MODE=${INSTALL_MODE:-binary}
+LMML_CHECKSUM_VERIFY=${LMML_CHECKSUM_VERIFY:-optional}
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/lmml-install.XXXXXX")
 
 cleanup() {
@@ -142,6 +143,18 @@ download() {
   fi
 }
 
+try_download() {
+  url=$1
+  out=$2
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$url" -o "$out" 2>/dev/null
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q "$url" -O "$out" 2>/dev/null
+  else
+    return 1
+  fi
+}
+
 sha256_file() {
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum "$1" | awk '{ print $1 }'
@@ -157,6 +170,11 @@ case "$INSTALL_MODE" in
   *) fail "Unsupported INSTALL_MODE=$INSTALL_MODE" "Use INSTALL_MODE=binary or INSTALL_MODE=source." ;;
 esac
 
+case "$LMML_CHECKSUM_VERIFY" in
+  optional|required|off) ;;
+  *) fail "Unsupported LMML_CHECKSUM_VERIFY=$LMML_CHECKSUM_VERIFY" "Use LMML_CHECKSUM_VERIFY=optional, required, or off." ;;
+esac
+
 if [ -z "$VERSION" ]; then
   download "$BASE_URL/latest" "$TMP_DIR/latest"
   VERSION=$(sed -n '1p' "$TMP_DIR/latest" | tr -d '[:space:]')
@@ -164,6 +182,51 @@ fi
 
 sums_url="$BASE_URL/SHA256SUMS"
 download "$sums_url" "$TMP_DIR/SHA256SUMS"
+
+verify_signed_checksums() {
+  mode=$LMML_CHECKSUM_VERIFY
+  if [ "$mode" = "off" ]; then
+    warn "signed SHA256SUMS verification disabled by LMML_CHECKSUM_VERIFY=off"
+    return 0
+  fi
+
+  sig_url="$BASE_URL/SHA256SUMS.minisig"
+  if ! try_download "$sig_url" "$TMP_DIR/SHA256SUMS.minisig"; then
+    if [ "$mode" = "required" ]; then
+      fail "signed checksum verification required, but SHA256SUMS.minisig was not available" "Publish SHA256SUMS.minisig or use LMML_CHECKSUM_VERIFY=optional for trusted LAN testing."
+    fi
+    warn "SHA256SUMS.minisig not found; using unsigned SHA256 integrity only"
+    return 0
+  fi
+
+  if ! command -v minisign >/dev/null 2>&1; then
+    if [ "$mode" = "required" ]; then
+      fail "minisign is required to verify signed checksums" "Install minisign or use LMML_CHECKSUM_VERIFY=optional for trusted LAN testing."
+    fi
+    warn "minisign not found; using unsigned SHA256 integrity only"
+    return 0
+  fi
+
+  if [ "${LMML_MINISIGN_PUBLIC_KEY:-}" ]; then
+    if ! minisign -Vm "$TMP_DIR/SHA256SUMS" -x "$TMP_DIR/SHA256SUMS.minisig" -P "$LMML_MINISIGN_PUBLIC_KEY" >/dev/null; then
+      fail "SHA256SUMS signature verification failed" "Check that LMML_MINISIGN_PUBLIC_KEY matches the release signing key."
+    fi
+  elif [ "${LMML_MINISIGN_PUBLIC_KEY_FILE:-}" ]; then
+    if ! minisign -Vm "$TMP_DIR/SHA256SUMS" -x "$TMP_DIR/SHA256SUMS.minisig" -p "$LMML_MINISIGN_PUBLIC_KEY_FILE" >/dev/null; then
+      fail "SHA256SUMS signature verification failed" "Check that LMML_MINISIGN_PUBLIC_KEY_FILE contains the release signing key."
+    fi
+  else
+    if [ "$mode" = "required" ]; then
+      fail "signed checksum verification required, but no minisign public key was configured" "Set LMML_MINISIGN_PUBLIC_KEY or LMML_MINISIGN_PUBLIC_KEY_FILE."
+    fi
+    warn "SHA256SUMS.minisig found, but no minisign public key configured; using unsigned SHA256 integrity only"
+    return 0
+  fi
+
+  echo "✓ SHA256SUMS minisign signature verified"
+}
+
+verify_signed_checksums
 
 verify_download() {
   file=$1

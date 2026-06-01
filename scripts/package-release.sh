@@ -129,6 +129,19 @@ if [ -n "$ALIAS_TARBALL" ]; then
   update_checksums "$ALIAS_TARBALL"
 fi
 
+rm -f "$DIST_DIR/SHA256SUMS.minisig"
+if [ "${LMML_SIGN_CHECKSUMS:-0}" = "1" ]; then
+  if ! command -v minisign >/dev/null 2>&1; then
+    echo "LMML_SIGN_CHECKSUMS=1 requires minisign on PATH." >&2
+    exit 1
+  fi
+  if [ -z "${LMML_MINISIGN_SECRET_KEY_FILE:-}" ]; then
+    echo "LMML_SIGN_CHECKSUMS=1 requires LMML_MINISIGN_SECRET_KEY_FILE." >&2
+    exit 1
+  fi
+  minisign -Sm "$DIST_DIR/SHA256SUMS" -s "$LMML_MINISIGN_SECRET_KEY_FILE" -x "$DIST_DIR/SHA256SUMS.minisig"
+fi
+
 if command -v sha256sum >/dev/null 2>&1; then
   CHECKSUM=$(cd "$DIST_DIR" && sha256sum "$TARBALL" | awk '{ print $1 }')
 else

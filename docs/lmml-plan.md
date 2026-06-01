@@ -988,6 +988,25 @@ original crate-build milestones:
 | C — Installer semantics and supply chain | Complete | Binary installer fails on hard `lmml doctor` prereqs, clean-install smoke tests the documented HTTP path, and packaging normalizes tar/gzip metadata. |
 | D — Docs truthfulness + backend claims | Complete | Docs distinguish current v2 from historical root-package rows. Vulkan backend selection/build support is proven in current crate tests; ROCm remains a production gap. |
 | E — Verification gate | Passing on current x86_64 Linux host | Workspace fmt/clippy/tests, release package generation, and HTTP binary/source installer smokes pass. Remaining release risk is clean CUDA VM and cross-target builders. |
+| F — Signed checksum authenticity | Complete for local v0.1.0 | Installer and packaging support minisign-signed `SHA256SUMS`. Real release-keypair verification is deferred until a future public/non-local release. |
+| G — Local v0.1.0 release closure | Next | Rerun final gates after Phase 7, verify binary/source HTTP install from `dist/`, then tag or archive the local-only release. |
+
+### What changed during release hardening
+
+- Runtime correctness now matches the TUI promises: cancel stops process-group
+  descendants, backend overrides persist over auto-detect, model swaps on a
+  running server use confirmation and restart only after success, and startup
+  schedules detect plus model scan without manual refresh.
+- `lmml doctor` preserves actual GPU probe errors and treats GPU issues as
+  visible acceleration warnings while keeping exit-code failures focused on hard
+  prerequisites.
+- Installer flow is split by intent: binary install is the default verified
+  tarball path; source install is explicit, preflighted, and built from a
+  checksummed source tarball served from `dist/`.
+- Release packaging now normalizes tar/gzip metadata, includes preflight and
+  source artifacts, supports optional minisign-signed checksums, and keeps LAN
+  SHA256 checks honest as integrity-only unless signature verification is
+  required.
 
 ### Preflight and source-build bootstrap plan
 

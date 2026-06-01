@@ -7,6 +7,10 @@ Current v0.1.0 release scope is the tested Linux x86_64 LAN install flow. Other
 target tarballs should be built and validated on matching builders before they
 are advertised as release-ready.
 
+This is a local/LAN release scope, not a broad production-ready claim. GPU
+acceleration is the primary path; intentional CPU-only nodes are supported by
+explicit opt-in during preflight/install.
+
 ## Install
 
 ### One-line install (Linux / macOS)
@@ -32,8 +36,15 @@ cd dist && python3 -m http.server 8000
 The LAN HTTP flow verifies `SHA256SUMS` to catch corrupt or incomplete
 downloads. It is not tamper-proof: anyone who can alter the HTTP response can
 alter both the tarball and checksum file. Treat it as an integrity check for a
-trusted LAN release host until signed checksums or HTTPS public releases are in
-place.
+trusted LAN release host unless you require signed checksum verification.
+
+For a future public or non-local signed release, publish `SHA256SUMS.minisig`
+from `scripts/package-release.sh` and require minisign verification during
+install:
+
+```sh
+curl -fsSL https://release.example/install.sh | LMML_CHECKSUM_VERIFY=required LMML_MINISIGN_PUBLIC_KEY='RW...' sh
+```
 
 ### Preflight and source-build bootstrap
 

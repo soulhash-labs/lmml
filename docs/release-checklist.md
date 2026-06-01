@@ -8,12 +8,19 @@ tested host/target. Do not broaden that into â€œall platforms production-readyâ€
 until each target tarball is built and validated on a matching machine or CI
 runner.
 
+For local-only v0.1.0, a real minisign release keypair is not required. The
+signed-checksum installer and packaging hooks must keep passing fixture tests so
+the future public-release path remains wired.
+
 ## Required Gates
 
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace -- -D warnings
 cargo test --workspace
+tests/integration/script_syntax.sh
+tests/integration/preflight.sh
+tests/integration/signed_checksums.sh
 cargo build --release -p lmml-tui
 ldd target/release/lmml
 scripts/package-release.sh
@@ -73,8 +80,20 @@ the prerequisite error visible.
 The LAN HTTP checksum is an integrity check, not authenticity. It detects
 corrupt or incomplete downloads from a trusted release host, but it does not
 protect against a host or network attacker who can replace both the tarball and
-`SHA256SUMS`. Do not describe LAN HTTP installs as tamper-proof until signed
-checksums or HTTPS-hosted releases are implemented.
+`SHA256SUMS`.
+
+Signed checksum verification is supported with minisign. Local/LAN v0.1.0 does
+not require a real release signing keypair. Future public releases should
+publish `SHA256SUMS.minisig` and require signature verification:
+
+```sh
+LMML_SIGN_CHECKSUMS=1 LMML_MINISIGN_SECRET_KEY_FILE=/secure/lmml-minisign.key scripts/package-release.sh
+curl -fsSL https://release.example/install.sh | LMML_CHECKSUM_VERIFY=required LMML_MINISIGN_PUBLIC_KEY='RW...' sh
+```
+
+For LAN testing, the installer defaults to `LMML_CHECKSUM_VERIFY=optional`.
+That mode verifies `SHA256SUMS.minisig` when a signature and public key are
+configured, otherwise it warns and falls back to SHA256 integrity only.
 
 ## Reproducibility Check
 

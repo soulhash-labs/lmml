@@ -26,6 +26,21 @@ checks, hard-prereq doctor gate, installed uninstaller, and clean-install smoke
 test. Broader platform readiness still requires target-specific builder or CI
 validation.
 
+Current local v0.1.0 hardening state:
+
+- Runtime/TUI correctness blockers are fixed: build cancellation owns subprocess
+  groups, explicit backend overrides win over auto-detect, running server model
+  swaps require confirmation and restart safely, startup auto-detect/model scan
+  is wired, and first-run flow no longer depends on manual refresh.
+- Installer/distribution flow is local-LAN ready for the tested Linux x86_64
+  path: binary tarball install remains default, source-build bootstrap is
+  explicit, `preflight.sh` is mode-aware, clean-install smoke uses the
+  documented HTTP path, and release archives are reproducible enough for local
+  v0.1.0.
+- Signed checksum support exists for future/public release hardening, but real
+  minisign release-keypair verification is not a blocker while v0.1.0 remains
+  local/LAN-only.
+
 GPU acceleration is primary and first-class. Preflight should fail GPU
 acceleration failures by default, while allowing intentional CPU-only nodes only
 through an explicit `LMML_GPU_MODE=cpu-only` setting.
@@ -178,7 +193,7 @@ release claims.
 - [ ] Build and publish the remaining cross-target tarballs on matching builders or CI runners: `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`, `aarch64-apple-darwin`
 - [ ] Replace README placeholder release URL (`https://your-lan-or-github/install.sh`) with the real public release URL when hosting is chosen
 - [ ] Run `tests/integration/clean_install.sh` on a clean Ubuntu 24.04 x86_64 VM with CUDA drivers before tagging each release
-- [ ] Add signed `SHA256SUMS` verification or HTTPS-hosted public releases before claiming checksum authenticity against tampering
+- [x] Add signed `SHA256SUMS` verification support before claiming checksum authenticity against tampering
 
 ---
 
@@ -200,3 +215,43 @@ fallback/dev/LAN bootstrap path.
 - [x] Add preflight fixture tests for binary/source mode, missing Rust, GPU-required failure, and CPU-only pass
 - [x] Add clean source-install smoke with isolated `HOME`
 - [x] Document exact pipeline syntax for binary, source, auto-fix, GPU-required, and CPU-only flows
+
+---
+
+## Phase 7 — Signed Checksum Release Authenticity (Completed for Local v0.1.0)
+
+Default LAN installs still support unsigned `SHA256SUMS` as integrity-only for
+trusted LAN hosts. Production/public release flows should require a signed
+`SHA256SUMS.minisig`.
+
+- [x] Add `LMML_CHECKSUM_VERIFY=optional|required|off` installer policy
+- [x] Add minisign verification for `SHA256SUMS.minisig` using `LMML_MINISIGN_PUBLIC_KEY` or `LMML_MINISIGN_PUBLIC_KEY_FILE`
+- [x] Keep unsigned checksum fallback warning-only for trusted LAN testing
+- [x] Make `LMML_CHECKSUM_VERIFY=required` fail clearly when signature, minisign, or public key is missing
+- [x] Add `LMML_SIGN_CHECKSUMS=1` packaging hook that signs `SHA256SUMS` with `LMML_MINISIGN_SECRET_KEY_FILE`
+- [x] Add installer fixture tests for required signed verification failure and invalid verification mode
+- [x] Keep real minisign release-keypair verification as a future/public-release task, not a local v0.1.0 blocker
+
+### Future Public Release Follow-up
+
+- [ ] Before publishing outside the local/LAN environment, generate and verify a real minisign release keypair and publish the public key with release instructions.
+
+---
+
+## Phase 8 — Local v0.1.0 Release Closure (Next)
+
+Goal: finish the local-only v0.1.0 release without broadening the readiness
+claim beyond the tested LAN target.
+
+- [ ] Run the final release gate after Phase 7 changes: `cargo fmt --all -- --check`, `cargo clippy --workspace -- -D warnings`, `cargo test --workspace`, script fixture tests, package, `lmml doctor`, and clean-install smoke
+- [ ] Re-run both documented HTTP install modes from `dist/`: default binary install and explicit `INSTALL_MODE=source`
+- [ ] Confirm `README.md` and `docs/release-checklist.md` still describe local/LAN v0.1.0 honestly, including GPU-primary and CPU-only opt-in semantics
+- [ ] Decide whether local release uses an ad hoc LAN host URL or a fixed internal host; replace placeholder URLs only if a fixed host is chosen
+- [ ] Tag or otherwise archive the local v0.1.0 release once verification passes
+
+### Deferred Beyond Local v0.1.0
+
+- [ ] Build and validate non-x86_64 target tarballs on matching builders or CI
+- [ ] Run a clean Ubuntu 24.04 CUDA VM validation before making broader GPU claims
+- [ ] Require real signed-checksum verification for any public/non-local release
+- [ ] Implement v2 ROCm/HIP production support before claiming AMD GPU production readiness
