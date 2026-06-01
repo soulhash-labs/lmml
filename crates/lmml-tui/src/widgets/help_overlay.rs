@@ -21,6 +21,7 @@ pub fn render(area: Rect, frame: &mut Frame) {
         Line::from("s          start server / save settings"),
         Line::from("r          scan models"),
         Line::from("/          open HF search"),
+        Line::from("D          download selected HF result"),
         Line::from("a          add model alias"),
         Line::from("?          close help"),
         Line::from("q/Ctrl+C   quit"),

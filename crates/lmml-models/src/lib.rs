@@ -8,8 +8,10 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use lmml_detect::GpuInfo;
+use reqwest::header::{CONTENT_LENGTH, RANGE};
+use serde::Deserialize;
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 /// A local GGUF model entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,13 +138,81 @@ impl ModelRegistry {
         Ok(())
     }
 
-    /// Placeholder download API; implemented by Milestone 9.
+    /// Download a model URL into `models_dir`, resuming a partial file when present.
     pub async fn download(
         &self,
-        _url: &str,
-        _on_progress: impl Fn(DownloadProgress) + Send + 'static,
+        url: &str,
+        on_progress: impl Fn(DownloadProgress) + Send + 'static,
     ) -> Result<ModelEntry, DownloadError> {
-        Err(DownloadError::Unsupported)
+        self.download_with_client(url, reqwest::Client::new(), on_progress)
+            .await
+    }
+
+    async fn download_with_client(
+        &self,
+        url: &str,
+        client: reqwest::Client,
+        on_progress: impl Fn(DownloadProgress) + Send + 'static,
+    ) -> Result<ModelEntry, DownloadError> {
+        tokio::fs::create_dir_all(&self.models_dir)
+            .await
+            .map_err(DownloadError::Io)?;
+        let filename = filename_from_url(url)?;
+        let final_path = self.models_dir.join(&filename);
+        let part_path = self.models_dir.join(format!("{filename}.part"));
+        let mut resumed_from = tokio::fs::metadata(&part_path)
+            .await
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+
+        let mut request = client.get(url);
+        if let Some(range) = range_header(resumed_from) {
+            request = request.header(RANGE, range);
+        }
+        let mut response = request.send().await.map_err(DownloadError::Http)?;
+        if !response.status().is_success()
+            && response.status() != reqwest::StatusCode::PARTIAL_CONTENT
+        {
+            return Err(DownloadError::Status(response.status().as_u16()));
+        }
+        let append = resumed_from > 0 && response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+        if resumed_from > 0 && !append {
+            resumed_from = 0;
+        }
+
+        let total_bytes = response
+            .headers()
+            .get(CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(|length| length + resumed_from);
+        let mut file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .append(append)
+            .truncate(!append)
+            .open(&part_path)
+            .await
+            .map_err(DownloadError::Io)?;
+        let mut bytes_received = resumed_from;
+
+        while let Some(chunk) = response.chunk().await.map_err(DownloadError::Http)? {
+            file.write_all(&chunk).await.map_err(DownloadError::Io)?;
+            bytes_received += chunk.len() as u64;
+            on_progress(DownloadProgress {
+                bytes_received,
+                total_bytes,
+                resumed_from,
+            });
+        }
+        file.flush().await.map_err(DownloadError::Io)?;
+        drop(file);
+        tokio::fs::rename(&part_path, &final_path)
+            .await
+            .map_err(DownloadError::Io)?;
+        parse_model_file(&final_path, false)
+            .await
+            .ok_or_else(|| DownloadError::InvalidDownloadedFile(final_path))
     }
 
     /// Delete a model file.
@@ -168,6 +238,150 @@ pub struct DownloadProgress {
     pub resumed_from: u64,
 }
 
+/// Hugging Face model search query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HfSearchQuery {
+    /// Search keywords.
+    pub keywords: String,
+    /// Optional architecture filter, such as `llama` or `mistral`.
+    pub architecture: Option<String>,
+    /// Optional quantization tier filter.
+    pub quant_filter: Option<QuantTier>,
+    /// Maximum result count.
+    pub max_results: usize,
+}
+
+/// Quantization tier filter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuantTier {
+    /// Q4 quantized models.
+    Q4,
+    /// Q5 quantized models.
+    Q5,
+    /// Q6 quantized models.
+    Q6,
+    /// Q8 quantized models.
+    Q8,
+    /// FP16 models.
+    F16,
+    /// FP32 models.
+    F32,
+}
+
+impl QuantTier {
+    fn needle(self) -> &'static str {
+        match self {
+            QuantTier::Q4 => "Q4",
+            QuantTier::Q5 => "Q5",
+            QuantTier::Q6 => "Q6",
+            QuantTier::Q8 => "Q8",
+            QuantTier::F16 => "F16",
+            QuantTier::F32 => "F32",
+        }
+    }
+}
+
+/// Hugging Face GGUF file result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HfModelResult {
+    /// Hugging Face repository id.
+    pub repo_id: String,
+    /// GGUF filename.
+    pub filename: String,
+    /// File size in bytes, if reported.
+    pub size_bytes: u64,
+    /// Repository download count.
+    pub downloads: u64,
+    /// Direct resolve URL for the file.
+    pub url: String,
+}
+
+/// Search Hugging Face for GGUF model files.
+pub async fn search_huggingface(query: HfSearchQuery) -> Result<Vec<HfModelResult>, HfError> {
+    let client = reqwest::Client::new();
+    search_huggingface_with_client(query, client).await
+}
+
+async fn search_huggingface_with_client(
+    query: HfSearchQuery,
+    client: reqwest::Client,
+) -> Result<Vec<HfModelResult>, HfError> {
+    let response = client
+        .get("https://huggingface.co/api/models")
+        .query(&[
+            ("search", query.keywords.as_str()),
+            ("filter", "gguf"),
+            ("full", "true"),
+        ])
+        .send()
+        .await
+        .map_err(HfError::Http)?;
+    if !response.status().is_success() {
+        return Err(HfError::Status(response.status().as_u16()));
+    }
+    let body = response.text().await.map_err(HfError::Http)?;
+    parse_hf_search_response(&query, &body)
+}
+
+/// Parse Hugging Face model API JSON into GGUF file results.
+pub fn parse_hf_search_response(
+    query: &HfSearchQuery,
+    body: &str,
+) -> Result<Vec<HfModelResult>, HfError> {
+    let repos: Vec<HfRepo> = serde_json::from_str(body).map_err(HfError::Json)?;
+    let mut results = Vec::new();
+    for repo in repos {
+        let repo_id = repo.id.or(repo.model_id).unwrap_or_default();
+        if repo_id.is_empty() {
+            continue;
+        }
+        if let Some(architecture) = &query.architecture {
+            let haystack = format!("{} {}", repo_id, repo.tags.join(" ")).to_lowercase();
+            if !haystack.contains(&architecture.to_lowercase()) {
+                continue;
+            }
+        }
+        for sibling in repo.siblings {
+            let Some(filename) = sibling.rfilename else {
+                continue;
+            };
+            if !filename.to_lowercase().ends_with(".gguf") {
+                continue;
+            }
+            if let Some(quant) = query.quant_filter {
+                if !filename.to_uppercase().contains(quant.needle()) {
+                    continue;
+                }
+            }
+            results.push(HfModelResult {
+                repo_id: repo_id.clone(),
+                filename: filename.clone(),
+                size_bytes: sibling.size.unwrap_or(0),
+                downloads: repo.downloads.unwrap_or(0),
+                url: hf_resolve_url(&repo_id, &filename),
+            });
+            if results.len() >= query.max_results {
+                return Ok(results);
+            }
+        }
+    }
+    Ok(results)
+}
+
+/// Hugging Face API error.
+#[derive(Debug, Error)]
+pub enum HfError {
+    /// HTTP request failed.
+    #[error("Hugging Face request failed: {0}")]
+    Http(#[source] reqwest::Error),
+    /// API returned a non-success status.
+    #[error("Hugging Face returned HTTP status {0}")]
+    Status(u16),
+    /// JSON response did not match expected shape.
+    #[error("failed to parse Hugging Face response: {0}")]
+    Json(#[source] serde_json::Error),
+}
+
 /// Registry operation error.
 #[derive(Debug, Error)]
 pub enum RegistryError {
@@ -189,11 +403,40 @@ pub enum RegistryError {
 }
 
 /// Download error.
-#[derive(Debug, Clone, Error, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum DownloadError {
-    /// Download support lands in Milestone 9.
-    #[error("model downloads are implemented in Milestone 9")]
-    Unsupported,
+    /// HTTP request failed.
+    #[error("download request failed: {0}")]
+    Http(#[source] reqwest::Error),
+    /// Server returned a non-success status.
+    #[error("download returned HTTP status {0}")]
+    Status(u16),
+    /// Filesystem IO failed.
+    #[error("download IO failed: {0}")]
+    Io(#[source] std::io::Error),
+    /// URL did not contain a valid filename.
+    #[error("download URL does not contain a valid filename: {0}")]
+    InvalidFilename(String),
+    /// Downloaded file could not be parsed as a model.
+    #[error("downloaded file is not a valid model: {0}")]
+    InvalidDownloadedFile(PathBuf),
+}
+
+#[derive(Debug, Deserialize)]
+struct HfRepo {
+    id: Option<String>,
+    #[serde(rename = "modelId")]
+    model_id: Option<String>,
+    siblings: Vec<HfSibling>,
+    downloads: Option<u64>,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HfSibling {
+    rfilename: Option<String>,
+    size: Option<u64>,
 }
 
 /// Parsed GGUF metadata header.
@@ -560,6 +803,36 @@ fn model_name_from_filename(filename: &str) -> String {
     }
 }
 
+fn filename_from_url(url: &str) -> Result<String, DownloadError> {
+    let without_query = url.split('?').next().unwrap_or(url);
+    let filename = without_query
+        .rsplit('/')
+        .next()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| DownloadError::InvalidFilename(url.to_string()))?;
+    Ok(filename.to_string())
+}
+
+fn range_header(resumed_from: u64) -> Option<String> {
+    (resumed_from > 0).then(|| format!("bytes={resumed_from}-"))
+}
+
+fn hf_resolve_url(repo_id: &str, filename: &str) -> String {
+    let mut url = reqwest::Url::parse("https://huggingface.co/").expect("static HF base URL");
+    {
+        let mut segments = url.path_segments_mut().expect("static HF base URL path");
+        for segment in repo_id.split('/') {
+            segments.push(segment);
+        }
+        segments.push("resolve");
+        segments.push("main");
+        for segment in filename.split('/') {
+            segments.push(segment);
+        }
+    }
+    url.to_string()
+}
+
 fn bytes_to_mib(bytes: u64) -> u64 {
     bytes.div_ceil(1024 * 1024)
 }
@@ -681,6 +954,65 @@ mod tests {
         let entry = parse_model_file(&path, false).await.expect("entry");
         assert_eq!(entry.quant, "Q8_0");
         assert_eq!(entry.name, "phi-3");
+    }
+
+    #[test]
+    fn parses_hf_search_response_with_filters() {
+        let body = r#"
+        [
+          {
+            "id": "org/Mistral-GGUF",
+            "downloads": 42,
+            "tags": ["mistral", "gguf"],
+            "siblings": [
+              {"rfilename": "nested/mistral 7b Q4_K_M.gguf", "size": 1234},
+              {"rfilename": "mistral-7b-Q8_0.gguf", "size": 9999},
+              {"rfilename": "README.md", "size": 12}
+            ]
+          }
+        ]
+        "#;
+        let query = HfSearchQuery {
+            keywords: "mistral".to_string(),
+            architecture: Some("mistral".to_string()),
+            quant_filter: Some(QuantTier::Q4),
+            max_results: 10,
+        };
+        let results = parse_hf_search_response(&query, body).expect("parse hf");
+        assert_eq!(
+            results,
+            vec![HfModelResult {
+                repo_id: "org/Mistral-GGUF".to_string(),
+                filename: "nested/mistral 7b Q4_K_M.gguf".to_string(),
+                size_bytes: 1234,
+                downloads: 42,
+                url:
+                    "https://huggingface.co/org/Mistral-GGUF/resolve/main/nested/mistral%207b%20Q4_K_M.gguf"
+                        .to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn resume_download_uses_range_header_and_url_filename() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let models_dir = tempdir.path().join("models");
+        std::fs::create_dir_all(&models_dir).expect("models dir");
+        let part_path = models_dir.join("model-Q4_K_M.gguf.part");
+        let fixture = fixture_gguf();
+        std::fs::write(&part_path, &fixture[..12]).expect("partial");
+
+        let resumed_from = std::fs::metadata(&part_path).expect("metadata").len();
+        assert_eq!(resumed_from, 12);
+        assert_eq!(range_header(resumed_from).as_deref(), Some("bytes=12-"));
+        assert_eq!(range_header(0), None);
+        assert_eq!(
+            filename_from_url(
+                "https://huggingface.co/org/repo/resolve/main/model-Q4_K_M.gguf?download=1"
+            )
+            .expect("filename"),
+            "model-Q4_K_M.gguf"
+        );
     }
 
     fn fixture_gguf() -> Vec<u8> {

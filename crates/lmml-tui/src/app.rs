@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use lmml_build::{BuildEvent, UpdateCheck};
 use lmml_detect::{BuildBackend, SystemProfile};
-use lmml_models::ModelEntry;
+use lmml_models::{DownloadProgress, HfModelResult, ModelEntry};
 use lmml_state::AppState as PersistentState;
 
 use crate::action::Action;
@@ -70,15 +70,6 @@ pub enum ServerStatus {
     Failed { reason: String },
 }
 
-/// Download progress placeholder until `lmml-models` lands.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DownloadProgress {
-    /// Bytes received.
-    pub bytes_received: u64,
-    /// Total bytes, if known.
-    pub total_bytes: Option<u64>,
-}
-
 /// Background and terminal events consumed by the app.
 #[derive(Debug, Clone)]
 pub enum AppEvent {
@@ -96,10 +87,12 @@ pub enum AppEvent {
     ServerLog(String),
     /// Download progress changed.
     DownloadProgress(DownloadProgress),
+    /// Download completed.
+    DownloadComplete(Result<ModelEntry, String>),
     /// Model scan completed.
     ModelScanComplete(Vec<ModelEntry>),
     /// Hugging Face search completed.
-    HfSearchResults(Vec<crate::action::HfModelResult>),
+    HfSearchResults(Vec<HfModelResult>),
     /// Update check completed.
     UpdateCheckResult(UpdateCheck),
 }
@@ -137,6 +130,18 @@ pub struct App {
     pub models: Vec<ModelEntry>,
     /// Selected model list index.
     pub selected_model: usize,
+    /// Whether HF search pane is open.
+    pub hf_search_open: bool,
+    /// Current HF search query.
+    pub hf_query: String,
+    /// HF search results.
+    pub hf_results: Vec<HfModelResult>,
+    /// Selected HF result index.
+    pub selected_hf_result: usize,
+    /// Current download progress.
+    pub download_progress: Option<DownloadProgress>,
+    /// Last download error.
+    pub download_error: Option<String>,
     /// Last update-check result.
     pub update_check: Option<UpdateCheck>,
     /// Last UI status message.
@@ -179,6 +184,12 @@ impl App {
             server_log: Vec::new(),
             models: Vec::new(),
             selected_model: 0,
+            hf_search_open: false,
+            hf_query: "gguf".to_string(),
+            hf_results: Vec::new(),
+            selected_hf_result: 0,
+            download_progress: None,
+            download_error: None,
             update_check: None,
             status_message: "Ready".to_string(),
             terminal_size: None,
@@ -245,12 +256,27 @@ impl App {
                 None
             }
             AppEvent::DownloadProgress(progress) => {
+                self.download_progress = Some(progress.clone());
                 self.status_message = match progress.total_bytes {
                     Some(total) => {
                         format!("Downloading {} / {} bytes", progress.bytes_received, total)
                     }
                     None => format!("Downloading {} bytes", progress.bytes_received),
                 };
+                None
+            }
+            AppEvent::DownloadComplete(result) => {
+                match result {
+                    Ok(model) => {
+                        self.download_error = None;
+                        self.status_message = format!("Downloaded {}", model.name);
+                        self.models.push(model);
+                    }
+                    Err(error) => {
+                        self.download_error = Some(error.clone());
+                        self.status_message = format!("Download failed: {error}");
+                    }
+                }
                 None
             }
             AppEvent::ModelScanComplete(models) => {
@@ -261,7 +287,12 @@ impl App {
                 None
             }
             AppEvent::HfSearchResults(results) => {
-                self.status_message = format!("{} Hugging Face result(s)", results.len());
+                let count = results.len();
+                self.hf_results = results;
+                self.selected_hf_result = self
+                    .selected_hf_result
+                    .min(self.hf_results.len().saturating_sub(1));
+                self.status_message = format!("{count} Hugging Face result(s)");
                 None
             }
             AppEvent::UpdateCheckResult(update) => {
@@ -313,12 +344,17 @@ impl App {
                 self.status_message = "Scanning models".to_string();
             }
             Action::OpenHfSearch => {
+                self.hf_search_open = true;
                 self.status_message = "HF search opened".to_string();
             }
             Action::SearchHf(query) => {
+                self.hf_search_open = true;
+                self.hf_query = query.keywords.clone();
                 self.status_message = format!("Searching: {}", query.keywords);
             }
             Action::DownloadModel(result) => {
+                self.download_progress = None;
+                self.download_error = None;
                 self.status_message = format!("Downloading {}", result.filename);
             }
             Action::DeleteModel(model) => {
@@ -371,11 +407,20 @@ impl App {
                 None
             }
             KeyCode::Up if self.active_tab == Tab::Models => {
-                self.select_previous_model();
+                if self.hf_search_open && !self.hf_results.is_empty() {
+                    self.selected_hf_result = self.selected_hf_result.saturating_sub(1);
+                } else {
+                    self.select_previous_model();
+                }
                 None
             }
             KeyCode::Down if self.active_tab == Tab::Models => {
-                self.select_next_model();
+                if self.hf_search_open && !self.hf_results.is_empty() {
+                    self.selected_hf_result =
+                        (self.selected_hf_result + 1).min(self.hf_results.len() - 1);
+                } else {
+                    self.select_next_model();
+                }
                 None
             }
             KeyCode::Enter if self.active_tab == Tab::Models => self
@@ -414,7 +459,17 @@ impl App {
                 Tab::Settings => Some(Action::SaveSettings),
                 Tab::Detect | Tab::Build | Tab::Models => None,
             },
-            KeyCode::Char('/') => Some(Action::OpenHfSearch),
+            KeyCode::Char('/') => Some(Action::SearchHf(lmml_models::HfSearchQuery {
+                keywords: self.hf_query.clone(),
+                architecture: None,
+                quant_filter: None,
+                max_results: 20,
+            })),
+            KeyCode::Char('D') if self.active_tab == Tab::Models => self
+                .hf_results
+                .get(self.selected_hf_result)
+                .cloned()
+                .map(Action::DownloadModel),
             KeyCode::Char('a') => Some(Action::AddModelAlias),
             KeyCode::Char('r') if self.active_tab == Tab::Models => Some(Action::ScanModels),
             _ => None,
@@ -657,6 +712,34 @@ mod tests {
         assert_eq!(app.selected_model, 1);
         let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
         assert_eq!(action, Some(Action::SelectModel(PathBuf::from("b.gguf"))));
+    }
+
+    #[test]
+    fn hf_results_and_download_progress_update_state() {
+        let mut app = App::default();
+        app.handle_event(AppEvent::HfSearchResults(vec![HfModelResult {
+            repo_id: "org/model".to_string(),
+            filename: "model-Q4_K_M.gguf".to_string(),
+            size_bytes: 10,
+            downloads: 5,
+            url: "https://example.test/model-Q4_K_M.gguf".to_string(),
+        }]));
+        assert_eq!(app.hf_results.len(), 1);
+        app.active_tab = Tab::Models;
+        let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('D'))));
+        assert!(matches!(action, Some(Action::DownloadModel(_))));
+
+        app.handle_event(AppEvent::DownloadProgress(DownloadProgress {
+            bytes_received: 5,
+            total_bytes: Some(10),
+            resumed_from: 2,
+        }));
+        assert_eq!(
+            app.download_progress
+                .as_ref()
+                .map(|progress| progress.resumed_from),
+            Some(2)
+        );
     }
 
     fn model_entry(path: &str) -> ModelEntry {

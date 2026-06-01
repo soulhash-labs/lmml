@@ -24,9 +24,9 @@ pub enum Action {
     /// Open the Hugging Face search pane.
     OpenHfSearch,
     /// Search Hugging Face.
-    SearchHf(HfSearchQuery),
+    SearchHf(lmml_models::HfSearchQuery),
     /// Download a Hugging Face result.
-    DownloadModel(HfModelResult),
+    DownloadModel(lmml_models::HfModelResult),
     /// Delete a local model.
     DeleteModel(lmml_models::ModelEntry),
     /// Add an external model alias.
@@ -41,22 +41,4 @@ pub enum Action {
     ShowHelp,
     /// Quit the application.
     Quit,
-}
-
-/// Minimal HF search query placeholder for the Milestone 5 TUI skeleton.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HfSearchQuery {
-    /// User-entered keywords.
-    pub keywords: String,
-}
-
-/// Minimal HF result placeholder until `lmml-models` lands.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HfModelResult {
-    /// Repository id.
-    pub repo_id: String,
-    /// GGUF filename.
-    pub filename: String,
-    /// Download URL.
-    pub url: String,
 }

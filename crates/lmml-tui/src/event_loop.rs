@@ -120,6 +120,42 @@ impl EventLoop {
                     let _ignored = tx.send(AppEvent::ModelScanComplete(models)).await;
                 });
             }
+            Action::SearchHf(query) => {
+                app.dispatch(Action::SearchHf(query.clone()));
+                let tx = self.app_tx.clone();
+                tokio::spawn(async move {
+                    match lmml_models::search_huggingface(query).await {
+                        Ok(results) => {
+                            let _ignored = tx.send(AppEvent::HfSearchResults(results)).await;
+                        }
+                        Err(error) => {
+                            let _ignored = tx.send(AppEvent::HfSearchResults(Vec::new())).await;
+                            let _ignored = tx
+                                .send(AppEvent::DownloadComplete(Err(error.to_string())))
+                                .await;
+                        }
+                    }
+                });
+            }
+            Action::DownloadModel(result) => {
+                app.dispatch(Action::DownloadModel(result.clone()));
+                let tx = self.app_tx.clone();
+                let registry = lmml_models::ModelRegistry {
+                    models_dir: app.state.model.models_dir.clone(),
+                    aliases: app.state.model.aliases.clone(),
+                };
+                tokio::spawn(async move {
+                    let progress_tx = tx.clone();
+                    let downloaded = registry
+                        .download(&result.url, move |progress| {
+                            let _ignored =
+                                progress_tx.try_send(AppEvent::DownloadProgress(progress));
+                        })
+                        .await
+                        .map_err(|error| error.to_string());
+                    let _ignored = tx.send(AppEvent::DownloadComplete(downloaded)).await;
+                });
+            }
             Action::StartBuild | Action::CleanBuild | Action::UpdateAndRebuild => {
                 let clean = matches!(action, Action::CleanBuild);
                 app.dispatch(action);
@@ -140,8 +176,6 @@ impl EventLoop {
             | Action::StopServer
             | Action::SelectModel(_)
             | Action::OpenHfSearch
-            | Action::SearchHf(_)
-            | Action::DownloadModel(_)
             | Action::DeleteModel(_)
             | Action::AddModelAlias
             | Action::SaveSettings

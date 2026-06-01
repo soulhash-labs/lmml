@@ -11,7 +11,7 @@ use crate::app::App;
 pub fn render(area: Rect, app: &App, frame: &mut Frame) {
     let mut left = vec![
         Line::from("Press r to scan local models."),
-        Line::from("Press / to search Hugging Face."),
+        Line::from("Press / to search Hugging Face. Press D to download selected HF result."),
         Line::from("Press a to add a model alias."),
         Line::from(format!(
             "Models dir: {}",
@@ -50,13 +50,60 @@ pub fn render(area: Rect, app: &App, frame: &mut Frame) {
         }
     }
 
-    let right = selected_model_lines(app);
+    let right = if app.hf_search_open {
+        hf_search_lines(app)
+    } else {
+        selected_model_lines(app)
+    };
     super::render_two_pane(
         area,
         super::pane("Models", left),
         super::pane("Model Details", right),
         frame,
     );
+}
+
+fn hf_search_lines(app: &App) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(format!("Query: {}", app.hf_query)),
+        Line::from(format!("Results: {}", app.hf_results.len())),
+    ];
+    if let Some(progress) = &app.download_progress {
+        let total = progress
+            .total_bytes
+            .map(lmml_models::format_size)
+            .unwrap_or_else(|| "unknown".to_string());
+        lines.push(Line::from(format!(
+            "Download: {} / {} (resumed from {})",
+            lmml_models::format_size(progress.bytes_received),
+            total,
+            lmml_models::format_size(progress.resumed_from)
+        )));
+    }
+    if let Some(error) = &app.download_error {
+        lines.push(Line::from(format!("Error: {error}")));
+    }
+    lines.push(Line::from(""));
+    for (index, result) in app.hf_results.iter().enumerate() {
+        let selected = index == app.selected_hf_result;
+        let marker = if selected { "> " } else { "  " };
+        lines.push(Line::from(vec![
+            Span::styled(
+                marker,
+                Style::default()
+                    .fg(if selected { Color::Cyan } else { Color::Gray })
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!(
+                "{} / {}  {}  {} downloads",
+                result.repo_id,
+                result.filename,
+                lmml_models::format_size(result.size_bytes),
+                result.downloads
+            )),
+        ]));
+    }
+    lines
 }
 
 fn selected_model_lines(app: &App) -> Vec<Line<'static>> {
