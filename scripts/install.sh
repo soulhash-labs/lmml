@@ -208,10 +208,7 @@ case ":$PATH:" in
     ;;
 esac
 
-if ! "$install_dir/lmml" doctor; then
-  warn "lmml installed but preflight checks found issues."
-  echo "   Run \`lmml doctor\` to see what needs fixing before first use."
-fi
+"$install_dir/lmml" doctor || fail "lmml installed, but preflight checks failed." "Fix the hard prerequisites above, then run: $install_dir/lmml doctor"
 
 echo "✓ lmml $VERSION installed to $install_dir/lmml"
 echo

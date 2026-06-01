@@ -25,12 +25,23 @@ Serve the packaged `dist/` directory from the release host:
 cd dist && python3 -m http.server 8000
 ```
 
+The LAN HTTP flow verifies `SHA256SUMS` to catch corrupt or incomplete
+downloads. It is not tamper-proof: anyone who can alter the HTTP response can
+alter both the tarball and checksum file. Treat it as an integrity check for a
+trusted LAN release host until signed checksums or HTTPS public releases are in
+place.
+
 ### After install
 
 ```sh
 lmml doctor    # check your system
 lmml           # launch the TUI
 ```
+
+The installer runs `lmml doctor` before reporting success. Missing hard
+prerequisites such as a compiler, CMake, Git, or required disk space cause the
+install command to fail clearly even though the binary has already been copied.
+Fix the reported prerequisites and rerun `lmml doctor`.
 
 ### Uninstall
 
