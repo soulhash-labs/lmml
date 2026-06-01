@@ -98,6 +98,7 @@ impl EventLoop {
                 | AppEvent::DetectComplete(_)
                 | AppEvent::BuildEvent(_)
                 | AppEvent::ServerStatus(_)
+                | AppEvent::ServerCapabilities(_)
                 | AppEvent::ServerLog(_)
                 | AppEvent::DownloadProgress(_)
                 | AppEvent::DownloadComplete(_)
@@ -224,11 +225,18 @@ impl EventLoop {
                     });
 
                     let caps = match lmml_compat::LlamaBinaryCapabilities::probe(&binary).await {
-                        Ok(caps) => caps,
-                        Err(error) => {
+                        Ok(caps) => {
                             let _ignored = tx
-                                .send(AppEvent::ServerStarted(Err(error.to_string())))
+                                .send(AppEvent::ServerCapabilities(Ok(caps.clone())))
                                 .await;
+                            caps
+                        }
+                        Err(error) => {
+                            let reason = error.to_string();
+                            let _ignored = tx
+                                .send(AppEvent::ServerCapabilities(Err(reason.clone())))
+                                .await;
+                            let _ignored = tx.send(AppEvent::ServerStarted(Err(reason))).await;
                             return;
                         }
                     };
@@ -262,6 +270,17 @@ impl EventLoop {
                                 .await;
                         }
                     }
+                });
+            }
+            Action::ProbeServerCapabilities => {
+                app.dispatch(Action::ProbeServerCapabilities);
+                let tx = self.app_tx.clone();
+                let binary = app.state.build.binary.clone();
+                tokio::spawn(async move {
+                    let result = lmml_compat::LlamaBinaryCapabilities::probe(&binary)
+                        .await
+                        .map_err(|error| error.to_string());
+                    let _ignored = tx.send(AppEvent::ServerCapabilities(result)).await;
                 });
             }
             Action::StopServer => {

@@ -3,10 +3,13 @@
 //! Rendering lives in `tabs` and widgets. This module owns navigation, modal
 //! state, background-task status, and persistent state coordination.
 
+mod settings_state;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::PathBuf;
 
 use lmml_build::{BuildEvent, UpdateCheck};
+use lmml_compat::LlamaBinaryCapabilities;
 use lmml_detect::{BuildBackend, SystemProfile};
 use lmml_models::{DownloadProgress, HfModelResult, ModelEntry};
 use lmml_server::ServerHandle;
@@ -14,6 +17,7 @@ pub use lmml_server::ServerStatus;
 use lmml_state::AppState as PersistentState;
 
 use crate::action::Action;
+pub use settings_state::{SettingsField, SettingsKeyResult};
 
 /// Top-level TUI tabs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +78,8 @@ pub enum AppEvent {
     ServerStatus(ServerStatus),
     /// Server startup completed.
     ServerStarted(Result<ServerHandle, String>),
+    /// llama-server capabilities probe completed.
+    ServerCapabilities(Result<LlamaBinaryCapabilities, String>),
     /// Server log line.
     ServerLog(String),
     /// Download progress changed.
@@ -105,6 +111,10 @@ pub struct App {
     pub detect_profile: Option<SystemProfile>,
     /// Current server status.
     pub server_status: ServerStatus,
+    /// Last probed llama-server capabilities.
+    pub server_caps: Option<LlamaBinaryCapabilities>,
+    /// Last server capability probe error.
+    pub server_caps_error: Option<String>,
     /// Detect tab log lines.
     pub detect_log: Vec<String>,
     /// Build tab log lines.
@@ -135,6 +145,10 @@ pub struct App {
     pub download_error: Option<String>,
     /// Last update-check result.
     pub update_check: Option<UpdateCheck>,
+    /// Selected Settings tab field.
+    pub selected_settings_field: SettingsField,
+    /// Active inline settings edit buffer.
+    pub settings_edit_buffer: Option<String>,
     /// Last UI status message.
     pub status_message: String,
     /// Current terminal size.
@@ -167,6 +181,8 @@ impl App {
             first_run_onboarding,
             detect_profile: None,
             server_status: ServerStatus::Stopped,
+            server_caps: None,
+            server_caps_error: None,
             detect_log: Vec::new(),
             build_log: Vec::new(),
             build_running: false,
@@ -182,6 +198,8 @@ impl App {
             download_progress: None,
             download_error: None,
             update_check: None,
+            selected_settings_field: SettingsField::Host,
+            settings_edit_buffer: None,
             status_message: "Ready".to_string(),
             terminal_size: None,
         }
@@ -253,6 +271,21 @@ impl App {
                             reason: error.clone(),
                         };
                         self.status_message = format!("Server failed: {error}");
+                    }
+                }
+                None
+            }
+            AppEvent::ServerCapabilities(result) => {
+                match result {
+                    Ok(caps) => {
+                        self.server_caps = Some(caps);
+                        self.server_caps_error = None;
+                        self.status_message = "Server capabilities probed".to_string();
+                    }
+                    Err(error) => {
+                        self.server_caps = None;
+                        self.server_caps_error = Some(error.clone());
+                        self.status_message = format!("Capability probe failed: {error}");
                     }
                 }
                 None
@@ -349,6 +382,9 @@ impl App {
                 self.server_status = ServerStatus::Stopped;
                 self.status_message = "Server stopped".to_string();
             }
+            Action::ProbeServerCapabilities => {
+                self.status_message = "Probing server capabilities".to_string();
+            }
             Action::SelectModel(path) => {
                 self.state.model.last_used = path;
                 self.status_message = "Model selected".to_string();
@@ -404,6 +440,12 @@ impl App {
     fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return Some(Action::Quit);
+        }
+        if self.active_tab == Tab::Settings {
+            match self.handle_settings_key(key) {
+                SettingsKeyResult::Handled(action) => return action,
+                SettingsKeyResult::Unhandled => {}
+            }
         }
 
         match key.code {
@@ -479,6 +521,14 @@ impl App {
                 Tab::Settings => Some(Action::SaveSettings),
                 Tab::Detect | Tab::Build | Tab::Models => None,
             },
+            KeyCode::Char('m') if self.active_tab == Tab::Server => {
+                self.select_next_model();
+                if let Some(model) = self.models.get(self.selected_model) {
+                    self.state.model.last_used = model.path.clone();
+                    self.status_message = format!("Selected {}", model.name);
+                }
+                None
+            }
             KeyCode::Char('/') => Some(Action::SearchHf(lmml_models::HfSearchQuery {
                 keywords: self.hf_query.clone(),
                 architecture: None,
@@ -876,6 +926,70 @@ mod tests {
         assert_eq!(
             app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('s')))),
             Some(Action::StopServer)
+        );
+    }
+
+    #[test]
+    fn settings_modal_edits_and_toggles_server_config() {
+        let mut app = App::default();
+        app.active_tab = Tab::Settings;
+        app.selected_settings_field = SettingsField::Port;
+
+        assert_eq!(
+            app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('e')))),
+            None
+        );
+        assert_eq!(app.settings_edit_buffer.as_deref(), Some("8080"));
+        for key in [
+            KeyCode::Backspace,
+            KeyCode::Backspace,
+            KeyCode::Backspace,
+            KeyCode::Backspace,
+            KeyCode::Char('1'),
+            KeyCode::Char('2'),
+            KeyCode::Char('0'),
+            KeyCode::Char('0'),
+        ] {
+            app.handle_event(AppEvent::Key(KeyEvent::from(key)));
+        }
+        app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+        assert_eq!(app.state.server.port, 1200);
+        assert_eq!(app.active_tab, Tab::Settings);
+        assert!(app.settings_edit_buffer.is_none());
+
+        app.selected_settings_field = SettingsField::FlashAttn;
+        app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char(' '))));
+        assert!(!app.state.server.flash_attn);
+    }
+
+    #[test]
+    fn settings_probe_key_and_unsupported_warnings_work() {
+        let mut app = App::default();
+        app.active_tab = Tab::Settings;
+        assert_eq!(
+            app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('p')))),
+            Some(Action::ProbeServerCapabilities)
+        );
+
+        app.state.server.flash_attn = true;
+        app.state.server.api_key = "secret".to_string();
+        app.handle_event(AppEvent::ServerCapabilities(Ok(LlamaBinaryCapabilities {
+            version: Some("test".to_string()),
+            flash_attn: false,
+            mlock: true,
+            api_key: false,
+            ubatch_size: true,
+            chat_template: true,
+            jinja: true,
+            reranking: false,
+            flags: vec!["--model".to_string(), "--port".to_string()],
+        })));
+        assert_eq!(
+            app.server_compat_warnings(),
+            vec![
+                "--flash-attn not available in this llama-server build".to_string(),
+                "--api-key not available in this llama-server build".to_string(),
+            ]
         );
     }
 

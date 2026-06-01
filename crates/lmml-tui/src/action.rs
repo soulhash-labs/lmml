@@ -17,6 +17,8 @@ pub enum Action {
     StartServer,
     /// Stop llama-server.
     StopServer,
+    /// Probe llama-server flag capabilities.
+    ProbeServerCapabilities,
     /// Select a local model path.
     SelectModel(PathBuf),
     /// Scan local model directories.
