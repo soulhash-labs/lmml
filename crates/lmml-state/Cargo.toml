@@ -1,0 +1,13 @@
+[package]
+name = "lmml-state"
+version = "0.1.0"
+edition = "2021"
+description = "Persistent state storage for lmml"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"

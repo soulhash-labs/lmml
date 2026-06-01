@@ -989,6 +989,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lmml-state"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "tempfile",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
