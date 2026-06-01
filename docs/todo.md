@@ -292,25 +292,45 @@ jobs before claiming readiness beyond the tested local Linux x86_64 LAN target.
 
 ### 9B — This-Machine Ubuntu 24.04 CUDA Validation
 
-- [ ] Use this Ubuntu 24.04 x86_64 machine as the CUDA validation target; do not
+- [x] Use this Ubuntu 24.04 x86_64 machine as the CUDA validation target; do not
   require a separate VM for local v0.1.0 validation
-- [ ] Confirm this machine has NVIDIA driver, CUDA toolkit, compiler, CMake, Git,
-  curl/wget, Rust toolchain, and at least 4 GB free disk
-- [ ] Confirm direct host commands pass: `nvidia-smi`, `nvcc --version`,
+- [x] Confirm this machine has NVIDIA driver, CUDA toolkit, compiler, CMake, Git,
+  curl/wget, Rust toolchain, sccache, and at least 4 GB free disk
+- [x] Confirm direct host commands pass: `nvidia-smi`, `nvcc --version`,
   `rustc --version`, `cargo --version`, and `rustup show active-toolchain`
-- [ ] Serve `dist/` from a release host and run default binary install without
+- [x] Serve `dist/` from a release host and run default binary install without
   `LMML_GPU_MODE=cpu-only`
-- [ ] Run `lmml doctor` and require `CUDA available` with GPU name and compute
+- [x] Run `lmml doctor` and require `CUDA available` with GPU name and compute
   capability, not a soft GPU warning
-- [ ] Run `lmml smoke`
-- [ ] Run explicit source install from `dist/` without `LMML_GPU_MODE=cpu-only`
+- [x] Run `lmml smoke`
+- [x] Run explicit source install from `dist/` without `LMML_GPU_MODE=cpu-only`
   and confirm preflight passes GPU-required mode
-- [ ] Record the exact GPU, driver version, CUDA toolkit version, and validation
+- [x] Record the exact GPU, driver version, CUDA toolkit version, and validation
   commands/output summary in `docs/release-checklist.md`
+
+Host precheck evidence from Angelo's terminal:
+
+```text
+NVIDIA GeForce GTX 1080 Ti, driver 580.159.03, 11264 MiB, compute capability 6.1
+CUDA compilation tools 12.4, V12.4.131
+rustc 1.96.0
+cargo 1.96.0
+stable-x86_64-unknown-linux-gnu (default)
+sccache 0.13.0+ds-3build1 installed from apt
+```
+
+Install validation evidence:
+
+- Served `dist/` with `python3 -m http.server 8127`
+- Ran default binary install with `BASE_URL=http://127.0.0.1:8127 INSTALL_MODE=binary tests/integration/clean_install.sh`
+- Ran explicit source install with `BASE_URL=http://127.0.0.1:8127 INSTALL_MODE=source tests/integration/clean_install.sh`
+- Did not set `LMML_GPU_MODE=cpu-only`
+- Both installs reported `CUDA available · NVIDIA GeForce GTX 1080 Ti · sm_61`
+- Both installs ran `lmml smoke` and uninstalled cleanly
 
 ### Phase 9 Acceptance
 
 - [ ] Non-x86_64 artifacts are built and smoke-tested on matching machines or CI
-- [ ] This-machine Ubuntu CUDA validation proves GPU-required install flow on
+- [x] This-machine Ubuntu CUDA validation proves GPU-required install flow on
   the actual local release target
 - [ ] README release scope is broadened only to the targets actually validated

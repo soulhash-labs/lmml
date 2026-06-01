@@ -161,6 +161,18 @@ nvcc --version
 rustc --version
 cargo --version
 rustup show active-toolchain
+sccache --version
+```
+
+Latest host precheck evidence from Angelo's terminal:
+
+```text
+NVIDIA GeForce GTX 1080 Ti, driver 580.159.03, 11264 MiB, compute capability 6.1
+CUDA compilation tools 12.4, V12.4.131
+rustc 1.96.0
+cargo 1.96.0
+stable-x86_64-unknown-linux-gnu (default)
+sccache 0.13.0+ds-3build1 installed from apt
 ```
 
 Release install checks:
@@ -180,3 +192,17 @@ lmml-uninstall
 
 Both install modes must pass without `LMML_GPU_MODE=cpu-only`, and
 `lmml doctor` must report CUDA available with GPU name and compute capability.
+
+Latest this-machine CUDA validation:
+
+- Date: 2026-06-01
+- Machine: Ubuntu 24.04 x86_64 local release target
+- GPU: NVIDIA GeForce GTX 1080 Ti
+- Driver: 580.159.03
+- CUDA toolkit: 12.4, V12.4.131
+- Rust: rustc/cargo 1.96.0, stable-x86_64-unknown-linux-gnu
+- Release server: `python3 -m http.server 8127` from `dist/`
+- Binary install: `BASE_URL=http://127.0.0.1:8127 INSTALL_MODE=binary tests/integration/clean_install.sh`
+- Source install: `BASE_URL=http://127.0.0.1:8127 INSTALL_MODE=source tests/integration/clean_install.sh`
+- GPU mode: default required mode; `LMML_GPU_MODE=cpu-only` was not set
+- Result: both install modes reported `CUDA available · NVIDIA GeForce GTX 1080 Ti · sm_61`, `lmml smoke` passed, and uninstall completed cleanly

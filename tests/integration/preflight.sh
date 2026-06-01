@@ -42,6 +42,7 @@ else
   echo "binary cpu-only preflight should pass without Rust" >&2
   exit 1
 fi
+grep -q "sccache not found" /tmp/lmml-preflight-binary.out
 
 if PATH="$FAKE_BIN" LMML_INSTALL_MODE=source LMML_GPU_MODE=cpu-only bash "$ROOT_DIR/scripts/preflight.sh" >/tmp/lmml-preflight-source.out 2>&1; then
   cat /tmp/lmml-preflight-source.out >&2

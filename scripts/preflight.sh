@@ -173,6 +173,14 @@ else
   need_apt git
 fi
 
+if command -v sccache >/dev/null 2>&1; then
+  SCCACHE_VERSION=$(sccache --version | first_version)
+  ok "sccache ${SCCACHE_VERSION:-found} — llama.cpp rebuilds will be faster"
+else
+  warn "sccache not found — recommended for faster llama.cpp rebuilds"
+  need_apt sccache
+fi
+
 section "RUST TOOLCHAIN"
 if [[ "$MODE" == "source" ]]; then
   check_version_command rustc rustc
@@ -265,8 +273,8 @@ if (( ${#APT_PACKAGES[@]} > 0 )); then
     sudo apt-get update
     sudo apt-get install -y "${UNIQUE_APT_PACKAGES[@]}"
   else
-    warn "apt packages may fix hard prerequisites: ${UNIQUE_APT_PACKAGES[*]}"
-    printf '  Re-run with LMML_FIX_DEPS=1 to install compiler/cmake/git/curl via apt.\n'
+    warn "apt packages may fix hard or recommended prerequisites: ${UNIQUE_APT_PACKAGES[*]}"
+    printf '  Re-run with LMML_FIX_DEPS=1 to install compiler/cmake/git/curl/sccache via apt.\n'
   fi
 fi
 

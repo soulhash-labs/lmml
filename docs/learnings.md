@@ -620,8 +620,8 @@ production path.
 ### Auto-Fix Must Stay Narrow and Opt-In
 
 `LMML_FIX_DEPS=1` can cover narrow apt packages such as compiler, CMake, Git,
-and curl. It should not automatically install Rust, NVIDIA drivers, CUDA, or
-broad GPU stacks.
+curl, and sccache. It should not automatically install Rust, NVIDIA drivers,
+CUDA, or broad GPU stacks.
 
 ### Pipeline Environment Placement Still Matters
 
@@ -728,3 +728,7 @@ The this-machine CUDA validation must run without `LMML_GPU_MODE=cpu-only`. The 
 of that pass is proving that default GPU-required preflight and installed
 `lmml doctor` both see CUDA correctly on the actual Ubuntu 24.04 local release
 target.
+
+That validation passed for local v0.1.0 on 2026-06-01: both binary and source
+HTTP installs from `dist/` ran in default GPU-required mode and reported CUDA
+available on the NVIDIA GeForce GTX 1080 Ti.

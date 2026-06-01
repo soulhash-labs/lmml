@@ -65,7 +65,7 @@ curl -fsSL http://192.168.1.100:8000/preflight.sh | LMML_INSTALL_MODE=source LMM
 curl -fsSL http://192.168.1.100:8000/install.sh | BASE_URL=http://192.168.1.100:8000 INSTALL_MODE=source LMML_GPU_MODE=cpu-only bash
 ```
 
-Narrow apt fixes for compiler/CMake/Git/curl are opt-in:
+Narrow apt fixes for compiler/CMake/Git/curl/sccache are opt-in:
 
 ```sh
 curl -fsSL http://192.168.1.100:8000/preflight.sh | LMML_INSTALL_MODE=source LMML_FIX_DEPS=1 bash
