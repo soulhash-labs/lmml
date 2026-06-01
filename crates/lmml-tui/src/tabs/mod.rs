@@ -34,6 +34,9 @@ pub fn render(area: Rect, app: &App, frame: &mut Frame) {
         Tab::Settings => settings::render(layout[1], app, frame),
     }
     crate::footer::render(layout[2], app, frame);
+    if app.first_run_onboarding {
+        crate::widgets::onboarding::render(area, frame);
+    }
     if app.show_help {
         crate::widgets::help_overlay::render(area, frame);
     }
@@ -111,5 +114,11 @@ mod tests {
         terminal
             .draw(|frame| render(frame.area(), &app, frame))
             .expect("render help overlay");
+
+        app.show_help = false;
+        app.first_run_onboarding = true;
+        terminal
+            .draw(|frame| render(frame.area(), &app, frame))
+            .expect("render onboarding");
     }
 }

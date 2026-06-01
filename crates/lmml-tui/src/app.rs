@@ -112,6 +112,10 @@ pub struct App {
     pub should_quit: bool,
     /// Whether the help overlay is visible.
     pub show_help: bool,
+    /// Whether first-run onboarding should be shown.
+    pub first_run_onboarding: bool,
+    /// Full detection profile for the current session.
+    pub detect_profile: Option<SystemProfile>,
     /// Current server status.
     pub server_status: ServerStatus,
     /// Detect tab log lines.
@@ -131,17 +135,28 @@ pub struct App {
 impl App {
     /// Construct an app using state loaded from disk, falling back to defaults on error.
     pub fn new() -> Self {
+        let first_run = !PersistentState::path().exists();
         let state = PersistentState::load().unwrap_or_default();
-        Self::new_with_state(state)
+        Self::new_with_state_and_first_run(state, first_run)
     }
 
     /// Construct an app with injected state for tests.
     pub fn new_with_state(state: PersistentState) -> Self {
+        Self::new_with_state_and_first_run(state, false)
+    }
+
+    /// Construct an app with injected state and onboarding flag for tests.
+    pub fn new_with_state_and_first_run(
+        state: PersistentState,
+        first_run_onboarding: bool,
+    ) -> Self {
         Self {
             state,
             active_tab: Tab::Detect,
             should_quit: false,
             show_help: false,
+            first_run_onboarding,
+            detect_profile: None,
             server_status: ServerStatus::Stopped,
             detect_log: Vec::new(),
             build_log: Vec::new(),
@@ -161,6 +176,7 @@ impl App {
                 None
             }
             AppEvent::DetectComplete(profile) => {
+                let profile = *profile;
                 self.state.system_profile = Some(lmml_state::SystemProfile {
                     cuda_toolkit: match &profile.cuda {
                         lmml_detect::CudaCompatibility::Compatible { .. } => {
@@ -181,6 +197,20 @@ impl App {
                     vram_mb: profile.gpus.iter().map(|gpu| gpu.memory_total_mb).collect(),
                     sccache: profile.sccache.is_some(),
                 });
+                self.detect_log.push(format!(
+                    "Detected backend: {:?}",
+                    profile.recommended_backend()
+                ));
+                for warning in profile.warnings() {
+                    self.detect_log
+                        .push(format!("Warning: {}", warning.message));
+                }
+                for missing in profile.missing_prerequisites() {
+                    self.detect_log
+                        .push(format!("Missing {}: {}", missing.name, missing.install));
+                }
+                self.detect_profile = Some(profile);
+                self.first_run_onboarding = false;
                 self.status_message = "Detection complete".to_string();
                 None
             }
@@ -229,6 +259,7 @@ impl App {
                 self.status_message = "Detecting system".to_string();
             }
             Action::StartBuild => {
+                self.first_run_onboarding = false;
                 self.build_log.push("Starting build".to_string());
                 self.status_message = "Build requested".to_string();
             }
@@ -279,6 +310,9 @@ impl App {
             }
             Action::ShowHelp => {
                 self.show_help = !self.show_help;
+                if self.first_run_onboarding {
+                    self.first_run_onboarding = false;
+                }
             }
             Action::Quit => {
                 self.should_quit = true;
@@ -322,6 +356,11 @@ impl App {
             }
             KeyCode::Char('?') => Some(Action::ShowHelp),
             KeyCode::Char('q') => Some(Action::Quit),
+            KeyCode::Enter if self.first_run_onboarding => Some(Action::StartBuild),
+            KeyCode::Esc if self.first_run_onboarding => {
+                self.first_run_onboarding = false;
+                None
+            }
             KeyCode::Char('d') => Some(Action::RunDetect),
             KeyCode::Char('b') => Some(Action::StartBuild),
             KeyCode::Char('u') => Some(Action::CheckForUpdate),
@@ -419,5 +458,21 @@ mod tests {
         assert_eq!(quit, Some(Action::Quit));
         app.dispatch(quit.expect("quit action"));
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn first_run_enter_starts_build_and_esc_dismisses() {
+        let mut app = App::new_with_state_and_first_run(PersistentState::default(), true);
+        let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+        assert_eq!(action, Some(Action::StartBuild));
+        app.dispatch(action.expect("start build action"));
+        assert!(!app.first_run_onboarding);
+
+        let mut app = App::new_with_state_and_first_run(PersistentState::default(), true);
+        assert_eq!(
+            app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Esc))),
+            None
+        );
+        assert!(!app.first_run_onboarding);
     }
 }
