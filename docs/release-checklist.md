@@ -119,16 +119,22 @@ ROCm/HIP remains a documented v2 production gap. Do not claim AMD GPU
 acceleration is production-ready until the ROCm probe, build flags, telemetry,
 settings wiring, and tests are implemented.
 
-## Cross-Target Validation
+## Debian-Family Linux Cross-Target Validation
 
 Do not publish or advertise a target tarball until it has been built and
 validated on a matching builder or CI runner.
 
-Required targets before broader platform claims:
+Required first-pass Debian-family targets before broader Linux platform claims:
 
+- `x86_64-unknown-linux-gnu` on Ubuntu 24.04
+- `x86_64-unknown-linux-gnu` on Ubuntu 26.04
+- `aarch64-unknown-linux-gnu` on Ubuntu 24.04 ARM64
 - `aarch64-unknown-linux-gnu`
-- `x86_64-apple-darwin`
-- `aarch64-apple-darwin`
+  on Ubuntu 26.04 ARM64
+
+Additional Debian-family distributions can be added after the Ubuntu baseline is
+repeatable. Each distribution still needs matching-machine install validation
+before it is advertised.
 
 For each target:
 
@@ -146,6 +152,12 @@ lmml smoke
 
 Record the target triple, builder/runner, OS version, command results, and any
 runtime dependency notes before marking the target release-ready.
+
+macOS targets are deferred to a later phase and should not block Ubuntu
+24.04/26.04 validation:
+
+- `x86_64-apple-darwin`
+- `aarch64-apple-darwin`
 
 ## This-Machine CUDA Validation
 

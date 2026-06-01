@@ -720,9 +720,11 @@ public-release signing, and v2 ROCm/HIP production support.
 
 ### Cross-Target and CUDA Validation Must Be Evidence-Based
 
-Building a tarball name is not the same as supporting a target. Each non-x86_64
-artifact needs a matching-machine install and `lmml doctor`/`lmml smoke` result
-before it can be advertised.
+Building a tarball name is not the same as supporting a target. Each
+Debian-family artifact needs a matching-machine install and `lmml doctor`/`lmml
+smoke` result before it can be advertised. Ubuntu 24.04/26.04 are the first
+concrete Debian-family targets; macOS validation is deliberately deferred until
+the Linux matrix is repeatable.
 
 The this-machine CUDA validation must run without `LMML_GPU_MODE=cpu-only`. The point
 of that pass is proving that default GPU-required preflight and installed

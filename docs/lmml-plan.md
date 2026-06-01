@@ -990,7 +990,7 @@ original crate-build milestones:
 | E — Verification gate | Passing on current x86_64 Linux host | Workspace fmt/clippy/tests, release package generation, and HTTP binary/source installer smokes pass. Remaining release risk is this-machine CUDA validation and cross-target builders. |
 | F — Signed checksum authenticity | Complete for local v0.1.0 | Installer and packaging support minisign-signed `SHA256SUMS`. Real release-keypair verification is deferred until a future public/non-local release. |
 | G — Local v0.1.0 release closure | Verification passed; archive pending | Final gates and both binary/source HTTP install flows passed on Linux x86_64. Tag or archive remains pending. |
-| H — Cross-target and this-machine CUDA validation | CUDA validation complete; cross-target pending | Ubuntu 24.04 CUDA validation passed on this machine for binary and source installs. Non-x86_64 target tarballs still need matching builders. |
+| H — Debian-family Linux validation | CUDA validation complete; Linux matrix pending | Ubuntu 24.04 CUDA validation passed on this machine for binary and source installs. Debian-family x86_64 and ARM64 validation starts with Ubuntu 24.04/26.04 and still needs matching builders. macOS is deferred. |
 
 ### What changed during release hardening
 
@@ -1011,16 +1011,20 @@ original crate-build milestones:
 
 ### Next validation plan
 
-Phase 9 is intentionally validation-first. Do not broaden README or release
-claims until the target has a matching-machine package and smoke result:
+Phase 9 is intentionally Debian-family-Linux-focused and validation-first. Do
+not broaden README or release claims until the target has a matching-machine
+package and smoke result:
 
-- Linux ARM64: build/package with `TARGET_TRIPLE=aarch64-unknown-linux-gnu`,
-  then run installed `lmml doctor` and `lmml smoke` on an ARM64 Linux host.
-- macOS Intel/Apple Silicon: build/package on matching macOS runners, verify
-  tarball contents, then run installed `lmml doctor` and `lmml smoke`.
+- Debian-family x86_64: build/package and smoke-test first on Ubuntu 24.04 and
+  Ubuntu 26.04.
+- Debian-family ARM64: build/package with
+  `TARGET_TRIPLE=aarch64-unknown-linux-gnu`, then run installed `lmml doctor`
+  and `lmml smoke` first on Ubuntu 24.04 and Ubuntu 26.04 ARM64 hosts or CI
+  runners.
 - This-machine CUDA validation: run default binary and explicit source installs without
   `LMML_GPU_MODE=cpu-only`; `lmml doctor` must report CUDA available with GPU
   name and compute capability.
+- macOS Intel/Apple Silicon validation is deferred to Phase 10 or later.
 
 ### Preflight and source-build bootstrap plan
 

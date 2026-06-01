@@ -268,18 +268,20 @@ to the Codex tool sandbox environment, not the host driver/toolkit.
 
 ---
 
-## Phase 9 — Cross-Target and This-Machine CUDA Validation (Planned)
+## Phase 9 — Debian-Family Linux Validation (Planned)
 
 Goal: convert the remaining release-readiness gaps into repeatable validation
-jobs before claiming readiness beyond the tested local Linux x86_64 LAN target.
+jobs for Debian-family Linux before claiming readiness beyond the tested local
+Linux x86_64 LAN target. Ubuntu 24.04/26.04 are the first concrete validation
+targets. macOS validation is deferred to a later phase.
 
-### 9A — Non-x86_64 Release Tarballs
+### 9A — Debian-Family Release Targets
 
-- [ ] Add CI/build matrix entries or documented matching-builder jobs for:
-  `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`, and
-  `aarch64-apple-darwin`
+- [ ] Add CI/build matrix entries or documented matching-builder jobs for
+  Debian-family Linux targets, starting with Ubuntu 24.04 x86_64, Ubuntu 26.04
+  x86_64, Ubuntu 24.04 ARM64, and Ubuntu 26.04 ARM64
 - [ ] For each target, run `cargo build --release -p lmml-tui --target <target>`
-  on a matching builder or supported cross-build environment
+  on a matching Ubuntu builder or supported Linux cross-build environment
 - [ ] Run `scripts/package-release.sh` with `TARGET_TRIPLE=<target>` and confirm
   target-specific tarball, alias tarball, `latest`, and `SHA256SUMS` entries are
   generated
@@ -330,7 +332,22 @@ Install validation evidence:
 
 ### Phase 9 Acceptance
 
-- [ ] Non-x86_64 artifacts are built and smoke-tested on matching machines or CI
+- [ ] Debian-family x86_64 and ARM64 artifacts are built and smoke-tested on
+  matching machines or CI, starting with Ubuntu 24.04/26.04
 - [x] This-machine Ubuntu CUDA validation proves GPU-required install flow on
   the actual local release target
 - [ ] README release scope is broadened only to the targets actually validated
+
+---
+
+## Phase 10 — macOS Release Validation (Deferred)
+
+macOS is intentionally out of Phase 9. Validate after Debian-family Linux release
+coverage is repeatable.
+
+- [ ] Build and package `x86_64-apple-darwin` on an Intel macOS runner or host
+- [ ] Build and package `aarch64-apple-darwin` on an Apple Silicon macOS runner
+  or host
+- [ ] Verify tarball contents for both macOS targets
+- [ ] Install and run `lmml doctor` and `lmml smoke` on matching macOS machines
+- [ ] Update README/release scope only for macOS targets that pass validation
