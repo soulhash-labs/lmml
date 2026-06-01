@@ -377,3 +377,77 @@ coverage is repeatable.
 - [ ] Verify tarball contents for both macOS targets
 - [ ] Install and run `lmml doctor` and `lmml smoke` on matching macOS machines
 - [ ] Update README/release scope only for macOS targets that pass validation
+
+---
+
+## Phase 11 — Managed Runtime Harness Integration (Planned)
+
+Goal: make lmml the manager for long-running local llama.cpp runtimes consumed
+by coding harnesses. OpenCode is the first target because the local config
+already uses OpenAI-compatible HTTP endpoints.
+
+Decision: harnesses should use managed `llama-server` HTTP endpoints, not
+`llama-cli`, except for one-shot diagnostics.
+
+Current OpenCode local config:
+
+- path: `~/.config/opencode/opencode.json`
+- full provider base URL: `http://127.0.0.1:4010/v1`
+- fast provider base URL: `http://127.0.0.1:4011/v1`
+- timeout: `7200s`
+- chunk timeout: `300s`
+- compaction reserve: `32768` tokens
+
+- [x] Add runtime profile config schema for harness-managed servers
+- [x] Add separate runtime state schema for PID, status, health, and log path
+- [ ] Support at least `opencode` on port `4010` and `opencode-fast` on port
+  `4011`
+- [ ] Allow simultaneous managed `llama-server` instances for full and fast
+  profiles
+- [ ] Keep each profile isolated: failure of one profile must not stop another
+- [ ] Add stale PID handling for crashed or externally killed servers
+- [ ] Add health polling every `5s` and mark unhealthy after three consecutive
+  failures
+- [x] Add initial CLI commands: `lmml runtime status`, `lmml runtime
+  print-config opencode`, and `lmml runtime configure opencode`
+- [ ] Add process CLI commands: `lmml runtime start|stop|logs`
+- [ ] Add `lmml runtime start <profile> --detach`
+- [ ] Add `lmml runtime status --json`
+- [x] Make `lmml runtime print-config opencode` print ready-to-paste OpenCode
+  JSON
+- [ ] Keep `lmml doctor` read-only for OpenCode integration; it may detect
+  missing/mismatched lmml providers and recommend commands, but must not patch
+  `~/.config/opencode/opencode.json`
+- [x] Add `lmml runtime configure opencode --dry-run` to parse OpenCode JSON,
+  preserve unrelated keys, and show a structural diff without writing
+- [x] Add `lmml runtime configure opencode` as the explicit mutating command:
+  create a timestamped backup, patch only lmml-owned keys, validate JSON, and
+  print the rollback path
+- [x] Add `lmml runtime configure opencode --path <file>` for non-default
+  OpenCode config locations
+- [x] Add `lmml runtime configure opencode --rollback <backup-file>` for
+  reversible config recovery
+- [x] Add guarded `--yes`/`--force` behavior: `--yes` may apply clean changes
+  non-interactively, while conflicts still require interactive confirmation or
+  explicit `--force`
+- [x] Make OpenCode configure local-first by default, with
+  `--model-source existing|lmml|none` and
+  `--small-model-source existing|lmml|none` for explicit routing control
+- [x] Allow local-first top-level routing replacement through the normal
+  confirmation/`--yes` path; reserve `--force` for conflicting lmml-owned
+  provider entries
+- [ ] Add an OpenCode Setup Wizard in the TUI that walks users through
+  `doctor` status, profile review, config preview, diff review, apply with
+  backup, and verification; each mutating step requires explicit confirmation
+- [ ] Add TUI Server tab profile selector and per-profile status
+- [ ] Generate/copy OpenCode-compatible config snippets
+- [ ] Use OpenAI-compatible chat completions as the Phase 11 harness API
+  boundary
+- [ ] Keep native Anthropic `/v1/messages` translation out of this phase unless
+  a verified harness requires it and the adapter contract is specified
+- [ ] Make model changes use confirmed cold restart; restore the previous config
+  if the new server fails health checks
+- [ ] Connect clean install behavior: runtime start must fail clearly when no
+  model is configured
+- [ ] Add tests for multi-profile port conflicts, restart on model change,
+  stale PID handling, logs, health checks, and no orphaned processes

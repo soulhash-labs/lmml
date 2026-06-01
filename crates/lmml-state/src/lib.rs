@@ -14,6 +14,8 @@ use thiserror::Error;
 const APP_DIR_NAME: &str = "lmml";
 const STATE_FILE_NAME: &str = "state.toml";
 const LOG_FILE_NAME: &str = "lmml.log";
+const OPENCODE_PROFILE: &str = "opencode";
+const OPENCODE_FAST_PROFILE: &str = "opencode-fast";
 
 /// Complete persisted application state.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,6 +27,8 @@ pub struct AppState {
     pub model: ModelState,
     /// llama-server runtime configuration.
     pub server: ServerConfig,
+    /// Managed runtime profiles for coding harnesses.
+    pub runtime: RuntimeConfig,
     /// Cached system profile summary from the detection crate.
     pub system_profile: Option<SystemProfile>,
 }
@@ -33,6 +37,11 @@ impl AppState {
     /// Load state from the default XDG path, creating defaults if missing.
     pub fn load() -> Result<Self, StateError> {
         Self::load_from_path(Self::path())
+    }
+
+    /// Load state from the default XDG path without creating it when missing.
+    pub fn load_existing_or_default() -> Result<Self, StateError> {
+        Self::load_existing_or_default_from_path(Self::path())
     }
 
     /// Save state to the default XDG path.
@@ -59,6 +68,16 @@ impl AppState {
         .join(LOG_FILE_NAME)
     }
 
+    /// Return the default runtime log directory, respecting `$XDG_STATE_HOME`.
+    pub fn runtime_log_dir() -> PathBuf {
+        default_state_dir_from_env(
+            env::var_os("XDG_STATE_HOME"),
+            env::var_os("HOME"),
+            env::var_os("USERPROFILE"),
+        )
+        .join("runtime")
+    }
+
     /// Reset the default state file to default values.
     pub fn reset() -> Result<(), StateError> {
         let state = Self::default();
@@ -72,6 +91,23 @@ impl AppState {
             let state = Self::default();
             state.save_to_path(path)?;
             return Ok(state);
+        }
+
+        let content = fs::read_to_string(path).map_err(|source| StateError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        toml::from_str(&content).map_err(|source| StateError::Parse {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+
+    /// Load state from a specific path without creating it when missing.
+    pub fn load_existing_or_default_from_path(path: impl AsRef<Path>) -> Result<Self, StateError> {
+        let path = path.as_ref();
+        if !path.exists() {
+            return Ok(Self::default());
         }
 
         let content = fs::read_to_string(path).map_err(|source| StateError::Read {
@@ -240,6 +276,224 @@ impl Default for ServerConfig {
     }
 }
 
+/// Persisted managed runtime profile configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RuntimeConfig {
+    /// Runtime profile used by OpenCode as the primary model.
+    pub opencode: RuntimeProfile,
+    /// Runtime profile used by OpenCode as the fast/small model.
+    #[serde(rename = "opencode-fast")]
+    pub opencode_fast: RuntimeProfile,
+    /// Runtime process state for known profiles.
+    pub state: RuntimeState,
+}
+
+impl RuntimeConfig {
+    /// Return a configured runtime profile by stable name.
+    pub fn profile(&self, name: &str) -> Option<&RuntimeProfile> {
+        match name {
+            OPENCODE_PROFILE => Some(&self.opencode),
+            OPENCODE_FAST_PROFILE => Some(&self.opencode_fast),
+            _ => None,
+        }
+    }
+
+    /// Return mutable runtime profile by stable name.
+    pub fn profile_mut(&mut self, name: &str) -> Option<&mut RuntimeProfile> {
+        match name {
+            OPENCODE_PROFILE => Some(&mut self.opencode),
+            OPENCODE_FAST_PROFILE => Some(&mut self.opencode_fast),
+            _ => None,
+        }
+    }
+
+    /// Return all built-in profile names in stable display order.
+    pub fn profile_names() -> [&'static str; 2] {
+        [OPENCODE_PROFILE, OPENCODE_FAST_PROFILE]
+    }
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            opencode: RuntimeProfile::opencode_default(),
+            opencode_fast: RuntimeProfile::opencode_fast_default(),
+            state: RuntimeState::default(),
+        }
+    }
+}
+
+/// Desired state for a managed llama-server profile.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RuntimeProfile {
+    /// HTTP listen host.
+    pub host: String,
+    /// HTTP listen port.
+    pub port: u16,
+    /// GGUF model path. Empty means not configured yet.
+    pub model: PathBuf,
+    /// Context size in tokens.
+    pub ctx_size: u32,
+    /// GPU layers to offload; `-1` means auto, `0` means CPU-only.
+    pub gpu_layers: i32,
+    /// Prompt processing batch size.
+    pub batch_size: u32,
+    /// Worker thread count.
+    pub threads: usize,
+    /// Parallel slots for coding-agent requests.
+    pub parallel: usize,
+    /// Extra llama-server argv entries appended after lmml-managed flags.
+    pub extra_args: Vec<String>,
+    /// Whether lmml should start this profile automatically in future flows.
+    pub autostart: bool,
+}
+
+impl RuntimeProfile {
+    fn opencode_default() -> Self {
+        Self {
+            port: 4010,
+            ctx_size: 65_536,
+            parallel: 4,
+            ..Self::default()
+        }
+    }
+
+    fn opencode_fast_default() -> Self {
+        Self {
+            port: 4011,
+            ctx_size: 32_768,
+            parallel: 2,
+            ..Self::default()
+        }
+    }
+
+    /// Return the OpenAI-compatible API base URL for this profile.
+    pub fn api_base_url(&self) -> String {
+        format!("http://{}:{}/v1", format_url_host(&self.host), self.port)
+    }
+
+    /// Return a display name for the configured model.
+    pub fn model_name(&self) -> String {
+        self.model
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("")
+            .to_string()
+    }
+}
+
+impl Default for RuntimeProfile {
+    fn default() -> Self {
+        Self {
+            host: "127.0.0.1".to_string(),
+            port: 4010,
+            model: PathBuf::new(),
+            ctx_size: 65_536,
+            gpu_layers: -1,
+            batch_size: 512,
+            threads: 8,
+            parallel: 4,
+            extra_args: Vec::new(),
+            autostart: false,
+        }
+    }
+}
+
+/// Live process state for managed runtime profiles.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RuntimeState {
+    /// Live state for the OpenCode primary profile.
+    pub opencode: RuntimeProfileState,
+    /// Live state for the OpenCode fast/small profile.
+    #[serde(rename = "opencode-fast")]
+    pub opencode_fast: RuntimeProfileState,
+}
+
+impl RuntimeState {
+    /// Return runtime state by stable profile name.
+    pub fn profile(&self, name: &str) -> Option<&RuntimeProfileState> {
+        match name {
+            OPENCODE_PROFILE => Some(&self.opencode),
+            OPENCODE_FAST_PROFILE => Some(&self.opencode_fast),
+            _ => None,
+        }
+    }
+
+    /// Return mutable runtime state by stable profile name.
+    pub fn profile_mut(&mut self, name: &str) -> Option<&mut RuntimeProfileState> {
+        match name {
+            OPENCODE_PROFILE => Some(&mut self.opencode),
+            OPENCODE_FAST_PROFILE => Some(&mut self.opencode_fast),
+            _ => None,
+        }
+    }
+}
+
+/// Runtime status value persisted for a managed profile.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeStatus {
+    /// No process is running.
+    #[default]
+    Stopped,
+    /// A process is starting and health checks have not passed yet.
+    Starting,
+    /// The process answered its health endpoint.
+    Ready,
+    /// The process exists but health checks failed.
+    Unhealthy,
+    /// Start or runtime management failed.
+    Failed,
+    /// lmml is stopping the process.
+    Stopping,
+}
+
+/// Live process facts for a managed runtime profile.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RuntimeProfileState {
+    /// Runtime status.
+    pub status: RuntimeStatus,
+    /// Child process ID when known.
+    pub pid: Option<u32>,
+    /// Last host bound by the profile.
+    pub host: String,
+    /// Last port bound by the profile.
+    pub port: u16,
+    /// Last model path served by the profile.
+    pub model: PathBuf,
+    /// Log file path for the profile.
+    pub log_path: PathBuf,
+    /// Start timestamp string.
+    pub started_at: String,
+    /// Last health-check timestamp string.
+    pub last_health_at: String,
+    /// Last health result string.
+    pub last_health: String,
+    /// Consecutive health-check failure count.
+    pub failure_count: u32,
+}
+
+impl Default for RuntimeProfileState {
+    fn default() -> Self {
+        Self {
+            status: RuntimeStatus::Stopped,
+            pid: None,
+            host: String::new(),
+            port: 0,
+            model: PathBuf::new(),
+            log_path: PathBuf::new(),
+            started_at: String::new(),
+            last_health_at: String::new(),
+            last_health: String::new(),
+            failure_count: 0,
+        }
+    }
+}
+
 /// Cached system profile summary used for fast TUI startup.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SystemProfile {
@@ -350,6 +604,40 @@ fn default_data_dir_from_env(
         .join(APP_DIR_NAME)
 }
 
+fn default_state_dir_from_env(
+    xdg_state_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+    userprofile: Option<std::ffi::OsString>,
+) -> PathBuf {
+    if let Some(path) = xdg_state_home.filter(|path| !path.is_empty()) {
+        return PathBuf::from(path).join(APP_DIR_NAME);
+    }
+    if let Some(path) = home.filter(|path| !path.is_empty()) {
+        return PathBuf::from(path)
+            .join(".local")
+            .join("state")
+            .join(APP_DIR_NAME);
+    }
+    if let Some(path) = userprofile.filter(|path| !path.is_empty()) {
+        return PathBuf::from(path)
+            .join(".local")
+            .join("state")
+            .join(APP_DIR_NAME);
+    }
+    PathBuf::from(".")
+        .join(".local")
+        .join("state")
+        .join(APP_DIR_NAME)
+}
+
+fn format_url_host(host: &str) -> String {
+    if host.starts_with('[') || !host.contains(':') {
+        host.to_string()
+    } else {
+        format!("[{host}]")
+    }
+}
+
 fn binary_name(base: &str) -> String {
     if cfg!(windows) {
         format!("{base}.exe")
@@ -361,6 +649,7 @@ fn binary_name(base: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn state_path_respects_xdg_config_home() {
@@ -389,6 +678,16 @@ mod tests {
     }
 
     #[test]
+    fn runtime_log_dir_respects_xdg_state_home() {
+        let state_dir =
+            default_state_dir_from_env(Some("/tmp/state".into()), Some("/home/user".into()), None);
+        assert_eq!(
+            state_dir.join("runtime"),
+            PathBuf::from("/tmp/state/lmml/runtime")
+        );
+    }
+
+    #[test]
     fn defaults_match_plan_schema() {
         let state = AppState::default();
         assert_eq!(state.server.port, 8080);
@@ -400,6 +699,61 @@ mod tests {
         assert_eq!(state.server.threads, 8);
         assert!(state.server.flash_attn);
         assert_eq!(state.build.track_mode, TrackMode::Main);
+        assert_eq!(state.runtime.opencode.port, 4010);
+        assert_eq!(state.runtime.opencode.ctx_size, 65_536);
+        assert_eq!(state.runtime.opencode.parallel, 4);
+        assert_eq!(state.runtime.opencode_fast.port, 4011);
+        assert_eq!(state.runtime.opencode_fast.ctx_size, 32_768);
+        assert_eq!(state.runtime.opencode_fast.parallel, 2);
+        assert_eq!(state.runtime.opencode.gpu_layers, -1);
+        assert_eq!(state.runtime.state.opencode.status, RuntimeStatus::Stopped);
+    }
+
+    #[test]
+    fn runtime_profiles_are_addressable_by_stable_name() {
+        let mut runtime = RuntimeConfig::default();
+
+        assert_eq!(
+            RuntimeConfig::profile_names(),
+            ["opencode", "opencode-fast"]
+        );
+        assert_eq!(
+            runtime
+                .profile("opencode")
+                .map(RuntimeProfile::api_base_url),
+            Some("http://127.0.0.1:4010/v1".to_string())
+        );
+        assert_eq!(
+            runtime
+                .profile("opencode-fast")
+                .map(RuntimeProfile::api_base_url),
+            Some("http://127.0.0.1:4011/v1".to_string())
+        );
+        assert!(runtime.profile("missing").is_none());
+
+        runtime
+            .profile_mut("opencode-fast")
+            .expect("fast profile")
+            .model = PathBuf::from("/models/fast.gguf");
+        assert_eq!(
+            runtime
+                .profile("opencode-fast")
+                .expect("fast profile")
+                .model_name(),
+            "fast.gguf"
+        );
+    }
+
+    #[test]
+    fn runtime_schema_round_trips_toml() {
+        let state = AppState::default();
+        let encoded = toml::to_string_pretty(&state).expect("serialize");
+        let decoded: AppState = toml::from_str(&encoded).expect("deserialize");
+
+        assert_eq!(decoded.runtime, state.runtime);
+        assert!(encoded.contains("[runtime.opencode]"));
+        assert!(encoded.contains("[runtime.opencode-fast]"));
+        assert!(encoded.contains("[runtime.state.opencode]"));
     }
 
     #[test]
@@ -423,6 +777,28 @@ mod tests {
 
         assert_eq!(loaded, AppState::default());
         assert!(path.exists());
+    }
+
+    #[test]
+    fn read_only_load_returns_default_without_creating_file() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir.path().join("lmml").join("state.toml");
+
+        let loaded = AppState::load_existing_or_default_from_path(&path).expect("load default");
+
+        assert_eq!(loaded, AppState::default());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn runtime_profile_base_url_brackets_ipv6_literals() {
+        let profile = RuntimeProfile {
+            host: "::1".to_string(),
+            port: 4010,
+            ..RuntimeProfile::default()
+        };
+
+        assert_eq!(profile.api_base_url(), "http://[::1]:4010/v1");
     }
 
     #[test]
@@ -481,6 +857,50 @@ mod tests {
                 jinja: true,
                 chat_template: "chatml".to_string(),
                 extra_args: vec!["--verbose".to_string()],
+            },
+            runtime: RuntimeConfig {
+                opencode: RuntimeProfile {
+                    host: "127.0.0.1".to_string(),
+                    port: 4010,
+                    model: PathBuf::from("/models/full.gguf"),
+                    ctx_size: 65_536,
+                    gpu_layers: -1,
+                    batch_size: 512,
+                    threads: 8,
+                    parallel: 4,
+                    extra_args: vec!["--metrics".to_string()],
+                    autostart: false,
+                },
+                opencode_fast: RuntimeProfile {
+                    host: "127.0.0.1".to_string(),
+                    port: 4011,
+                    model: PathBuf::from("/models/fast.gguf"),
+                    ctx_size: 32_768,
+                    gpu_layers: -1,
+                    batch_size: 512,
+                    threads: 8,
+                    parallel: 2,
+                    extra_args: Vec::new(),
+                    autostart: false,
+                },
+                state: RuntimeState {
+                    opencode: RuntimeProfileState {
+                        status: RuntimeStatus::Ready,
+                        pid: Some(1234),
+                        host: "127.0.0.1".to_string(),
+                        port: 4010,
+                        model: PathBuf::from("/models/full.gguf"),
+                        log_path: PathBuf::from("/state/lmml/runtime/opencode.log"),
+                        started_at: "2026-06-01T00:00:00Z".to_string(),
+                        last_health_at: "2026-06-01T00:00:05Z".to_string(),
+                        last_health: "ok".to_string(),
+                        failure_count: 0,
+                    },
+                    opencode_fast: RuntimeProfileState {
+                        status: RuntimeStatus::Stopped,
+                        ..RuntimeProfileState::default()
+                    },
+                },
             },
             system_profile: Some(SystemProfile {
                 cuda_toolkit: Some("12.4".to_string()),

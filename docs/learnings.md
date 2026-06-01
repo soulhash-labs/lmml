@@ -740,3 +740,38 @@ installation: a clean build produced
 `~/.local/share/lmml/llama.cpp/build/bin/llama-server`, started Qwen3.5-4B-Q6_K,
 reached `http://127.0.0.1:1200`, and llama.cpp reported
 `CUDA0: NVIDIA GeForce GTX 1080 Ti` with `CUDA : ARCHS = 610`.
+
+### Harness Runtime Should Use `llama-server`
+
+For OpenCode, Claude Code, and similar coding harnesses, lmml should expose a
+managed `llama-server` runtime rather than shelling through `llama-cli`.
+
+The reason is operational: agent harnesses need long-lived HTTP, stable ports,
+readiness checks, logs, restart behavior, model/profile switching, and long
+timeouts. `llama-cli` remains valuable for one-shot diagnostics, but it is not
+the right default runtime boundary for multi-turn coding agents.
+
+The current OpenCode config already expects OpenAI-compatible HTTP endpoints:
+
+```text
+full: http://127.0.0.1:4010/v1
+fast: http://127.0.0.1:4011/v1
+timeout: 7200s
+chunk timeout: 300s
+reserved compaction tokens: 32768
+```
+
+This points toward lmml runtime profiles: `opencode` and `opencode-fast`, each
+owning a managed `llama-server` process, model, port, health state, and config
+snippet.
+
+Anthropic-oriented clients may support both native Messages API mode and
+OpenAI-compatible chat completions mode. For lmml harness runtime, prefer the
+OpenAI-compatible mode first because it maps directly to `llama-server`'s
+`/v1/chat/completions` endpoint. Native `/v1/messages` translation should be a
+separate adapter plan only after a real harness requirement is verified.
+
+OpenCode configuration should be explicit about routing. lmml's default is
+local-first: add lmml-managed `llamacpp` providers and route top-level `model`
+and `small_model` to local llama.cpp. Operators can intentionally preserve cloud
+provider routing with `--model-source existing --small-model-source existing`.

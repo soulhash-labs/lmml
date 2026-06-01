@@ -101,3 +101,16 @@ lmml-uninstall
 cargo build --release -p lmml-tui
 ./target/release/lmml doctor
 ```
+
+## Harness Runtime Direction
+
+For coding harnesses such as OpenCode and Claude Code, lmml should manage
+long-running `llama-server` HTTP endpoints. `llama-cli` is reserved for one-shot
+diagnostics and smoke checks.
+
+`lmml runtime configure opencode` is local-first by default: it adds the
+lmml-managed providers and routes OpenCode's top-level `model` and
+`small_model` to those local providers. Operators who want to keep cloud routing
+active can pass `--model-source existing --small-model-source existing`.
+
+See [docs/runtime-harness-plan.md](docs/runtime-harness-plan.md).

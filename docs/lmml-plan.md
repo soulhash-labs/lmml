@@ -991,6 +991,7 @@ original crate-build milestones:
 | F — Signed checksum authenticity | Complete for local v0.1.0 | Installer and packaging support minisign-signed `SHA256SUMS`. Real release-keypair verification is deferred until a future public/non-local release. |
 | G — Local v0.1.0 release closure | Verification passed; archive pending | Final gates and both binary/source HTTP install flows passed on Linux x86_64. Tag or archive remains pending. |
 | H — Debian-family Linux validation | CUDA + live llama.cpp validation complete; Linux matrix pending | Ubuntu 24.04 CUDA validation passed on this machine for binary/source installs and live llama.cpp CUDA server startup. Debian-family x86_64 and ARM64 validation starts with Ubuntu 24.04/26.04 and still needs matching builders. macOS is deferred. |
+| I — Managed runtime harness integration | Planned | lmml should manage long-running `llama-server` profiles for coding harnesses such as OpenCode and Claude Code. Use HTTP server endpoints, not `llama-cli`, for harness runtime. |
 
 ### What changed during release hardening
 
@@ -1028,6 +1029,29 @@ package and smoke result:
   `llama-server`, and confirm the server log reports the NVIDIA GPU and CUDA
   architecture.
 - macOS Intel/Apple Silicon validation is deferred to Phase 10 or later.
+
+### Managed runtime harness plan
+
+Coding harnesses should integrate with lmml through managed `llama-server`
+instances. `llama-cli` is reserved for one-shot diagnostics and smoke tests.
+
+The initial harness target is OpenCode with the existing local config at
+`~/.config/opencode/opencode.json`:
+
+- full provider: `http://127.0.0.1:4010/v1`
+- fast provider: `http://127.0.0.1:4011/v1`
+- timeout: `7200s`
+- chunk timeout: `300s`
+- compaction reserve: `32768` tokens
+
+lmml should add runtime profiles that can start/stop/status these servers,
+generate config snippets, and keep model/port/profile state synchronized with
+the TUI.
+
+OpenCode configuration is local-first by default: `lmml runtime configure
+opencode` should add lmml providers and route top-level `model` and
+`small_model` to local llama.cpp. Operators can preserve cloud routing with
+`--model-source existing --small-model-source existing`.
 
 ### Preflight and source-build bootstrap plan
 

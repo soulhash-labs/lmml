@@ -1,7 +1,8 @@
 //! lmml TUI binary entry point.
 
-use std::io::{self, stdout};
+use std::io::{self, stdout, Write};
 use std::panic;
+use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use crossterm::execute;
@@ -13,6 +14,7 @@ use ratatui::Terminal;
 
 use lmml_tui::app::App;
 use lmml_tui::event_loop::EventLoop;
+use lmml_tui::runtime_cli::{self, RoutingOptions, RoutingSource};
 use lmml_tui::tabs;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::EnvFilter;
@@ -34,6 +36,88 @@ enum Command {
     Doctor,
     /// Run a short headless startup check for install smoke tests.
     Smoke,
+    /// Manage long-running llama-server runtimes for coding harnesses.
+    Runtime {
+        #[command(subcommand)]
+        command: RuntimeCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RuntimeCommand {
+    /// Print managed runtime profile status.
+    Status {
+        /// Print JSON output. Reserved for the runtime process implementation.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print ready-to-paste harness config.
+    PrintConfig {
+        /// Harness config target.
+        target: RuntimeConfigTarget,
+    },
+    /// Configure an external harness config file.
+    Configure {
+        /// Harness config target.
+        target: RuntimeConfigTarget,
+        /// Show planned changes without writing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Config path override.
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// Restore config from backup.
+        #[arg(long)]
+        rollback: Option<PathBuf>,
+        /// Apply clean changes without prompting.
+        #[arg(long)]
+        yes: bool,
+        /// Allow replacing conflicting lmml-owned provider entries.
+        #[arg(long)]
+        force: bool,
+        /// Source for OpenCode's top-level model routing.
+        #[arg(long, default_value = "lmml")]
+        model_source: RoutingSourceArg,
+        /// Source for OpenCode's top-level small_model routing.
+        #[arg(long, default_value = "lmml")]
+        small_model_source: RoutingSourceArg,
+    },
+}
+
+#[derive(Debug, Clone, clap::ValueEnum)]
+enum RuntimeConfigTarget {
+    /// OpenCode provider config.
+    Opencode,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum RoutingSourceArg {
+    /// Preserve an existing key and do not create it when missing.
+    Existing,
+    /// Set the key to lmml's local managed model.
+    Lmml,
+    /// Do not touch this key.
+    None,
+}
+
+struct RuntimeConfigureArgs {
+    target: RuntimeConfigTarget,
+    dry_run: bool,
+    path: Option<PathBuf>,
+    rollback: Option<PathBuf>,
+    yes: bool,
+    force: bool,
+    routing: RoutingOptions,
+}
+
+impl From<RoutingSourceArg> for RoutingSource {
+    fn from(value: RoutingSourceArg) -> Self {
+        match value {
+            RoutingSourceArg::Existing => Self::Existing,
+            RoutingSourceArg::Lmml => Self::Lmml,
+            RoutingSourceArg::None => Self::None,
+        }
+    }
 }
 
 struct LoggingGuards {
@@ -44,13 +128,20 @@ struct LoggingGuards {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    if matches!(cli.command, Some(Command::Doctor)) {
-        let code = run_doctor().await;
-        std::process::exit(code);
-    }
-    if matches!(cli.command, Some(Command::Smoke)) {
-        let code = run_smoke().await;
-        std::process::exit(code);
+    match cli.command {
+        Some(Command::Doctor) => {
+            let code = run_doctor().await;
+            std::process::exit(code);
+        }
+        Some(Command::Smoke) => {
+            let code = run_smoke().await;
+            std::process::exit(code);
+        }
+        Some(Command::Runtime { command }) => {
+            let code = run_runtime(command);
+            std::process::exit(code);
+        }
+        None => {}
     }
 
     let log_guard = init_logging()?;
@@ -66,6 +157,193 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     drop(log_guard);
     result
+}
+
+fn run_runtime(command: RuntimeCommand) -> i32 {
+    let state = match lmml_state::AppState::load_existing_or_default() {
+        Ok(state) => state,
+        Err(error) => {
+            eprintln!("state load failed: {error}");
+            return 1;
+        }
+    };
+
+    match command {
+        RuntimeCommand::Status { json } => run_runtime_status(&state, json),
+        RuntimeCommand::PrintConfig { target } => run_runtime_print_config(&state, target),
+        RuntimeCommand::Configure {
+            target,
+            dry_run,
+            path,
+            rollback,
+            yes,
+            force,
+            model_source,
+            small_model_source,
+        } => run_runtime_configure(
+            &state,
+            RuntimeConfigureArgs {
+                target,
+                dry_run,
+                path,
+                rollback,
+                yes,
+                force,
+                routing: RoutingOptions {
+                    model: model_source.into(),
+                    small_model: small_model_source.into(),
+                },
+            },
+        ),
+    }
+}
+
+fn run_runtime_status(state: &lmml_state::AppState, json: bool) -> i32 {
+    if json {
+        eprintln!("runtime status --json will be available when runtime process state is wired");
+        return 2;
+    }
+    println!("{}", runtime_cli::render_status(state));
+    0
+}
+
+fn run_runtime_print_config(state: &lmml_state::AppState, target: RuntimeConfigTarget) -> i32 {
+    match target {
+        RuntimeConfigTarget::Opencode => {
+            for warning in runtime_cli::opencode_config_warnings(state) {
+                eprintln!("{warning}");
+            }
+            match runtime_cli::render_opencode_config(state) {
+                Ok(rendered) => {
+                    println!("{rendered}");
+                    0
+                }
+                Err(error) => {
+                    eprintln!("failed to render OpenCode config: {error}");
+                    1
+                }
+            }
+        }
+    }
+}
+
+fn run_runtime_configure(state: &lmml_state::AppState, args: RuntimeConfigureArgs) -> i32 {
+    match args.target {
+        RuntimeConfigTarget::Opencode => {
+            let path = args
+                .path
+                .unwrap_or_else(runtime_cli::default_opencode_config_path);
+            if let Some(backup) = args.rollback {
+                return match runtime_cli::rollback_opencode_config(&backup, &path) {
+                    Ok(()) => {
+                        println!("restored {} from {}", path.display(), backup.display());
+                        0
+                    }
+                    Err(error) => {
+                        eprintln!("rollback failed: {error}");
+                        1
+                    }
+                };
+            }
+            let plan = match runtime_cli::plan_opencode_configure(
+                state,
+                &path,
+                args.routing,
+                args.force,
+            ) {
+                Ok(plan) => plan,
+                Err(error) => {
+                    eprintln!("configure plan failed: {error}");
+                    return 1;
+                }
+            };
+            println!("OpenCode config: {}", plan.path.display());
+            print_diff(&plan.diff);
+            print_routing(&plan.routing);
+            if plan.has_provider_conflicts && !args.force {
+                eprintln!("conflicting lmml-owned provider entries found; rerun with --force after reviewing the diff");
+                return 2;
+            }
+            if plan.has_routing_conflicts {
+                eprintln!("OpenCode top-level routing will be changed to lmml local values.");
+            }
+            if args.dry_run {
+                println!("dry run only; no files written");
+                return 0;
+            }
+            if !args.yes && !confirm("Apply OpenCode config changes? [y/N] ") {
+                println!("aborted; no files written");
+                return 2;
+            }
+            match runtime_cli::apply_opencode_configure(state, &path, args.routing, args.force) {
+                Ok(applied) => {
+                    println!("updated {}", applied.path.display());
+                    println!("backup: {}", applied.backup_path.display());
+                    println!(
+                        "rollback: lmml runtime configure opencode --path {} --rollback {}",
+                        applied.path.display(),
+                        applied.backup_path.display()
+                    );
+                    0
+                }
+                Err(error) => {
+                    eprintln!("configure apply failed: {error}");
+                    1
+                }
+            }
+        }
+    }
+}
+
+fn print_routing(routing: &runtime_cli::RoutingPlan) {
+    println!("Routing:");
+    print_routing_decision(&routing.model);
+    print_routing_decision(&routing.small_model);
+}
+
+fn print_routing_decision(decision: &runtime_cli::RoutingDecision) {
+    match decision.source {
+        RoutingSource::Existing => match &decision.existing {
+            Some(existing) => println!("  {}: preserve existing {existing}", decision.key),
+            None => println!(
+                "  {}: preserve existing; key missing, no write",
+                decision.key
+            ),
+        },
+        RoutingSource::None => println!("  {}: not touched", decision.key),
+        RoutingSource::Lmml => {
+            if decision.conflict {
+                let existing = decision.existing.as_deref().unwrap_or("<missing>");
+                println!(
+                    "  {}: conflict, current {existing}, requested {}",
+                    decision.key, decision.lmml
+                );
+            } else {
+                println!("  {}: set to {}", decision.key, decision.lmml);
+            }
+        }
+    }
+}
+
+fn print_diff(diff: &[String]) {
+    if diff.is_empty() {
+        println!("No changes needed.");
+    } else {
+        println!("Planned changes:");
+        for line in diff {
+            println!("  {line}");
+        }
+    }
+}
+
+fn confirm(prompt: &str) -> bool {
+    print!("{prompt}");
+    let _ignored = io::stdout().flush();
+    let mut answer = String::new();
+    if io::stdin().read_line(&mut answer).is_err() {
+        return false;
+    }
+    matches!(answer.trim(), "y" | "Y" | "yes" | "YES")
 }
 
 async fn run_smoke() -> i32 {

@@ -963,6 +963,7 @@ dependencies = [
 name = "lmml-state"
 version = "0.1.0"
 dependencies = [
+ "pretty_assertions",
  "serde",
  "tempfile",
  "thiserror",
@@ -982,7 +983,9 @@ dependencies = [
  "lmml-models",
  "lmml-server",
  "lmml-state",
+ "pretty_assertions",
  "ratatui",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tokio",

@@ -7,5 +7,6 @@ pub mod action;
 pub mod app;
 pub mod event_loop;
 pub mod footer;
+pub mod runtime_cli;
 pub mod tabs;
 pub mod widgets;
