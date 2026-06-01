@@ -11,6 +11,7 @@ members = [
     "crates/lmml-compat",
     "crates/lmml-build",
     "crates/lmml-state",
+    "crates/lmml-tui",
 ]
 resolver = "2"
 
