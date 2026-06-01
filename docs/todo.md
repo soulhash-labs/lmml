@@ -400,18 +400,19 @@ Current OpenCode local config:
 
 - [x] Add runtime profile config schema for harness-managed servers
 - [x] Add separate runtime state schema for PID, status, health, and log path
-- [ ] Support at least `opencode` on port `4010` and `opencode-fast` on port
+- [x] Support at least `opencode` on port `4010` and `opencode-fast` on port
   `4011`
 - [ ] Allow simultaneous managed `llama-server` instances for full and fast
   profiles
 - [ ] Keep each profile isolated: failure of one profile must not stop another
-- [ ] Add stale PID handling for crashed or externally killed servers
+- [x] Add stale PID handling for crashed or externally killed servers in status
+  reconciliation and stop
 - [ ] Add health polling every `5s` and mark unhealthy after three consecutive
   failures
 - [x] Add initial CLI commands: `lmml runtime status`, `lmml runtime
   print-config opencode`, and `lmml runtime configure opencode`
-- [ ] Add process CLI commands: `lmml runtime start|stop|logs`
-- [ ] Add `lmml runtime start <profile> --detach`
+- [x] Add process CLI commands: `lmml runtime start|stop|logs`
+- [x] Add `lmml runtime start <profile> --detach`
 - [ ] Add `lmml runtime status --json`
 - [x] Make `lmml runtime print-config opencode` print ready-to-paste OpenCode
   JSON
@@ -449,5 +450,5 @@ Current OpenCode local config:
   if the new server fails health checks
 - [ ] Connect clean install behavior: runtime start must fail clearly when no
   model is configured
-- [ ] Add tests for multi-profile port conflicts, restart on model change,
-  stale PID handling, logs, health checks, and no orphaned processes
+- [ ] Add remaining tests for multi-profile port conflicts, restart on model
+  change, ongoing health checks, and no orphaned processes

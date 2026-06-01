@@ -204,6 +204,8 @@ Add a harness profile layer above the existing server config:
   `ready` or fails health checks.
 - `--detach` starts the server in the background, waits until `/v1/health`
   passes or startup times out, then returns.
+- Current CLI implementation supports the detached path first. Foreground log
+  streaming remains a later enhancement.
 - Each profile owns an independent `ServerManager` instance. Starting or failing
   one profile must not stop another profile.
 - If a port is already in use, only that profile fails and the error must name

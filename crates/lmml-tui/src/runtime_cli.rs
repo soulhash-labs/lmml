@@ -3,7 +3,8 @@
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::Stdio;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lmml_state::{AppState, RuntimeConfig, RuntimeProfile, RuntimeProfileState, RuntimeStatus};
 use serde_json::{json, Map, Value};
@@ -90,6 +91,30 @@ pub struct RoutingDecision {
     pub conflict: bool,
 }
 
+/// Result of starting a managed runtime profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeStartResult {
+    /// Profile name.
+    pub profile: String,
+    /// Process ID.
+    pub pid: u32,
+    /// Ready URL.
+    pub url: String,
+    /// Log file path.
+    pub log_path: PathBuf,
+}
+
+/// Result of stopping a managed runtime profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeStopResult {
+    /// Profile name.
+    pub profile: String,
+    /// Process ID that was stopped, if any.
+    pub pid: Option<u32>,
+    /// Human-readable stop status.
+    pub message: String,
+}
+
 /// Render runtime profile status as a stable table.
 pub fn render_status(state: &AppState) -> String {
     let mut lines = vec![format!(
@@ -136,6 +161,204 @@ pub fn default_opencode_config_path() -> PathBuf {
         env::var_os("HOME"),
         env::var_os("USERPROFILE"),
     )
+}
+
+/// Reconcile in-memory runtime status with currently alive PIDs.
+pub fn reconcile_runtime_state(state: &mut AppState) {
+    for name in RuntimeConfig::profile_names() {
+        let Some(runtime) = state.runtime.state.profile_mut(name) else {
+            continue;
+        };
+        let Some(pid) = runtime.pid else {
+            continue;
+        };
+        if !pid_is_alive(pid) {
+            runtime.status = RuntimeStatus::Stopped;
+            runtime.pid = None;
+            runtime.last_health = "pid not running".to_string();
+        }
+    }
+}
+
+/// Return whether a runtime profile name is built in and safe for path use.
+pub fn is_known_profile(profile_name: &str) -> bool {
+    RuntimeConfig::profile_names()
+        .into_iter()
+        .any(|name| name == profile_name)
+}
+
+/// Start a detached llama-server process for a runtime profile.
+pub async fn start_profile(
+    state: &mut AppState,
+    profile_name: &str,
+    startup_timeout: Duration,
+) -> Result<RuntimeStartResult, RuntimeCliError> {
+    let profile = state
+        .runtime
+        .profile(profile_name)
+        .ok_or_else(|| RuntimeCliError::UnknownProfileName(profile_name.to_string()))?
+        .clone();
+    prevent_double_start(state, profile_name)?;
+    validate_start_profile(profile_name, &profile, state)?;
+    lmml_server::check_port_free(&profile.host, profile.port)
+        .await
+        .map_err(|source| RuntimeCliError::PortUnavailable {
+            host: profile.host.clone(),
+            port: profile.port,
+            source,
+        })?;
+
+    let caps = lmml_compat::LlamaBinaryCapabilities::probe(&state.build.binary)
+        .await
+        .map_err(RuntimeCliError::Compat)?;
+    let config = profile_to_server_config(&profile);
+    let argv = lmml_compat::build_argv(&config, &caps);
+    let log_path = runtime_log_path(profile_name);
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent).map_err(|source| RuntimeCliError::CreateDir {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|source| RuntimeCliError::Write {
+            path: log_path.clone(),
+            source,
+        })?;
+    let log_err = log.try_clone().map_err(|source| RuntimeCliError::Write {
+        path: log_path.clone(),
+        source,
+    })?;
+
+    let mut command = tokio::process::Command::new(&state.build.binary);
+    command
+        .args(&argv)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_err));
+    detach_command(&mut command);
+    let child = command.spawn().map_err(|source| RuntimeCliError::Spawn {
+        binary: state.build.binary.clone(),
+        source,
+    })?;
+    let pid = child.id().ok_or(RuntimeCliError::MissingPid)?;
+    update_runtime_starting(state, profile_name, &profile, pid, &log_path)?;
+    state.save()?;
+
+    match lmml_server::wait_for_ready(&profile.host, profile.port, startup_timeout).await {
+        Ok(url) => {
+            update_runtime_ready(state, profile_name, &url)?;
+            state.save()?;
+            Ok(RuntimeStartResult {
+                profile: profile_name.to_string(),
+                pid,
+                url,
+                log_path,
+            })
+        }
+        Err(error) => {
+            let kill_result = terminate_pid(pid).await;
+            if let Err(kill_error) = kill_result {
+                let startup = error.to_string();
+                let cleanup = kill_error.to_string();
+                update_runtime_failed(
+                    state,
+                    profile_name,
+                    format!("{startup}; additionally failed to terminate process group: {cleanup}"),
+                )?;
+                state.save()?;
+                return Err(RuntimeCliError::StartupCleanup {
+                    profile: profile_name.to_string(),
+                    startup,
+                    cleanup,
+                });
+            }
+            update_runtime_failed(state, profile_name, error.to_string())?;
+            state.save()?;
+            Err(RuntimeCliError::Startup {
+                profile: profile_name.to_string(),
+                source: error,
+            })
+        }
+    }
+}
+
+/// Stop a detached runtime profile process recorded in state.
+pub async fn stop_profile(
+    state: &mut AppState,
+    profile_name: &str,
+) -> Result<RuntimeStopResult, RuntimeCliError> {
+    let binary = state.build.binary.clone();
+    let runtime = state
+        .runtime
+        .state
+        .profile_mut(profile_name)
+        .ok_or_else(|| RuntimeCliError::UnknownProfileName(profile_name.to_string()))?;
+    let Some(pid) = runtime.pid else {
+        runtime.status = RuntimeStatus::Stopped;
+        state.save()?;
+        return Ok(RuntimeStopResult {
+            profile: profile_name.to_string(),
+            pid: None,
+            message: "already stopped".to_string(),
+        });
+    };
+    if !pid_is_alive(pid) {
+        runtime.status = RuntimeStatus::Stopped;
+        runtime.pid = None;
+        runtime.last_health = "pid not running".to_string();
+        state.save()?;
+        return Ok(RuntimeStopResult {
+            profile: profile_name.to_string(),
+            pid: Some(pid),
+            message: "stale pid cleared".to_string(),
+        });
+    }
+    if !pid_looks_like_llama_server(pid, &binary) {
+        runtime.status = RuntimeStatus::Unhealthy;
+        runtime.last_health = "recorded pid does not look like llama-server".to_string();
+        state.save()?;
+        return Err(RuntimeCliError::PidMismatch {
+            profile: profile_name.to_string(),
+            pid,
+        });
+    }
+    runtime.status = RuntimeStatus::Stopping;
+    state.save()?;
+    if let Err(error) = terminate_pid(pid).await {
+        let runtime = state
+            .runtime
+            .state
+            .profile_mut(profile_name)
+            .ok_or_else(|| RuntimeCliError::UnknownProfileName(profile_name.to_string()))?;
+        runtime.status = RuntimeStatus::Failed;
+        runtime.last_health = error.to_string();
+        runtime.failure_count = runtime.failure_count.saturating_add(1);
+        state.save()?;
+        return Err(error);
+    }
+    let runtime = state
+        .runtime
+        .state
+        .profile_mut(profile_name)
+        .ok_or_else(|| RuntimeCliError::UnknownProfileName(profile_name.to_string()))?;
+    runtime.status = RuntimeStatus::Stopped;
+    runtime.pid = None;
+    runtime.last_health = "stopped".to_string();
+    state.save()?;
+    Ok(RuntimeStopResult {
+        profile: profile_name.to_string(),
+        pid: Some(pid),
+        message: "stopped".to_string(),
+    })
+}
+
+/// Return the log path for a profile.
+pub fn runtime_log_path(profile_name: &str) -> PathBuf {
+    AppState::runtime_log_dir().join(format!("{profile_name}.log"))
 }
 
 /// Build a dry-run plan for updating an OpenCode config.
@@ -274,6 +497,257 @@ fn render_status_row(
         status_label(runtime.status),
         profile.api_base_url()
     )
+}
+
+fn validate_start_profile(
+    profile_name: &str,
+    profile: &RuntimeProfile,
+    state: &AppState,
+) -> Result<(), RuntimeCliError> {
+    if profile.model.as_os_str().is_empty() {
+        return Err(RuntimeCliError::MissingModel {
+            profile: profile_name.to_string(),
+        });
+    }
+    if !profile.model.exists() {
+        return Err(RuntimeCliError::MissingModelPath {
+            profile: profile_name.to_string(),
+            path: profile.model.clone(),
+        });
+    }
+    if !state.build.binary.exists() {
+        return Err(RuntimeCliError::MissingServerBinary {
+            path: state.build.binary.clone(),
+        });
+    }
+    Ok(())
+}
+
+fn prevent_double_start(state: &AppState, profile_name: &str) -> Result<(), RuntimeCliError> {
+    let Some(runtime) = state.runtime.state.profile(profile_name) else {
+        return Err(RuntimeCliError::UnknownProfileName(
+            profile_name.to_string(),
+        ));
+    };
+    let Some(pid) = runtime.pid else {
+        return Ok(());
+    };
+    if !pid_is_alive(pid) {
+        return Ok(());
+    }
+    if pid_looks_like_llama_server(pid, &state.build.binary) {
+        return Err(RuntimeCliError::AlreadyRunning {
+            profile: profile_name.to_string(),
+            pid,
+        });
+    }
+    Err(RuntimeCliError::PidMismatch {
+        profile: profile_name.to_string(),
+        pid,
+    })
+}
+
+fn profile_to_server_config(profile: &RuntimeProfile) -> lmml_compat::ServerConfig {
+    lmml_compat::ServerConfig {
+        model: profile.model.clone(),
+        port: profile.port,
+        host: profile.host.clone(),
+        ctx_size: profile.ctx_size,
+        n_gpu_layers: profile.gpu_layers,
+        batch_size: profile.batch_size,
+        ubatch_size: profile.batch_size,
+        threads: profile.threads,
+        flash_attn: true,
+        mlock: false,
+        api_key: None,
+        chat_template: None,
+        jinja: false,
+        extra_args: profile.extra_args.clone(),
+    }
+}
+
+fn update_runtime_starting(
+    state: &mut AppState,
+    profile_name: &str,
+    profile: &RuntimeProfile,
+    pid: u32,
+    log_path: &Path,
+) -> Result<(), RuntimeCliError> {
+    let runtime = state
+        .runtime
+        .state
+        .profile_mut(profile_name)
+        .ok_or_else(|| RuntimeCliError::UnknownProfileName(profile_name.to_string()))?;
+    runtime.status = RuntimeStatus::Starting;
+    runtime.pid = Some(pid);
+    runtime.host = profile.host.clone();
+    runtime.port = profile.port;
+    runtime.model = profile.model.clone();
+    runtime.log_path = log_path.to_path_buf();
+    runtime.started_at = unix_timestamp_string();
+    runtime.last_health_at = String::new();
+    runtime.last_health = "starting".to_string();
+    runtime.failure_count = 0;
+    Ok(())
+}
+
+fn update_runtime_ready(
+    state: &mut AppState,
+    profile_name: &str,
+    url: &str,
+) -> Result<(), RuntimeCliError> {
+    let runtime = state
+        .runtime
+        .state
+        .profile_mut(profile_name)
+        .ok_or_else(|| RuntimeCliError::UnknownProfileName(profile_name.to_string()))?;
+    runtime.status = RuntimeStatus::Ready;
+    runtime.last_health_at = unix_timestamp_string();
+    runtime.last_health = format!("ready {url}");
+    runtime.failure_count = 0;
+    Ok(())
+}
+
+fn update_runtime_failed(
+    state: &mut AppState,
+    profile_name: &str,
+    reason: String,
+) -> Result<(), RuntimeCliError> {
+    let runtime = state
+        .runtime
+        .state
+        .profile_mut(profile_name)
+        .ok_or_else(|| RuntimeCliError::UnknownProfileName(profile_name.to_string()))?;
+    runtime.status = RuntimeStatus::Failed;
+    runtime.last_health_at = unix_timestamp_string();
+    runtime.last_health = reason;
+    runtime.failure_count = runtime.failure_count.saturating_add(1);
+    Ok(())
+}
+
+fn unix_timestamp_string() -> String {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs().to_string())
+        .unwrap_or_else(|_| "0".to_string())
+}
+
+fn pid_is_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        if pid_is_zombie(pid) {
+            return false;
+        }
+        // SAFETY: kill with signal 0 only checks whether the process exists.
+        if unsafe { libc::kill(pid as i32, 0) == 0 } {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn pid_is_zombie(pid: u32) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .is_some_and(|stat| {
+            stat.rsplit_once(") ")
+                .and_then(|(_, rest)| rest.split_whitespace().next())
+                .is_some_and(|state| state == "Z")
+        })
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn pid_is_zombie(pid: u32) -> bool {
+    std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "stat="])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .trim_start()
+                .starts_with('Z')
+        })
+        .unwrap_or(false)
+}
+
+fn pid_looks_like_llama_server(pid: u32, binary: &Path) -> bool {
+    let expected = binary
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("llama-server");
+    std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).contains(expected))
+        .unwrap_or(false)
+}
+
+async fn terminate_pid(pid: u32) -> Result<(), RuntimeCliError> {
+    #[cfg(unix)]
+    {
+        signal_process_group(pid, libc::SIGTERM)?;
+        for _ in 0..50 {
+            if !pid_is_alive(pid) {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        signal_process_group(pid, libc::SIGKILL)?;
+        for _ in 0..50 {
+            if !pid_is_alive(pid) {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Err(RuntimeCliError::KillTimeout { pid })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        Err(RuntimeCliError::UnsupportedPlatform)
+    }
+}
+
+#[cfg(unix)]
+fn signal_process_group(pid: u32, signal: i32) -> Result<(), RuntimeCliError> {
+    let pgid = -(pid as i32);
+    // SAFETY: pid came from lmml runtime state and start_profile puts it in a new session.
+    if unsafe { libc::kill(pgid, signal) } == 0 {
+        return Ok(());
+    }
+    let source = std::io::Error::last_os_error();
+    if source.raw_os_error() == Some(libc::ESRCH) && !pid_is_alive(pid) {
+        return Ok(());
+    }
+    Err(RuntimeCliError::Kill { pid, source })
+}
+
+fn detach_command(command: &mut tokio::process::Command) {
+    #[cfg(unix)]
+    {
+        // SAFETY: pre_exec runs only async-signal-safe setsid before exec.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = command;
+    }
 }
 
 fn status_label(status: RuntimeStatus) -> &'static str {
@@ -667,6 +1141,111 @@ pub enum RuntimeCliError {
     /// Runtime profile was not known.
     #[error("unknown runtime profile")]
     UnknownProfile,
+    /// Named runtime profile was not known.
+    #[error("unknown runtime profile `{0}`")]
+    UnknownProfileName(String),
+    /// Runtime profile has no model configured.
+    #[error("runtime profile `{profile}` has no model configured")]
+    MissingModel {
+        /// Profile name.
+        profile: String,
+    },
+    /// Runtime profile model path does not exist.
+    #[error("runtime profile `{profile}` model does not exist: {path}")]
+    MissingModelPath {
+        /// Profile name.
+        profile: String,
+        /// Missing model path.
+        path: PathBuf,
+    },
+    /// Built llama-server binary is missing.
+    #[error("llama-server binary does not exist: {path}")]
+    MissingServerBinary {
+        /// Missing binary path.
+        path: PathBuf,
+    },
+    /// Runtime profile already has a live managed process.
+    #[error("runtime profile `{profile}` is already running with pid {pid}; stop it first")]
+    AlreadyRunning {
+        /// Profile name.
+        profile: String,
+        /// Existing PID.
+        pid: u32,
+    },
+    /// A configured runtime port is unavailable.
+    #[error("runtime port {host}:{port} is unavailable: {source}")]
+    PortUnavailable {
+        /// Host.
+        host: String,
+        /// Port.
+        port: u16,
+        /// Source server error.
+        #[source]
+        source: lmml_server::ServerError,
+    },
+    /// llama-server compatibility probing failed.
+    #[error("failed to probe llama-server compatibility: {0}")]
+    Compat(#[source] lmml_compat::CompatError),
+    /// Failed to spawn llama-server.
+    #[error("failed to spawn llama-server at {binary}: {source}")]
+    Spawn {
+        /// Binary path.
+        binary: PathBuf,
+        /// Source IO error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// Spawned process had no PID.
+    #[error("spawned llama-server process did not report a pid")]
+    MissingPid,
+    /// Server startup failed.
+    #[error("runtime profile `{profile}` failed to become ready: {source}")]
+    Startup {
+        /// Profile name.
+        profile: String,
+        /// Source server error.
+        #[source]
+        source: lmml_server::ServerError,
+    },
+    /// Startup failed and cleanup also failed.
+    #[error("runtime profile `{profile}` failed to become ready ({startup}) and cleanup failed ({cleanup})")]
+    StartupCleanup {
+        /// Profile name.
+        profile: String,
+        /// Startup failure.
+        startup: String,
+        /// Cleanup failure.
+        cleanup: String,
+    },
+    /// Persisted PID did not look like a llama-server process.
+    #[error("runtime profile `{profile}` pid {pid} does not look like a managed llama-server")]
+    PidMismatch {
+        /// Profile name.
+        profile: String,
+        /// Recorded PID.
+        pid: u32,
+    },
+    /// Killing a process failed.
+    #[error("failed to signal pid {pid}: {source}")]
+    Kill {
+        /// PID.
+        pid: u32,
+        /// Source IO error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// Process still appeared alive after SIGKILL wait.
+    #[error("pid {pid} was still alive after SIGKILL")]
+    KillTimeout {
+        /// PID.
+        pid: u32,
+    },
+    /// Platform does not support this process operation.
+    #[error("runtime process operation is unsupported on this platform")]
+    UnsupportedPlatform,
+    /// State load/save failed.
+    #[error("state error: {0}")]
+    State(#[from] lmml_state::StateError),
     /// Existing lmml-owned OpenCode provider differs from the desired value.
     #[error("OpenCode config contains conflicting lmml provider entries; review --dry-run output and rerun with --force if intended")]
     Conflict,
@@ -1024,6 +1603,16 @@ mod tests {
 
         assert_eq!(restored["provider"]["openai"]["name"], "old");
         assert!(restored["provider"].get("llamacpp").is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminate_pid_treats_missing_process_group_as_stopped() {
+        let missing_pid = 999_999_999;
+
+        terminate_pid(missing_pid)
+            .await
+            .expect("missing pid is already stopped");
     }
 
     #[test]

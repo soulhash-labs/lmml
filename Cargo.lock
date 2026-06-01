@@ -977,6 +977,7 @@ dependencies = [
  "clap",
  "crossterm",
  "insta",
+ "libc",
  "lmml-build",
  "lmml-compat",
  "lmml-detect",

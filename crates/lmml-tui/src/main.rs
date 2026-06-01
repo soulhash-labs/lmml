@@ -3,6 +3,7 @@
 use std::io::{self, stdout, Write};
 use std::panic;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use crossterm::execute;
@@ -45,11 +46,32 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum RuntimeCommand {
+    /// Start a managed runtime profile.
+    Start {
+        /// Runtime profile name, such as opencode or opencode-fast.
+        profile: String,
+        /// Start in the background and return after readiness.
+        #[arg(long)]
+        detach: bool,
+    },
+    /// Stop a managed runtime profile.
+    Stop {
+        /// Runtime profile name, such as opencode or opencode-fast.
+        profile: String,
+    },
     /// Print managed runtime profile status.
     Status {
         /// Print JSON output. Reserved for the runtime process implementation.
         #[arg(long)]
         json: bool,
+    },
+    /// Print runtime profile logs.
+    Logs {
+        /// Runtime profile name, such as opencode or opencode-fast.
+        profile: String,
+        /// Follow log output.
+        #[arg(long)]
+        follow: bool,
     },
     /// Print ready-to-paste harness config.
     PrintConfig {
@@ -138,7 +160,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(code);
         }
         Some(Command::Runtime { command }) => {
-            let code = run_runtime(command);
+            let code = run_runtime(command).await;
             std::process::exit(code);
         }
         None => {}
@@ -159,18 +181,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     result
 }
 
-fn run_runtime(command: RuntimeCommand) -> i32 {
-    let state = match lmml_state::AppState::load_existing_or_default() {
-        Ok(state) => state,
-        Err(error) => {
-            eprintln!("state load failed: {error}");
-            return 1;
-        }
-    };
-
+async fn run_runtime(command: RuntimeCommand) -> i32 {
     match command {
-        RuntimeCommand::Status { json } => run_runtime_status(&state, json),
-        RuntimeCommand::PrintConfig { target } => run_runtime_print_config(&state, target),
+        RuntimeCommand::Start { profile, detach } => run_runtime_start(&profile, detach).await,
+        RuntimeCommand::Stop { profile } => run_runtime_stop(&profile).await,
+        RuntimeCommand::Status { json } => {
+            let mut state = match lmml_state::AppState::load_existing_or_default() {
+                Ok(state) => state,
+                Err(error) => {
+                    eprintln!("state load failed: {error}");
+                    return 1;
+                }
+            };
+            runtime_cli::reconcile_runtime_state(&mut state);
+            run_runtime_status(&state, json)
+        }
+        RuntimeCommand::Logs { profile, follow } => run_runtime_logs(&profile, follow).await,
+        RuntimeCommand::PrintConfig { target } => {
+            let state = match lmml_state::AppState::load_existing_or_default() {
+                Ok(state) => state,
+                Err(error) => {
+                    eprintln!("state load failed: {error}");
+                    return 1;
+                }
+            };
+            run_runtime_print_config(&state, target)
+        }
         RuntimeCommand::Configure {
             target,
             dry_run,
@@ -180,21 +216,132 @@ fn run_runtime(command: RuntimeCommand) -> i32 {
             force,
             model_source,
             small_model_source,
-        } => run_runtime_configure(
-            &state,
-            RuntimeConfigureArgs {
-                target,
-                dry_run,
-                path,
-                rollback,
-                yes,
-                force,
-                routing: RoutingOptions {
-                    model: model_source.into(),
-                    small_model: small_model_source.into(),
+        } => {
+            let state = match lmml_state::AppState::load_existing_or_default() {
+                Ok(state) => state,
+                Err(error) => {
+                    eprintln!("state load failed: {error}");
+                    return 1;
+                }
+            };
+            run_runtime_configure(
+                &state,
+                RuntimeConfigureArgs {
+                    target,
+                    dry_run,
+                    path,
+                    rollback,
+                    yes,
+                    force,
+                    routing: RoutingOptions {
+                        model: model_source.into(),
+                        small_model: small_model_source.into(),
+                    },
                 },
-            },
-        ),
+            )
+        }
+    }
+}
+
+async fn run_runtime_start(profile: &str, detach: bool) -> i32 {
+    if !detach {
+        eprintln!(
+            "runtime start currently runs detached; pass --detach to acknowledge this behavior"
+        );
+        return 2;
+    }
+    let mut state = match lmml_state::AppState::load() {
+        Ok(state) => state,
+        Err(error) => {
+            eprintln!("state load failed: {error}");
+            return 1;
+        }
+    };
+    match runtime_cli::start_profile(&mut state, profile, runtime_startup_timeout()).await {
+        Ok(started) => {
+            println!(
+                "{} ready at {} (pid {}, log {})",
+                started.profile,
+                started.url,
+                started.pid,
+                started.log_path.display()
+            );
+            0
+        }
+        Err(error) => {
+            eprintln!("runtime start failed: {error}");
+            1
+        }
+    }
+}
+
+fn runtime_startup_timeout() -> Duration {
+    std::env::var("LMML_RUNTIME_STARTUP_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_secs(60))
+}
+
+async fn run_runtime_stop(profile: &str) -> i32 {
+    let mut state = match lmml_state::AppState::load() {
+        Ok(state) => state,
+        Err(error) => {
+            eprintln!("state load failed: {error}");
+            return 1;
+        }
+    };
+    match runtime_cli::stop_profile(&mut state, profile).await {
+        Ok(stopped) => {
+            println!("{}: {}", stopped.profile, stopped.message);
+            0
+        }
+        Err(error) => {
+            eprintln!("runtime stop failed: {error}");
+            1
+        }
+    }
+}
+
+async fn run_runtime_logs(profile: &str, follow: bool) -> i32 {
+    if !runtime_cli::is_known_profile(profile) {
+        eprintln!("unknown runtime profile `{profile}`");
+        return 2;
+    }
+    let path = runtime_cli::runtime_log_path(profile);
+    if !follow {
+        match std::fs::read_to_string(&path) {
+            Ok(content) => {
+                print!("{content}");
+                return 0;
+            }
+            Err(error) => {
+                eprintln!("failed to read {}: {error}", path.display());
+                return 1;
+            }
+        }
+    }
+
+    let mut offset = std::fs::metadata(&path)
+        .map(|metadata| metadata.len() as usize)
+        .unwrap_or(0);
+    loop {
+        match std::fs::read_to_string(&path) {
+            Ok(content) => {
+                if content.len() > offset {
+                    print!("{}", &content[offset..]);
+                    let _ignored = io::stdout().flush();
+                    offset = content.len();
+                }
+            }
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!("failed to read {}: {error}", path.display());
+                    return 1;
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }
 
