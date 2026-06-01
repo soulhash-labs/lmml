@@ -1514,6 +1514,7 @@ mod tests {
             git: None,
             cuda: lmml_detect::CudaCompatibility::NoGpu,
             gpus: Vec::new(),
+            gpu_probe_error: None,
             sccache: None,
             metal: lmml_detect::MetalSupport {
                 available: false,
@@ -1676,6 +1677,7 @@ mod tests {
                 compute_cap: "8.6".to_string(),
                 arch: Some("sm_86"),
             }],
+            gpu_probe_error: None,
             sccache: None,
             metal: lmml_detect::MetalSupport {
                 available: false,
@@ -1915,6 +1917,7 @@ mod tests {
                 compute_cap: "8.6".to_string(),
                 arch: Some("sm_86"),
             }],
+            gpu_probe_error: None,
             sccache: None,
             metal: lmml_detect::MetalSupport {
                 available: false,

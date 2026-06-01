@@ -6,8 +6,10 @@ CRATE_TOML="$ROOT_DIR/crates/lmml-tui/Cargo.toml"
 VERSION=$(awk -F\" '/^version = / { print $2; exit }' "$CRATE_TOML")
 TARGET_TRIPLE=${TARGET_TRIPLE:-$(rustc -vV | awk '/^host:/ { print $2 }')}
 TARBALL="lmml-$VERSION-$TARGET_TRIPLE.tar.gz"
+SOURCE_TARBALL="lmml-$VERSION-source.tar.gz"
 DIST_DIR="$ROOT_DIR/dist"
 STAGE_DIR="$ROOT_DIR/target/package/lmml-$VERSION-$TARGET_TRIPLE"
+SOURCE_STAGE_DIR="$ROOT_DIR/target/package/lmml-$VERSION-source"
 SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$ROOT_DIR" log -1 --format=%ct 2>/dev/null || date +%s)}
 
 if [ -z "$VERSION" ]; then
@@ -22,6 +24,7 @@ fi
 
 mkdir -p "$DIST_DIR"
 rm -rf "$STAGE_DIR"
+rm -rf "$SOURCE_STAGE_DIR"
 mkdir -p "$STAGE_DIR/scripts"
 
 cargo build --release -p lmml-tui --target "$TARGET_TRIPLE"
@@ -30,8 +33,10 @@ cp "$ROOT_DIR/target/$TARGET_TRIPLE/release/lmml" "$STAGE_DIR/lmml"
 cp "$ROOT_DIR/README.md" "$STAGE_DIR/README.md"
 cp "$ROOT_DIR/LICENSE" "$STAGE_DIR/LICENSE"
 cp "$ROOT_DIR/scripts/install.sh" "$STAGE_DIR/scripts/install.sh"
+cp "$ROOT_DIR/scripts/preflight.sh" "$STAGE_DIR/scripts/preflight.sh"
 cp "$ROOT_DIR/scripts/uninstall.sh" "$STAGE_DIR/scripts/uninstall.sh"
 cp "$ROOT_DIR/scripts/install.sh" "$DIST_DIR/install.sh"
+cp "$ROOT_DIR/scripts/preflight.sh" "$DIST_DIR/preflight.sh"
 cp "$ROOT_DIR/scripts/uninstall.sh" "$DIST_DIR/uninstall.sh"
 printf '%s\n' "$VERSION" > "$DIST_DIR/latest"
 
@@ -43,7 +48,7 @@ rustc=$(rustc --version)
 source_date_epoch=$SOURCE_DATE_EPOCH
 EOF
 
-chmod 755 "$STAGE_DIR/lmml" "$STAGE_DIR/scripts/install.sh" "$STAGE_DIR/scripts/uninstall.sh"
+chmod 755 "$STAGE_DIR/lmml" "$STAGE_DIR/scripts/install.sh" "$STAGE_DIR/scripts/preflight.sh" "$STAGE_DIR/scripts/uninstall.sh"
 chmod 644 "$STAGE_DIR/README.md" "$STAGE_DIR/LICENSE" "$STAGE_DIR/RELEASE-METADATA"
 find "$STAGE_DIR" -type d -exec chmod 755 {} +
 
@@ -56,6 +61,40 @@ find "$STAGE_DIR" -type d -exec chmod 755 {} +
     -cf "$tar_tmp" "lmml-$VERSION-$TARGET_TRIPLE"
   gzip -n -c "$tar_tmp" > "$DIST_DIR/$TARBALL"
   rm -f "$tar_tmp"
+)
+
+mkdir -p "$SOURCE_STAGE_DIR"
+(
+  cd "$ROOT_DIR"
+  tar --exclude='./.git' \
+    --exclude='./target' \
+    --exclude='./dist' \
+    --exclude='./.planning' \
+    -cf - .
+) | (
+  cd "$SOURCE_STAGE_DIR"
+  tar -xf -
+)
+cat > "$SOURCE_STAGE_DIR/RELEASE-METADATA" <<EOF
+version=$VERSION
+target=source
+git_commit=$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || echo unknown)
+rustc=$(rustc --version)
+source_date_epoch=$SOURCE_DATE_EPOCH
+EOF
+find "$SOURCE_STAGE_DIR" -type d -exec chmod 755 {} +
+find "$SOURCE_STAGE_DIR" -type f -exec chmod 644 {} +
+chmod 755 "$SOURCE_STAGE_DIR/scripts/install.sh" "$SOURCE_STAGE_DIR/scripts/preflight.sh" "$SOURCE_STAGE_DIR/scripts/uninstall.sh"
+
+(
+  cd "$ROOT_DIR/target/package"
+  source_tmp="$DIST_DIR/$SOURCE_TARBALL.tar"
+  tar --sort=name \
+    --owner=0 --group=0 --numeric-owner \
+    --mtime="@$SOURCE_DATE_EPOCH" \
+    -cf "$source_tmp" "lmml-$VERSION-source"
+  gzip -n -c "$source_tmp" > "$DIST_DIR/$SOURCE_TARBALL"
+  rm -f "$source_tmp"
 )
 
 case "$TARGET_TRIPLE" in
@@ -85,6 +124,7 @@ update_checksums() {
 }
 
 update_checksums "$TARBALL"
+update_checksums "$SOURCE_TARBALL"
 if [ -n "$ALIAS_TARBALL" ]; then
   update_checksums "$ALIAS_TARBALL"
 fi
@@ -97,3 +137,4 @@ fi
 
 echo "tarball: $DIST_DIR/$TARBALL"
 echo "sha256:  $CHECKSUM"
+echo "source:  $DIST_DIR/$SOURCE_TARBALL"

@@ -3,6 +3,7 @@ set -eu
 
 BASE_URL=${BASE_URL:-https://github.com/YOUR_ORG/lmml/releases/latest}
 VERSION=${VERSION:-}
+INSTALL_MODE=${INSTALL_MODE:-binary}
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/lmml-install.XXXXXX")
 
 cleanup() {
@@ -150,37 +151,33 @@ sha256_file() {
 }
 
 target=$(detect_target)
-check_prereqs
+
+case "$INSTALL_MODE" in
+  binary|source) ;;
+  *) fail "Unsupported INSTALL_MODE=$INSTALL_MODE" "Use INSTALL_MODE=binary or INSTALL_MODE=source." ;;
+esac
 
 if [ -z "$VERSION" ]; then
   download "$BASE_URL/latest" "$TMP_DIR/latest"
   VERSION=$(sed -n '1p' "$TMP_DIR/latest" | tr -d '[:space:]')
 fi
 
-tarball="lmml-$VERSION-$target.tar.gz"
-tarball_url="$BASE_URL/$tarball"
 sums_url="$BASE_URL/SHA256SUMS"
-
-download "$tarball_url" "$TMP_DIR/$tarball"
 download "$sums_url" "$TMP_DIR/SHA256SUMS"
 
-expected=$(awk -v file="$tarball" '$2 == file { print $1 }' "$TMP_DIR/SHA256SUMS")
-if [ -z "$expected" ]; then
-  fail "Checksum for $tarball not found in SHA256SUMS" "Try again or download manually from: $tarball_url"
-fi
-actual=$(sha256_file "$TMP_DIR/$tarball")
-if [ "$actual" != "$expected" ]; then
-  rm -f "$TMP_DIR/$tarball"
-  fail "Checksum verification failed. The download may be corrupt." "Try again or download manually from: $tarball_url"
-fi
-
-mkdir -p "$TMP_DIR/extract"
-tar -xzf "$TMP_DIR/$tarball" -C "$TMP_DIR/extract"
-binary=$(find "$TMP_DIR/extract" -type f -name lmml | head -n 1)
-if [ -z "$binary" ]; then
-  fail "lmml binary not found in release archive"
-fi
-uninstaller=$(find "$TMP_DIR/extract" -type f -path '*/scripts/uninstall.sh' | head -n 1)
+verify_download() {
+  file=$1
+  url=$2
+  expected=$(awk -v file="$file" '$2 == file { print $1 }' "$TMP_DIR/SHA256SUMS")
+  if [ -z "$expected" ]; then
+    fail "Checksum for $file not found in SHA256SUMS" "Try again or download manually from: $url"
+  fi
+  actual=$(sha256_file "$TMP_DIR/$file")
+  if [ "$actual" != "$expected" ]; then
+    rm -f "$TMP_DIR/$file"
+    fail "Checksum verification failed for $file. The download may be corrupt." "Try again or download manually from: $url"
+  fi
+}
 
 if [ "${PREFIX:-}" ]; then
   install_dir="$PREFIX/bin"
@@ -190,13 +187,69 @@ else
   install_dir="$HOME/.local/bin"
 fi
 
+install_binary_and_uninstaller() {
+  binary=$1
+  uninstaller=$2
+  mkdir -p "$install_dir"
+  cp "$binary" "$install_dir/lmml"
+  chmod 755 "$install_dir/lmml"
+  if [ -n "$uninstaller" ]; then
+    cp "$uninstaller" "$install_dir/lmml-uninstall"
+    chmod 755 "$install_dir/lmml-uninstall"
+  fi
+}
+
+install_binary_mode() {
+  tarball="lmml-$VERSION-$target.tar.gz"
+  tarball_url="$BASE_URL/$tarball"
+  download "$tarball_url" "$TMP_DIR/$tarball"
+  verify_download "$tarball" "$tarball_url"
+
+  mkdir -p "$TMP_DIR/extract"
+  tar -xzf "$TMP_DIR/$tarball" -C "$TMP_DIR/extract"
+  binary=$(find "$TMP_DIR/extract" -type f -name lmml | head -n 1)
+  if [ -z "$binary" ]; then
+    fail "lmml binary not found in release archive"
+  fi
+  uninstaller=$(find "$TMP_DIR/extract" -type f -path '*/scripts/uninstall.sh' | head -n 1)
+  install_binary_and_uninstaller "$binary" "$uninstaller"
+}
+
+install_source_mode() {
+  if ! command -v bash >/dev/null 2>&1; then
+    fail "bash is required for INSTALL_MODE=source"
+  fi
+  preflight_url="$BASE_URL/preflight.sh"
+  download "$preflight_url" "$TMP_DIR/preflight.sh"
+  LMML_INSTALL_MODE=source LMML_GPU_MODE="${LMML_GPU_MODE:-required}" bash "$TMP_DIR/preflight.sh"
+
+  source_tarball="lmml-$VERSION-source.tar.gz"
+  source_url="$BASE_URL/$source_tarball"
+  download "$source_url" "$TMP_DIR/$source_tarball"
+  verify_download "$source_tarball" "$source_url"
+
+  mkdir -p "$TMP_DIR/source"
+  tar -xzf "$TMP_DIR/$source_tarball" -C "$TMP_DIR/source"
+  source_dir=$(find "$TMP_DIR/source" -maxdepth 5 -type f -path '*/crates/lmml-tui/Cargo.toml' -print | head -n 1)
+  if [ -z "$source_dir" ]; then
+    fail "lmml source tree not found in source archive"
+  fi
+  source_dir=$(dirname "$(dirname "$(dirname "$source_dir")")")
+  (cd "$source_dir" && cargo build --release -p lmml-tui)
+  binary="$source_dir/target/release/lmml"
+  if [ ! -x "$binary" ]; then
+    fail "source build completed but lmml binary was not produced"
+  fi
+  uninstaller="$source_dir/scripts/uninstall.sh"
+  install_binary_and_uninstaller "$binary" "$uninstaller"
+}
+
+case "$INSTALL_MODE" in
+  binary) install_binary_mode ;;
+  source) install_source_mode ;;
+esac
+
 mkdir -p "$install_dir"
-cp "$binary" "$install_dir/lmml"
-chmod 755 "$install_dir/lmml"
-if [ -n "$uninstaller" ]; then
-  cp "$uninstaller" "$install_dir/lmml-uninstall"
-  chmod 755 "$install_dir/lmml-uninstall"
-fi
 
 case ":$PATH:" in
   *":$install_dir:"*) ;;
@@ -209,6 +262,7 @@ case ":$PATH:" in
 esac
 
 "$install_dir/lmml" doctor || fail "lmml installed, but preflight checks failed." "Fix the hard prerequisites above, then run: $install_dir/lmml doctor"
+"$install_dir/lmml" smoke || fail "lmml installed, but smoke check failed." "Run $install_dir/lmml smoke for details."
 
 echo "✓ lmml $VERSION installed to $install_dir/lmml"
 echo

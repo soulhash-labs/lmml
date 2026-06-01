@@ -155,18 +155,24 @@ async fn run_doctor() -> i32 {
             found_toolkit,
         } => {
             soft_issues += 1;
-            println!("  ✗  CUDA toolkit {found_toolkit} too old for {gpu_arch}");
+            println!("  ⚠  CUDA toolkit {found_toolkit} too old for {gpu_arch}");
             println!("     → install CUDA >= {minimum_toolkit}");
         }
         lmml_detect::CudaCompatibility::NoGpu => {
             soft_issues += 1;
-            println!("  ✗  CUDA GPU not detected");
-            println!("     → run `lmml` to proceed in CPU-only mode");
+            if let Some(error) = &profile.gpu_probe_error {
+                println!("  ⚠  NVIDIA driver/GPU probe failed");
+                println!("     → nvidia-smi: {error}");
+                println!("     → check that the NVIDIA driver is installed, loaded, and matches the running kernel");
+            } else {
+                println!("  ⚠  CUDA GPU not detected");
+                println!("     → run `lmml` to proceed in CPU-only mode");
+            }
         }
         lmml_detect::CudaCompatibility::NvccMissing => {
             soft_issues += 1;
-            println!("  ✗  nvcc not found");
-            println!("     → sudo apt install nvidia-cuda-toolkit");
+            println!("  ⚠  nvcc not found");
+            println!("     → install the CUDA toolkit only if you want NVIDIA GPU acceleration");
         }
     }
 
@@ -184,8 +190,10 @@ async fn run_doctor() -> i32 {
         println!("  No issues found. Run `lmml` to launch the TUI.");
         0
     } else if hard_issues == 0 {
-        println!("  {soft_issues} issue(s) found. Run `lmml` to proceed in CPU-only mode,");
-        println!("  or fix the issues above for GPU acceleration.");
+        println!("  {soft_issues} GPU acceleration warning(s) found.");
+        println!(
+            "  lmml can run in CPU-only mode; fix the warning(s) above to enable GPU acceleration."
+        );
         0
     } else {
         println!("  {hard_issues} hard prerequisite issue(s) found.");

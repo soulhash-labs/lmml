@@ -35,6 +35,31 @@ alter both the tarball and checksum file. Treat it as an integrity check for a
 trusted LAN release host until signed checksums or HTTPS public releases are in
 place.
 
+### Preflight and source-build bootstrap
+
+The default install path above uses the verified binary tarball. For a
+source-build LAN/dev bootstrap, run preflight first and then opt into source
+mode explicitly:
+
+```sh
+curl -fsSL http://192.168.1.100:8000/preflight.sh | LMML_INSTALL_MODE=source bash
+curl -fsSL http://192.168.1.100:8000/install.sh | BASE_URL=http://192.168.1.100:8000 INSTALL_MODE=source bash
+```
+
+GPU acceleration is primary and first-class in preflight. Intentional CPU-only
+nodes must opt in explicitly:
+
+```sh
+curl -fsSL http://192.168.1.100:8000/preflight.sh | LMML_INSTALL_MODE=source LMML_GPU_MODE=cpu-only bash
+curl -fsSL http://192.168.1.100:8000/install.sh | BASE_URL=http://192.168.1.100:8000 INSTALL_MODE=source LMML_GPU_MODE=cpu-only bash
+```
+
+Narrow apt fixes for compiler/CMake/Git/curl are opt-in:
+
+```sh
+curl -fsSL http://192.168.1.100:8000/preflight.sh | LMML_INSTALL_MODE=source LMML_FIX_DEPS=1 bash
+```
+
 ### After install
 
 ```sh

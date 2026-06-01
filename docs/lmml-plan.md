@@ -976,6 +976,43 @@ Run: `cargo test -p lmml-tui && cargo insta accept -p lmml-tui`
 | 13 | Full snapshot test suite + CI | all |
 | 14 | Model alias support (symlinks + external paths) | `lmml-models`, `lmml-tui` |
 
+### Release hardening milestone status
+
+The release-hardening work after packaging is being tracked separately from the
+original crate-build milestones:
+
+| Milestone | Status | Notes |
+|---|---|---|
+| A — Runtime correctness blockers | Complete | Build cancel owns process groups, explicit backend overrides win over auto-detect, and running server model swaps restart only after confirmation. |
+| B — Startup flow completeness | Complete | TUI startup schedules hardware detect and model scan once, with first-run onboarding reflecting active detection. |
+| C — Installer semantics and supply chain | Complete | Binary installer fails on hard `lmml doctor` prereqs, clean-install smoke tests the documented HTTP path, and packaging normalizes tar/gzip metadata. |
+| D — Docs truthfulness + backend claims | Complete | Docs distinguish current v2 from historical root-package rows. Vulkan backend selection/build support is proven in current crate tests; ROCm remains a production gap. |
+| E — Verification gate | Passing on current x86_64 Linux host | Workspace fmt/clippy/tests, release package generation, and HTTP binary/source installer smokes pass. Remaining release risk is clean CUDA VM and cross-target builders. |
+
+### Preflight and source-build bootstrap plan
+
+Default install remains the verified binary tarball path. Source-build install is
+an explicit fallback/dev/LAN bootstrap path, not the primary user install.
+
+Current status: implemented and verified on the current x86_64 Linux host for
+LAN HTTP binary install and explicit `INSTALL_MODE=source` install from the
+checksummed source tarball.
+
+- `scripts/preflight.sh` is Bash-only and read-only by default.
+- `LMML_INSTALL_MODE=binary|source` makes checks mode-aware.
+- `LMML_GPU_MODE=required` is the default because GPU acceleration is primary
+  and first-class.
+- `LMML_GPU_MODE=cpu-only` is the explicit opt-in for intentional CPU-only
+  nodes.
+- `LMML_FIX_DEPS=1` may install only narrow apt prerequisites
+  (compiler/cmake/git/curl). It must not auto-install Rust, NVIDIA drivers,
+  CUDA, or broad GPU stacks.
+- `INSTALL_MODE=binary` remains the `scripts/install.sh` default.
+- `INSTALL_MODE=source` should download a checksummed source tarball from
+  `dist/`, build `cargo build --release -p lmml-tui`, install `lmml` and
+  `lmml-uninstall`, then run `lmml doctor` and `lmml smoke`.
+- Source mode must not clone an unpinned branch as a production path.
+
 ---
 
 ## 13. Niceties checklist

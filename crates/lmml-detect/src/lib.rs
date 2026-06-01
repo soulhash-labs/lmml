@@ -113,6 +113,8 @@ pub struct SystemProfile {
     pub cuda: CudaCompatibility,
     /// CUDA-capable GPUs reported by `nvidia-smi`.
     pub gpus: Vec<GpuInfo>,
+    /// Error returned by `nvidia-smi` when GPU enumeration failed.
+    pub gpu_probe_error: Option<String>,
     /// `sccache` executable path, if available.
     pub sccache: Option<PathBuf>,
     /// Metal support on macOS.
@@ -261,6 +263,8 @@ where
     let (compiler, cmake, git, nvcc, gpus, sccache, metal, vulkan, cpu, memory, disk) =
         tokio::join!(compiler, cmake, git, nvcc, gpus, sccache, metal, vulkan, cpu, memory, disk);
 
+    let gpu_probe_error = gpus.error;
+    let gpus = gpus.devices;
     let cuda = cuda_compatibility(nvcc.as_ref().map(|info| &info.version), &gpus);
 
     let profile = SystemProfile {
@@ -269,6 +273,7 @@ where
         git,
         cuda,
         gpus,
+        gpu_probe_error,
         sccache,
         metal,
         vulkan,
@@ -680,7 +685,13 @@ where
     })
 }
 
-async fn detect_gpus<R>(runner: &R) -> Vec<GpuInfo>
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GpuProbe {
+    devices: Vec<GpuInfo>,
+    error: Option<String>,
+}
+
+async fn detect_gpus<R>(runner: &R) -> GpuProbe
 where
     R: CommandRunner + Sync,
 {
@@ -695,9 +706,16 @@ where
         )
         .await;
     if !output.success {
-        return Vec::new();
+        let reason = first_line(&output.stderr, &output.stdout);
+        return GpuProbe {
+            devices: Vec::new(),
+            error: (!reason.is_empty()).then_some(reason),
+        };
     }
-    parse_gpu_csv(&output.stdout)
+    GpuProbe {
+        devices: parse_gpu_csv(&output.stdout),
+        error: None,
+    }
 }
 
 async fn detect_sccache<R>(runner: &R) -> Option<PathBuf>
@@ -1224,6 +1242,28 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn gpu_probe_preserves_nvidia_smi_failure_reason() {
+        let runner = FakeRunner::default().with(
+            "nvidia-smi",
+            &[
+                "--query-gpu=name,memory.total,compute_cap",
+                "--format=csv,noheader",
+            ],
+            FakeRunner::failure("driver unavailable"),
+        );
+
+        let probe = detect_gpus(&runner).await;
+
+        assert_eq!(
+            probe,
+            GpuProbe {
+                devices: Vec::new(),
+                error: Some("driver unavailable".to_string()),
+            }
+        );
+    }
+
     #[test]
     fn disk_require_reports_shortfall() {
         let disk = DiskInfo {
@@ -1405,6 +1445,7 @@ flags\t\t: fpu sse4_1 sse4_2 avx avx2 avx512f
             }),
             cuda: CudaCompatibility::NvccMissing,
             gpus: Vec::new(),
+            gpu_probe_error: None,
             sccache: None,
             metal: MetalSupport {
                 available: false,

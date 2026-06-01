@@ -560,3 +560,87 @@ produce the same tarball checksum.
 ### Localhost Integration Tests Need Sandbox Escalation
 
 Workspace tests and LAN install simulation bind local ports for mock HTTP servers and `python3 -m http.server`. In this sandbox, those fail with `Operation not permitted` unless rerun with network permission. Treat a non-escalated bind failure as an environment restriction, then rerun the same command with the appropriate permission instead of changing test code.
+
+---
+
+## 11. Session Learnings (2026-06-01) — Preflight and GPU Readiness
+
+### GPU Is Primary, CPU-Only Is Explicit
+
+lmml should treat GPU acceleration as primary and first-class in preflight. A
+missing/broken GPU stack should fail default preflight because it contradicts
+the normal target experience.
+
+CPU-only operation is still valid for intentional CPU-only nodes, but it should
+be explicit:
+
+```sh
+LMML_GPU_MODE=cpu-only
+```
+
+This keeps accidental driver/toolkit failures visible while allowing deliberate
+CPU-only deployments.
+
+### `lmml doctor` and `preflight.sh` Have Different Jobs
+
+Shell preflight catches what must be true before `lmml` exists: platform,
+download tool, compiler, CMake, Git, disk, Rust for source mode, and GPU
+readiness policy.
+
+Installed `lmml doctor` remains authoritative after install. It should continue
+to return non-zero only for hard prerequisites, while surfacing GPU acceleration
+problems clearly.
+
+### Preserve GPU Probe Errors
+
+When `nvidia-smi` exists but cannot communicate with the NVIDIA driver, reporting
+"GPU not detected" is misleading. Preserve the actual `nvidia-smi` stderr and
+show it in `lmml doctor`.
+
+Observed host state during verification:
+
+```text
+nvcc present
+nvidia-smi failed because it could not communicate with the NVIDIA driver
+```
+
+That is a driver/runtime problem, not a CUDA toolkit or lmml build problem.
+
+### Binary Install Must Not Require Rust
+
+The default install path is a verified binary tarball. Rust/Cargo/rustup are
+hard prerequisites only for explicit source-build bootstrap mode.
+
+### Source Build Requires an Authenticated Source Story
+
+For LAN reliability, source mode should build from a source tarball served from
+`dist/` and covered by `SHA256SUMS`. Avoid cloning an unpinned branch as a
+production path.
+
+### Auto-Fix Must Stay Narrow and Opt-In
+
+`LMML_FIX_DEPS=1` can cover narrow apt packages such as compiler, CMake, Git,
+and curl. It should not automatically install Rust, NVIDIA drivers, CUDA, or
+broad GPU stacks.
+
+### Pipeline Environment Placement Still Matters
+
+For piped installers, environment variables must be attached to the shell
+process, not the `curl` process:
+
+```sh
+curl -fsSL http://host:8000/preflight.sh | LMML_INSTALL_MODE=source bash
+curl -fsSL http://host:8000/install.sh | BASE_URL=http://host:8000 INSTALL_MODE=source bash
+```
+
+### Rust Proxies Are Not Enough for Source Mode
+
+`rustc`, `cargo`, and `rustup` can exist on `PATH` as rustup proxies while still
+being unusable if no active toolchain is visible under the current
+`RUSTUP_HOME`/`HOME`. Source-mode preflight must run the version/toolchain
+commands and fail if they cannot execute, not just check `command -v`.
+
+Clean-install source smokes should isolate lmml config/data with a temporary
+`HOME`, but preserve `CARGO_HOME` and `RUSTUP_HOME` from the caller so the test
+uses the developer toolchain instead of pretending the source host has no Rust
+toolchain configured.

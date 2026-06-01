@@ -50,6 +50,21 @@ Install from another machine on the LAN:
 curl -fsSL http://192.168.1.100:8000/install.sh | BASE_URL=http://192.168.1.100:8000 sh
 ```
 
+Optional source-build bootstrap from LAN must use the checksummed source tarball
+from `dist/`:
+
+```sh
+curl -fsSL http://192.168.1.100:8000/preflight.sh | LMML_INSTALL_MODE=source bash
+curl -fsSL http://192.168.1.100:8000/install.sh | BASE_URL=http://192.168.1.100:8000 INSTALL_MODE=source bash
+```
+
+Intentional CPU-only nodes must say so explicitly:
+
+```sh
+curl -fsSL http://192.168.1.100:8000/preflight.sh | LMML_INSTALL_MODE=source LMML_GPU_MODE=cpu-only bash
+curl -fsSL http://192.168.1.100:8000/install.sh | BASE_URL=http://192.168.1.100:8000 INSTALL_MODE=source LMML_GPU_MODE=cpu-only bash
+```
+
 The installer must verify SHA256 checksums, install `lmml` and `lmml-uninstall`,
 run `lmml doctor`, and print the success summary only when doctor passes. If
 doctor reports missing hard prerequisites, the installer must exit non-zero with

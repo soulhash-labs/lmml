@@ -249,6 +249,7 @@ fn profile() -> lmml_detect::SystemProfile {
         git: None,
         cuda: CudaCompatibility::NoGpu,
         gpus: Vec::new(),
+        gpu_probe_error: None,
         sccache: None,
         metal: MetalSupport {
             available: false,

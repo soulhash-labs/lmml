@@ -26,6 +26,10 @@ checks, hard-prereq doctor gate, installed uninstaller, and clean-install smoke
 test. Broader platform readiness still requires target-specific builder or CI
 validation.
 
+GPU acceleration is primary and first-class. Preflight should fail GPU
+acceleration failures by default, while allowing intentional CPU-only nodes only
+through an explicit `LMML_GPU_MODE=cpu-only` setting.
+
 ROCm/HIP is not production-ready in v2. Treat any older completed ROCm rows as
 superseded until `lmml-detect`, `lmml-build`, telemetry, settings, and tests
 prove the full path.
@@ -175,3 +179,24 @@ release claims.
 - [ ] Replace README placeholder release URL (`https://your-lan-or-github/install.sh`) with the real public release URL when hosting is chosen
 - [ ] Run `tests/integration/clean_install.sh` on a clean Ubuntu 24.04 x86_64 VM with CUDA drivers before tagging each release
 - [ ] Add signed `SHA256SUMS` verification or HTTPS-hosted public releases before claiming checksum authenticity against tampering
+
+---
+
+## Phase 6 — Preflight and Source-Build Bootstrap (Completed)
+
+Default install remains the verified binary tarball. Source-build install is a
+fallback/dev/LAN bootstrap path.
+
+- [x] Add `scripts/preflight.sh` as a Bash-only, read-only default checker
+- [x] Make preflight mode-aware with `LMML_INSTALL_MODE=binary|source`
+- [x] Make GPU acceleration primary/first-class by default with `LMML_GPU_MODE=required`
+- [x] Add explicit intentional CPU-only node mode with `LMML_GPU_MODE=cpu-only`
+- [x] Add `INSTALL_MODE=binary|source` to `scripts/install.sh`, rejecting unknown modes clearly
+- [x] Keep `INSTALL_MODE=binary` as the default path and avoid requiring Rust for binary install
+- [x] Package a checksummed source tarball into `dist/`
+- [x] Implement `INSTALL_MODE=source` from the source tarball, not from an unpinned branch
+- [x] Include `preflight.sh` in `dist/` and release tarballs
+- [x] Add syntax tests for `scripts/preflight.sh`, `scripts/install.sh`, and `scripts/package-release.sh`
+- [x] Add preflight fixture tests for binary/source mode, missing Rust, GPU-required failure, and CPU-only pass
+- [x] Add clean source-install smoke with isolated `HOME`
+- [x] Document exact pipeline syntax for binary, source, auto-fix, GPU-required, and CPU-only flows

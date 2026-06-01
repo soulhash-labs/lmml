@@ -300,6 +300,7 @@ mod tests {
                 compute_cap: "8.6".to_string(),
                 arch: Some("sm_86"),
             }],
+            gpu_probe_error: None,
             sccache: None,
             metal: MetalSupport {
                 available: false,
@@ -351,6 +352,7 @@ mod tests {
             git: None,
             cuda: CudaCompatibility::NvccMissing,
             gpus: Vec::new(),
+            gpu_probe_error: None,
             sccache: None,
             metal: MetalSupport {
                 available: false,

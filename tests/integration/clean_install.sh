@@ -2,10 +2,14 @@
 set -eu
 
 BASE_URL=${BASE_URL:-http://127.0.0.1:8000}
+INSTALL_MODE=${INSTALL_MODE:-binary}
+ORIGINAL_HOME=$HOME
 INSTALL_HOME=${INSTALL_HOME:-$(mktemp -d "${TMPDIR:-/tmp}/lmml-clean-home.XXXXXX")}
 export HOME="$INSTALL_HOME"
 export XDG_CONFIG_HOME="$HOME/.config"
 export XDG_DATA_HOME="$HOME/.local/share"
+export CARGO_HOME="${CARGO_HOME:-$ORIGINAL_HOME/.cargo}"
+export RUSTUP_HOME="${RUSTUP_HOME:-$ORIGINAL_HOME/.rustup}"
 export PATH="$HOME/.local/bin:$PATH"
 
 if [ -e "$HOME/.config/lmml" ]; then
@@ -23,7 +27,7 @@ else
   exit 1
 fi
 
-BASE_URL="$BASE_URL" sh "$installer"
+BASE_URL="$BASE_URL" INSTALL_MODE="$INSTALL_MODE" LMML_GPU_MODE="${LMML_GPU_MODE:-required}" sh "$installer"
 
 "$HOME/.local/bin/lmml" doctor
 
