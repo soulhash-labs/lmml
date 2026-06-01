@@ -142,7 +142,7 @@ impl Default for BuildState {
             binary: data_dir.join("bin").join(binary_name("llama-server")),
             commit: String::new(),
             cmake_hash: String::new(),
-            backend: "CpuFallback".to_string(),
+            backend: "Auto".to_string(),
             archs: Vec::new(),
             sccache_used: false,
             last_built: String::new(),

@@ -78,6 +78,13 @@ pub enum AppEvent {
     ServerStatus(ServerStatus),
     /// Server startup completed.
     ServerStarted(Result<ServerHandle, String>),
+    /// Server model-swap restart completed.
+    ServerModelSwapComplete {
+        /// Model requested for the replacement server.
+        model: ModelEntry,
+        /// Restart result.
+        result: Result<ServerHandle, String>,
+    },
     /// llama-server capabilities probe completed.
     ServerCapabilities(Result<LlamaBinaryCapabilities, String>),
     /// Server log line.
@@ -109,6 +116,11 @@ pub enum Modal {
     /// Confirmation prompt for deleting a model.
     ConfirmDelete {
         /// Model selected for deletion.
+        model: ModelEntry,
+    },
+    /// Confirmation prompt for restarting server with another model.
+    ConfirmModelSwap {
+        /// Model selected for serving after restart.
         model: ModelEntry,
     },
     /// Hugging Face search query editor.
@@ -370,6 +382,30 @@ impl App {
                 }
                 None
             }
+            AppEvent::ServerModelSwapComplete { model, result } => {
+                match result {
+                    Ok(handle) => {
+                        self.server_status = handle.status();
+                        self.state.model.last_used = model.path.clone();
+                        if let Some(index) = self
+                            .models
+                            .iter()
+                            .position(|entry| entry.path == model.path)
+                        {
+                            self.selected_model = index;
+                        }
+                        self.status_message = format!("Server restarted with {}", model.name);
+                        self.save_state_after("Model selected");
+                    }
+                    Err(error) => {
+                        self.server_status = ServerStatus::Failed {
+                            reason: error.clone(),
+                        };
+                        self.status_message = format!("Model swap failed: {error}");
+                    }
+                }
+                None
+            }
             AppEvent::ServerCapabilities(result) => {
                 match result {
                     Ok(caps) => {
@@ -524,6 +560,10 @@ impl App {
                 self.active_modal = None;
                 self.status_message = format!("Deleting {}", model.name);
             }
+            Action::ConfirmModelSwap(model) => {
+                self.active_modal = None;
+                self.status_message = format!("Restarting server with {}", model.name);
+            }
             Action::AddModelAlias => {
                 self.active_modal = Some(Modal::AddAlias {
                     buffer: String::new(),
@@ -659,10 +699,19 @@ impl App {
                 Tab::Detect | Tab::Build | Tab::Models => None,
             },
             KeyCode::Char('m') if self.active_tab == Tab::Server => {
-                self.select_next_model();
-                if let Some(model) = self.models.get(self.selected_model) {
-                    self.state.model.last_used = model.path.clone();
-                    self.status_message = format!("Selected {}", model.name);
+                let next_index = self.next_model_index()?;
+                let model = self.models.get(next_index).cloned()?;
+                match self.server_status {
+                    ServerStatus::Stopped | ServerStatus::Failed { .. } => {
+                        self.selected_model = next_index;
+                        self.state.model.last_used = model.path.clone();
+                        self.status_message = format!("Selected {}", model.name);
+                        self.save_state_after("Model selected");
+                    }
+                    ServerStatus::Starting { .. } | ServerStatus::Ready { .. } => {
+                        self.active_modal = Some(Modal::ConfirmModelSwap { model });
+                        self.status_message = "Confirm server model swap".to_string();
+                    }
                 }
                 None
             }
@@ -863,6 +912,16 @@ impl App {
                     None
                 }
             },
+            Some(Modal::ConfirmModelSwap { model }) => match key.code {
+                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => None,
+                KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    Some(Action::ConfirmModelSwap(model))
+                }
+                _ => {
+                    self.active_modal = Some(Modal::ConfirmModelSwap { model });
+                    None
+                }
+            },
             Some(Modal::HfSearch {
                 mut field,
                 mut keywords,
@@ -1030,8 +1089,11 @@ impl App {
             BuildEvent::Cancelled => {
                 self.build_running = false;
                 self.build_error = Some("cancelled".to_string());
+                self.state.build.cmake_hash.clear();
+                self.state.build.last_built.clear();
                 self.push_build_log("Build cancelled");
                 self.status_message = "Build cancelled".to_string();
+                self.save_state_after("Build cancelled");
             }
             BuildEvent::Skipped { reason } => {
                 self.build_running = false;
@@ -1045,13 +1107,14 @@ impl App {
 
     /// Build a `lmml-build` config from current app state.
     pub fn build_config(&self, clean: bool) -> lmml_build::BuildConfig {
-        let backend = self
-            .detect_profile
-            .as_ref()
-            .map(SystemProfile::recommended_backend)
-            .unwrap_or_else(|| {
-                backend_from_state(&self.state.build.backend, &self.state.build.archs)
-            });
+        let backend = if self.state.build.backend == "Auto" {
+            self.detect_profile
+                .as_ref()
+                .map(SystemProfile::recommended_backend)
+                .unwrap_or(BuildBackend::CpuFallback)
+        } else {
+            backend_from_state(&self.state.build.backend, &self.state.build.archs)
+        };
         let mut config = lmml_build::BuildConfig::new(self.state.build.source_dir.clone(), backend);
         config.clean = clean;
         config.sccache = self
@@ -1163,6 +1226,14 @@ impl App {
 
     fn select_previous_model(&mut self) {
         self.selected_model = self.selected_model.saturating_sub(1);
+    }
+
+    fn next_model_index(&self) -> Option<usize> {
+        if self.models.is_empty() {
+            None
+        } else {
+            Some((self.selected_model + 1).min(self.models.len() - 1))
+        }
     }
 }
 
@@ -1355,6 +1426,14 @@ mod tests {
         }));
         assert!(!app.build_running);
         assert_eq!(app.build_error, Some("cmake failed".to_string()));
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        app.state_save_path = Some(tempdir.path().join("state.toml"));
+        app.state.build.cmake_hash = "stale".to_string();
+        app.handle_event(AppEvent::BuildEvent(BuildEvent::Cancelled));
+        assert!(!app.build_running);
+        assert_eq!(app.build_error, Some("cancelled".to_string()));
+        assert!(app.state.build.cmake_hash.is_empty());
     }
 
     #[test]
@@ -1370,6 +1449,25 @@ mod tests {
                 archs: vec!["sm_86"]
             }
         );
+    }
+
+    #[test]
+    fn build_config_auto_uses_detection_but_explicit_backend_wins() {
+        let mut app = App::default();
+        app.detect_profile = Some(cuda_profile());
+
+        app.state.build.backend = "Auto".to_string();
+        let config = app.build_config(false);
+        assert_eq!(
+            config.backend,
+            BuildBackend::Cuda {
+                archs: vec!["sm_86"]
+            }
+        );
+
+        app.state.build.backend = "CpuFallback".to_string();
+        let config = app.build_config(false);
+        assert_eq!(config.backend, BuildBackend::CpuFallback);
     }
 
     #[test]
@@ -1591,6 +1689,72 @@ mod tests {
     }
 
     #[test]
+    fn server_model_swap_updates_selection_when_stopped() {
+        let mut app = App::default();
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        app.state_save_path = Some(tempdir.path().join("state.toml"));
+        app.active_tab = Tab::Server;
+        app.models = vec![model_entry("a.gguf"), model_entry("b.gguf")];
+        app.selected_model = 0;
+
+        let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('m'))));
+
+        assert_eq!(action, None);
+        assert_eq!(app.selected_model, 1);
+        assert_eq!(app.state.model.last_used, PathBuf::from("b.gguf"));
+        assert!(app.active_modal.is_none());
+    }
+
+    #[test]
+    fn server_model_swap_running_cancel_keeps_selection() {
+        let mut app = App::default();
+        app.active_tab = Tab::Server;
+        app.models = vec![model_entry("a.gguf"), model_entry("b.gguf")];
+        app.selected_model = 0;
+        app.state.model.last_used = PathBuf::from("a.gguf");
+        app.server_status = ServerStatus::Ready {
+            url: "http://127.0.0.1:8080".to_string(),
+        };
+
+        let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('m'))));
+
+        assert_eq!(action, None);
+        assert_eq!(app.selected_model, 0);
+        assert_eq!(app.state.model.last_used, PathBuf::from("a.gguf"));
+        assert!(matches!(
+            app.active_modal,
+            Some(Modal::ConfirmModelSwap { .. })
+        ));
+
+        let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+        assert_eq!(action, None);
+        assert!(app.active_modal.is_none());
+        assert_eq!(app.selected_model, 0);
+        assert_eq!(app.state.model.last_used, PathBuf::from("a.gguf"));
+    }
+
+    #[test]
+    fn server_model_swap_running_confirm_emits_restart_action() {
+        let mut app = App::default();
+        app.active_tab = Tab::Server;
+        app.models = vec![model_entry("a.gguf"), model_entry("b.gguf")];
+        app.selected_model = 0;
+        app.state.model.last_used = PathBuf::from("a.gguf");
+        app.server_status = ServerStatus::Ready {
+            url: "http://127.0.0.1:8080".to_string(),
+        };
+
+        app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('m'))));
+        let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('y'))));
+
+        assert_eq!(
+            action,
+            Some(Action::ConfirmModelSwap(model_entry("b.gguf")))
+        );
+        assert_eq!(app.state.model.last_used, PathBuf::from("a.gguf"));
+    }
+
+    #[test]
     fn settings_modal_edits_and_toggles_server_config() {
         let mut app = App::default();
         app.active_tab = Tab::Settings;
@@ -1693,6 +1857,46 @@ mod tests {
             context_length: Some(4096),
             architecture: Some("llama".to_string()),
             aliased: false,
+        }
+    }
+
+    fn cuda_profile() -> SystemProfile {
+        SystemProfile {
+            compiler: None,
+            cmake: None,
+            git: None,
+            cuda: lmml_detect::CudaCompatibility::Compatible {
+                archs: vec!["sm_86"],
+            },
+            gpus: vec![lmml_detect::GpuInfo {
+                name: "RTX".to_string(),
+                memory_total_mb: 8_192,
+                compute_cap: "8.6".to_string(),
+                arch: Some("sm_86"),
+            }],
+            sccache: None,
+            metal: lmml_detect::MetalSupport {
+                available: false,
+                displays: Vec::new(),
+            },
+            cpu: lmml_detect::CpuFeatures {
+                model: String::new(),
+                cores: 4,
+                threads: 8,
+                avx: false,
+                avx2: false,
+                avx512: false,
+                neon: false,
+                features: Vec::new(),
+            },
+            memory: lmml_detect::MemInfo {
+                total_mb: 16,
+                available_mb: 8,
+            },
+            disk: lmml_detect::DiskInfo {
+                available_bytes: 8,
+                path: PathBuf::from("."),
+            },
         }
     }
 }

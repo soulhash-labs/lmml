@@ -33,6 +33,8 @@ pub enum Action {
     DeleteModel(lmml_models::ModelEntry),
     /// Confirm deletion of a local model after the user accepts the prompt.
     ConfirmDeleteModel(lmml_models::ModelEntry),
+    /// Confirm restarting a running server with another model.
+    ConfirmModelSwap(lmml_models::ModelEntry),
     /// Add an external model alias.
     AddModelAlias,
     /// Confirm an external model alias path from the input prompt.

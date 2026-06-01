@@ -124,6 +124,17 @@ fn render_modal(area: Rect, modal: &Modal, frame: &mut Frame) {
                 Line::from("Y/Enter deletes  N/Esc cancels"),
             ],
         ),
+        Modal::ConfirmModelSwap { model } => (
+            "Restart Server",
+            vec![
+                Line::from("Restart the running server with this model?"),
+                Line::from(""),
+                Line::from(format!("Name: {}", model.name)),
+                Line::from(format!("Path: {}", model.path.display())),
+                Line::from(""),
+                Line::from("Y/Enter restarts  N/Esc cancels"),
+            ],
+        ),
         Modal::HfSearch {
             field,
             keywords,

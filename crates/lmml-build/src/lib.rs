@@ -535,10 +535,13 @@ async fn stream_command(
     if *cancel_rx.borrow() {
         return Err(BuildError::Cancelled);
     }
-    let mut child = tokio::process::Command::new(program)
+    let mut command = tokio::process::Command::new(program);
+    command
         .args(args)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    configure_process_group(&mut command);
+    let mut child = command
         .spawn()
         .map_err(|error| BuildError::Command(format!("failed to start {program}: {error}")))?;
 
@@ -599,10 +602,21 @@ async fn terminate_child(
     child: &mut tokio::process::Child,
 ) -> Result<(), BuildError> {
     #[cfg(unix)]
-    if let Some(pid) = child.id() {
-        let result = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+    let process_group = child.id().map(|pid| pid as i32);
+
+    #[cfg(unix)]
+    if let Some(pgid) = process_group {
+        let result = unsafe { libc::kill(-pgid, libc::SIGTERM) };
         if result != 0 {
-            tracing::warn!(program, pid, "failed to send SIGTERM to build subprocess");
+            tracing::warn!(
+                program,
+                pgid,
+                "failed to send SIGTERM to build process group"
+            );
+            let fallback = unsafe { libc::kill(pgid, libc::SIGTERM) };
+            if fallback != 0 {
+                tracing::warn!(program, pgid, "failed to send SIGTERM to build subprocess");
+            }
         }
     }
 
@@ -612,11 +626,26 @@ async fn terminate_child(
         .map_err(|error| BuildError::Command(format!("failed to stop {program}: {error}")))?;
 
     match tokio::time::timeout(Duration::from_secs(3), child.wait()).await {
-        Ok(Ok(_status)) => Ok(()),
+        Ok(Ok(_status)) => {
+            #[cfg(unix)]
+            if let Some(pgid) = process_group {
+                let _cleaned = cleanup_process_group(program, pgid);
+            }
+            Ok(())
+        }
         Ok(Err(error)) => Err(BuildError::Command(format!(
             "{program} process failed while cancelling: {error}"
         ))),
         Err(_elapsed) => {
+            #[cfg(unix)]
+            if let Some(pgid) = process_group {
+                if !cleanup_process_group(program, pgid) {
+                    child.start_kill().map_err(|error| {
+                        BuildError::Command(format!("failed to kill {program}: {error}"))
+                    })?;
+                }
+            }
+            #[cfg(not(unix))]
             child.start_kill().map_err(|error| {
                 BuildError::Command(format!("failed to kill {program}: {error}"))
             })?;
@@ -625,6 +654,24 @@ async fn terminate_child(
         }
     }
 }
+
+#[cfg(unix)]
+fn cleanup_process_group(program: &str, pgid: i32) -> bool {
+    let result = unsafe { libc::kill(-pgid, libc::SIGKILL) };
+    if result != 0 {
+        tracing::trace!(program, pgid, "build process group already exited");
+        return false;
+    }
+    true
+}
+
+#[cfg(unix)]
+fn configure_process_group(command: &mut tokio::process::Command) {
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_process_group(_command: &mut tokio::process::Command) {}
 
 async fn handle_line(tx: &mpsc::Sender<BuildEvent>, log_tail: &mut LogTail, line: String) {
     let line = truncate_line(line);
@@ -884,6 +931,62 @@ mod tests {
             task.await.expect("join"),
             Err(BuildError::Cancelled)
         ));
+    }
+
+    #[tokio::test]
+    async fn stream_command_cancels_subprocess_group_descendants() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let pidfile = tempdir.path().join("descendant.pid");
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let (cancel_tx, mut cancel_rx) = watch::channel(false);
+        let mut log_tail = LogTail::new(8);
+        let script = format!(
+            "trap 'exit 0' TERM; \
+             sh -c 'trap \"\" TERM; while :; do sleep 30; done' & \
+             echo $! > {pidfile}; \
+             echo started; wait",
+            pidfile = pidfile.display()
+        );
+        let args = vec!["-c".to_string(), script];
+
+        let task = tokio::spawn(async move {
+            stream_command("sh", &args, &event_tx, &mut log_tail, &mut cancel_rx).await
+        });
+        let first_event = event_rx.recv().await.expect("started event");
+        assert_eq!(
+            first_event,
+            BuildEvent::Compiling {
+                line: "started".to_string()
+            }
+        );
+        cancel_tx.send(true).expect("send cancellation");
+
+        assert!(matches!(
+            task.await.expect("join"),
+            Err(BuildError::Cancelled)
+        ));
+        let pid = fs::read_to_string(&pidfile).expect("descendant pid");
+        for _ in 0..20 {
+            if !process_exists(pid.trim()) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        if process_exists(pid.trim()) {
+            let _ignored = Command::new("kill").arg("-9").arg(pid.trim()).status();
+        }
+        assert!(!process_exists(pid.trim()), "descendant remained alive");
+    }
+
+    fn process_exists(pid: &str) -> bool {
+        Command::new("kill")
+            .arg("-0")
+            .arg(pid)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
     }
 
     fn git(cwd: &Path, args: &[&str]) -> Result<(), String> {

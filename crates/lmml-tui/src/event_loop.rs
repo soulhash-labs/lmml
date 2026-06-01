@@ -95,6 +95,14 @@ impl EventLoop {
                 AppEvent::ServerStarted(Err(_)) => {
                     self.server_handle = None;
                 }
+                AppEvent::ServerModelSwapComplete {
+                    result: Ok(handle), ..
+                } => {
+                    self.server_handle = Some(handle.clone());
+                }
+                AppEvent::ServerModelSwapComplete { result: Err(_), .. } => {
+                    self.server_handle = None;
+                }
                 AppEvent::ServerStatus(lmml_server::ServerStatus::Stopped) => {
                     self.server_handle = None;
                 }
@@ -345,65 +353,7 @@ impl EventLoop {
                 };
                 let config = app.server_config(&model);
                 let binary = app.state.build.binary.clone();
-                tokio::spawn(async move {
-                    tracing::debug!(binary = %binary.display(), "server start task started");
-                    let (log_tx, mut log_rx) = mpsc::channel(256);
-                    let log_app_tx = tx.clone();
-                    tokio::spawn(async move {
-                        while let Some(line) = log_rx.recv().await {
-                            if log_app_tx.send(AppEvent::ServerLog(line)).await.is_err() {
-                                break;
-                            }
-                        }
-                    });
-
-                    let caps = match lmml_compat::LlamaBinaryCapabilities::probe(&binary).await {
-                        Ok(caps) => {
-                            let _ignored = tx
-                                .send(AppEvent::ServerCapabilities(Ok(caps.clone())))
-                                .await;
-                            caps
-                        }
-                        Err(error) => {
-                            let reason = error.to_string();
-                            let _ignored = tx
-                                .send(AppEvent::ServerCapabilities(Err(reason.clone())))
-                                .await;
-                            let _ignored = tx.send(AppEvent::ServerStarted(Err(reason))).await;
-                            return;
-                        }
-                    };
-                    let manager = ServerManager { binary, caps };
-                    match manager.start(&model, &config, log_tx).await {
-                        Ok(handle) => {
-                            let mut status_rx = handle.subscribe();
-                            let status_tx = tx.clone();
-                            tokio::spawn(async move {
-                                while status_rx.changed().await.is_ok() {
-                                    let status = status_rx.borrow().clone();
-                                    let stopped =
-                                        matches!(status, lmml_server::ServerStatus::Stopped);
-                                    if status_tx
-                                        .send(AppEvent::ServerStatus(status))
-                                        .await
-                                        .is_err()
-                                    {
-                                        break;
-                                    }
-                                    if stopped {
-                                        break;
-                                    }
-                                }
-                            });
-                            let _ignored = tx.send(AppEvent::ServerStarted(Ok(handle))).await;
-                        }
-                        Err(error) => {
-                            let _ignored = tx
-                                .send(AppEvent::ServerStarted(Err(error.to_string())))
-                                .await;
-                        }
-                    }
-                });
+                spawn_server_start(tx, binary, model, config, None);
             }
             Action::ProbeServerCapabilities => {
                 app.dispatch(Action::ProbeServerCapabilities);
@@ -426,6 +376,16 @@ impl EventLoop {
                     .app_tx
                     .send(AppEvent::ServerStatus(lmml_server::ServerStatus::Stopped))
                     .await;
+            }
+            Action::ConfirmModelSwap(model) => {
+                app.dispatch(Action::ConfirmModelSwap(model.clone()));
+                if let Some(handle) = self.server_handle.take() {
+                    handle.stop().await;
+                }
+                let tx = self.app_tx.clone();
+                let config = app.server_config(&model);
+                let binary = app.state.build.binary.clone();
+                spawn_server_start(tx, binary, model.clone(), config, Some(model));
             }
             Action::Quit => {
                 if let Some(handle) = self.server_handle.take() {
@@ -501,6 +461,83 @@ fn backend_archs(backend: &lmml_detect::BuildBackend) -> Vec<String> {
         | lmml_detect::BuildBackend::CpuAvx
         | lmml_detect::BuildBackend::CpuFallback => Vec::new(),
     }
+}
+
+fn spawn_server_start(
+    tx: mpsc::Sender<AppEvent>,
+    binary: std::path::PathBuf,
+    model: lmml_models::ModelEntry,
+    config: lmml_compat::ServerConfig,
+    swap_model: Option<lmml_models::ModelEntry>,
+) {
+    tokio::spawn(async move {
+        tracing::debug!(binary = %binary.display(), "server start task started");
+        let (log_tx, mut log_rx) = mpsc::channel(256);
+        let log_app_tx = tx.clone();
+        tokio::spawn(async move {
+            while let Some(line) = log_rx.recv().await {
+                if log_app_tx.send(AppEvent::ServerLog(line)).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let caps = match lmml_compat::LlamaBinaryCapabilities::probe(&binary).await {
+            Ok(caps) => {
+                let _ignored = tx
+                    .send(AppEvent::ServerCapabilities(Ok(caps.clone())))
+                    .await;
+                caps
+            }
+            Err(error) => {
+                let reason = error.to_string();
+                let _ignored = tx
+                    .send(AppEvent::ServerCapabilities(Err(reason.clone())))
+                    .await;
+                send_server_start_result(&tx, swap_model, Err(reason)).await;
+                return;
+            }
+        };
+        let manager = ServerManager { binary, caps };
+        match manager.start(&model, &config, log_tx).await {
+            Ok(handle) => {
+                let mut status_rx = handle.subscribe();
+                let status_tx = tx.clone();
+                tokio::spawn(async move {
+                    while status_rx.changed().await.is_ok() {
+                        let status = status_rx.borrow().clone();
+                        let stopped = matches!(status, lmml_server::ServerStatus::Stopped);
+                        if status_tx
+                            .send(AppEvent::ServerStatus(status))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                        if stopped {
+                            break;
+                        }
+                    }
+                });
+                send_server_start_result(&tx, swap_model, Ok(handle)).await;
+            }
+            Err(error) => {
+                send_server_start_result(&tx, swap_model, Err(error.to_string())).await;
+            }
+        }
+    });
+}
+
+async fn send_server_start_result(
+    tx: &mpsc::Sender<AppEvent>,
+    swap_model: Option<lmml_models::ModelEntry>,
+    result: Result<ServerHandle, String>,
+) {
+    let event = match swap_model {
+        Some(model) => AppEvent::ServerModelSwapComplete { model, result },
+        None => AppEvent::ServerStarted(result),
+    };
+    let _ignored = tx.send(event).await;
 }
 
 #[cfg(test)]

@@ -11,7 +11,7 @@ expression: render_app(&app)
 "│Press B for a clean build.                      ││                                                          │"
 "│Press u to check for updates.                   ││                                                          │"
 "│Source: $HOME/.local/share/lmml/llama.cpp││                                                          │"
-"│Backend: CpuFallback                            ││                                                          │"
+"│Backend: Auto                                   ││                                                          │"
 "│sccache: not active                             ││                                                          │"
 "│Update: Available { current: "abc", latest: "def││                                                          │"
 "│                                                ││                                                          │"
