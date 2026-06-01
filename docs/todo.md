@@ -192,7 +192,7 @@ release claims.
 
 - [ ] Build and publish the remaining cross-target tarballs on matching builders or CI runners: `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`, `aarch64-apple-darwin`
 - [ ] Replace README placeholder release URL (`https://your-lan-or-github/install.sh`) with the real public release URL when hosting is chosen
-- [ ] Run `tests/integration/clean_install.sh` on a clean Ubuntu 24.04 x86_64 VM with CUDA drivers before tagging each release
+- [ ] Run `tests/integration/clean_install.sh` on this Ubuntu 24.04 x86_64 CUDA machine before tagging each release
 - [x] Add signed `SHA256SUMS` verification support before claiming checksum authenticity against tampering
 
 ---
@@ -262,6 +262,55 @@ to the Codex tool sandbox environment, not the host driver/toolkit.
 ### Deferred Beyond Local v0.1.0
 
 - [ ] Build and validate non-x86_64 target tarballs on matching builders or CI
-- [ ] Run a clean Ubuntu 24.04 CUDA VM validation before making broader GPU claims
+- [ ] Run CUDA validation on this Ubuntu 24.04 x86_64 machine before making broader GPU claims
 - [ ] Require real signed-checksum verification for any public/non-local release
 - [ ] Implement v2 ROCm/HIP production support before claiming AMD GPU production readiness
+
+---
+
+## Phase 9 — Cross-Target and This-Machine CUDA Validation (Planned)
+
+Goal: convert the remaining release-readiness gaps into repeatable validation
+jobs before claiming readiness beyond the tested local Linux x86_64 LAN target.
+
+### 9A — Non-x86_64 Release Tarballs
+
+- [ ] Add CI/build matrix entries or documented matching-builder jobs for:
+  `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`, and
+  `aarch64-apple-darwin`
+- [ ] For each target, run `cargo build --release -p lmml-tui --target <target>`
+  on a matching builder or supported cross-build environment
+- [ ] Run `scripts/package-release.sh` with `TARGET_TRIPLE=<target>` and confirm
+  target-specific tarball, alias tarball, `latest`, and `SHA256SUMS` entries are
+  generated
+- [ ] Extract each tarball and verify it contains `lmml`, `README.md`, `LICENSE`,
+  `RELEASE-METADATA`, `scripts/install.sh`, `scripts/preflight.sh`, and
+  `scripts/uninstall.sh`
+- [ ] On each matching OS/arch, run installed `lmml doctor` and `lmml smoke`
+- [ ] Record per-target validation date, host/runner, target triple, and runtime
+  dependency notes in `docs/release-checklist.md`
+
+### 9B — This-Machine Ubuntu 24.04 CUDA Validation
+
+- [ ] Use this Ubuntu 24.04 x86_64 machine as the CUDA validation target; do not
+  require a separate VM for local v0.1.0 validation
+- [ ] Confirm this machine has NVIDIA driver, CUDA toolkit, compiler, CMake, Git,
+  curl/wget, Rust toolchain, and at least 4 GB free disk
+- [ ] Confirm direct host commands pass: `nvidia-smi`, `nvcc --version`,
+  `rustc --version`, `cargo --version`, and `rustup show active-toolchain`
+- [ ] Serve `dist/` from a release host and run default binary install without
+  `LMML_GPU_MODE=cpu-only`
+- [ ] Run `lmml doctor` and require `CUDA available` with GPU name and compute
+  capability, not a soft GPU warning
+- [ ] Run `lmml smoke`
+- [ ] Run explicit source install from `dist/` without `LMML_GPU_MODE=cpu-only`
+  and confirm preflight passes GPU-required mode
+- [ ] Record the exact GPU, driver version, CUDA toolkit version, and validation
+  commands/output summary in `docs/release-checklist.md`
+
+### Phase 9 Acceptance
+
+- [ ] Non-x86_64 artifacts are built and smoke-tested on matching machines or CI
+- [ ] This-machine Ubuntu CUDA validation proves GPU-required install flow on
+  the actual local release target
+- [ ] README release scope is broadened only to the targets actually validated

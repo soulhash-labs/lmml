@@ -715,5 +715,16 @@ environment, so it should be treated as sandbox/device visibility rather than a
 host driver, CUDA toolkit, or lmml probe failure.
 
 The release still should not be described as broadly production-ready. Remaining
-non-local work includes cross-target builders, clean CUDA VM validation, real
+non-local work includes cross-target builders, this-machine CUDA validation, real
 public-release signing, and v2 ROCm/HIP production support.
+
+### Cross-Target and CUDA Validation Must Be Evidence-Based
+
+Building a tarball name is not the same as supporting a target. Each non-x86_64
+artifact needs a matching-machine install and `lmml doctor`/`lmml smoke` result
+before it can be advertised.
+
+The this-machine CUDA validation must run without `LMML_GPU_MODE=cpu-only`. The point
+of that pass is proving that default GPU-required preflight and installed
+`lmml doctor` both see CUDA correctly on the actual Ubuntu 24.04 local release
+target.

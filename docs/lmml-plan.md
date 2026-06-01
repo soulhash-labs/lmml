@@ -987,9 +987,10 @@ original crate-build milestones:
 | B — Startup flow completeness | Complete | TUI startup schedules hardware detect and model scan once, with first-run onboarding reflecting active detection. |
 | C — Installer semantics and supply chain | Complete | Binary installer fails on hard `lmml doctor` prereqs, clean-install smoke tests the documented HTTP path, and packaging normalizes tar/gzip metadata. |
 | D — Docs truthfulness + backend claims | Complete | Docs distinguish current v2 from historical root-package rows. Vulkan backend selection/build support is proven in current crate tests; ROCm remains a production gap. |
-| E — Verification gate | Passing on current x86_64 Linux host | Workspace fmt/clippy/tests, release package generation, and HTTP binary/source installer smokes pass. Remaining release risk is clean CUDA VM and cross-target builders. |
+| E — Verification gate | Passing on current x86_64 Linux host | Workspace fmt/clippy/tests, release package generation, and HTTP binary/source installer smokes pass. Remaining release risk is this-machine CUDA validation and cross-target builders. |
 | F — Signed checksum authenticity | Complete for local v0.1.0 | Installer and packaging support minisign-signed `SHA256SUMS`. Real release-keypair verification is deferred until a future public/non-local release. |
 | G — Local v0.1.0 release closure | Verification passed; archive pending | Final gates and both binary/source HTTP install flows passed on Linux x86_64. Tag or archive remains pending. |
+| H — Cross-target and this-machine CUDA validation | Planned | Build/validate non-x86_64 tarballs on matching builders and run Ubuntu 24.04 CUDA validation on this machine before broadening release claims. |
 
 ### What changed during release hardening
 
@@ -1007,6 +1008,19 @@ original crate-build milestones:
   source artifacts, supports optional minisign-signed checksums, and keeps LAN
   SHA256 checks honest as integrity-only unless signature verification is
   required.
+
+### Next validation plan
+
+Phase 9 is intentionally validation-first. Do not broaden README or release
+claims until the target has a matching-machine package and smoke result:
+
+- Linux ARM64: build/package with `TARGET_TRIPLE=aarch64-unknown-linux-gnu`,
+  then run installed `lmml doctor` and `lmml smoke` on an ARM64 Linux host.
+- macOS Intel/Apple Silicon: build/package on matching macOS runners, verify
+  tarball contents, then run installed `lmml doctor` and `lmml smoke`.
+- This-machine CUDA validation: run default binary and explicit source installs without
+  `LMML_GPU_MODE=cpu-only`; `lmml doctor` must report CUDA available with GPU
+  name and compute capability.
 
 ### Preflight and source-build bootstrap plan
 

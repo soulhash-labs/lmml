@@ -1,7 +1,7 @@
 # lmml Release Checklist
 
-Before tagging a release, this checklist must pass on a clean Ubuntu 24.04
-x86_64 VM with CUDA drivers installed.
+Before tagging the local release, this checklist must pass on this Ubuntu 24.04
+x86_64 CUDA machine.
 
 Passing this checklist supports a narrow local v0.1.0 claim: LAN install works
 on the tested host/target. Do not broaden that into “all platforms
@@ -118,3 +118,65 @@ diff -u /tmp/lmml-SHA256SUMS.first dist/SHA256SUMS
 ROCm/HIP remains a documented v2 production gap. Do not claim AMD GPU
 acceleration is production-ready until the ROCm probe, build flags, telemetry,
 settings wiring, and tests are implemented.
+
+## Cross-Target Validation
+
+Do not publish or advertise a target tarball until it has been built and
+validated on a matching builder or CI runner.
+
+Required targets before broader platform claims:
+
+- `aarch64-unknown-linux-gnu`
+- `x86_64-apple-darwin`
+- `aarch64-apple-darwin`
+
+For each target:
+
+```sh
+TARGET_TRIPLE=<target> scripts/package-release.sh
+tar -tzf dist/lmml-0.1.0-<target>.tar.gz
+```
+
+Then install on matching hardware/OS and run:
+
+```sh
+lmml doctor
+lmml smoke
+```
+
+Record the target triple, builder/runner, OS version, command results, and any
+runtime dependency notes before marking the target release-ready.
+
+## This-Machine CUDA Validation
+
+Before making broader GPU readiness claims for the local release target,
+validate on this Ubuntu 24.04 x86_64 machine with NVIDIA driver and CUDA toolkit
+installed. A separate VM is not required for local v0.1.0 validation.
+
+Host prechecks:
+
+```sh
+nvidia-smi
+nvcc --version
+rustc --version
+cargo --version
+rustup show active-toolchain
+```
+
+Release install checks:
+
+```sh
+curl -fsSL http://<release-host>:8000/install.sh | BASE_URL=http://<release-host>:8000 sh
+lmml doctor
+lmml smoke
+lmml-uninstall
+
+curl -fsSL http://<release-host>:8000/preflight.sh | LMML_INSTALL_MODE=source bash
+curl -fsSL http://<release-host>:8000/install.sh | BASE_URL=http://<release-host>:8000 INSTALL_MODE=source bash
+lmml doctor
+lmml smoke
+lmml-uninstall
+```
+
+Both install modes must pass without `LMML_GPU_MODE=cpu-only`, and
+`lmml doctor` must report CUDA available with GPU name and compute capability.
