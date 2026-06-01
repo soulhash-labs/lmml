@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyEventKind};
 use lmml_build::{BuildRunner, RealBuildRunner, UpdateCheck};
+use lmml_server::{ServerHandle, ServerManager};
 use tokio::sync::mpsc;
 
 use crate::action::Action;
@@ -22,13 +23,18 @@ pub enum EventLoopError {
 pub struct EventLoop {
     app_tx: mpsc::Sender<AppEvent>,
     app_rx: mpsc::Receiver<AppEvent>,
+    server_handle: Option<ServerHandle>,
 }
 
 impl EventLoop {
     /// Create a new event loop.
     pub fn new() -> Self {
         let (app_tx, app_rx) = mpsc::channel(256);
-        Self { app_tx, app_rx }
+        Self {
+            app_tx,
+            app_rx,
+            server_handle: None,
+        }
     }
 
     /// Sender used by background tasks to deliver app events.
@@ -77,13 +83,35 @@ impl EventLoop {
 
     async fn drain_events(&mut self, app: &mut App) {
         while let Ok(event) = self.app_rx.try_recv() {
+            match &event {
+                AppEvent::ServerStarted(Ok(handle)) => {
+                    self.server_handle = Some(handle.clone());
+                }
+                AppEvent::ServerStarted(Err(_)) => {
+                    self.server_handle = None;
+                }
+                AppEvent::ServerStatus(lmml_server::ServerStatus::Stopped) => {
+                    self.server_handle = None;
+                }
+                AppEvent::Key(_)
+                | AppEvent::Resize(_, _)
+                | AppEvent::DetectComplete(_)
+                | AppEvent::BuildEvent(_)
+                | AppEvent::ServerStatus(_)
+                | AppEvent::ServerLog(_)
+                | AppEvent::DownloadProgress(_)
+                | AppEvent::DownloadComplete(_)
+                | AppEvent::ModelScanComplete(_)
+                | AppEvent::HfSearchResults(_)
+                | AppEvent::UpdateCheckResult(_) => {}
+            }
             if let Some(action) = app.handle_event(event) {
                 self.dispatch_action(app, action).await;
             }
         }
     }
 
-    async fn dispatch_action(&self, app: &mut App, action: Action) {
+    async fn dispatch_action(&mut self, app: &mut App, action: Action) {
         match action {
             Action::RunDetect => {
                 app.dispatch(Action::RunDetect);
@@ -171,16 +199,94 @@ impl EventLoop {
                     }
                 });
             }
+            Action::StartServer => {
+                app.dispatch(Action::StartServer);
+                let tx = self.app_tx.clone();
+                let Some(model) = app.selected_server_model() else {
+                    let _ignored = tx
+                        .send(AppEvent::ServerStarted(Err(
+                            "select a model before starting server".to_string(),
+                        )))
+                        .await;
+                    return;
+                };
+                let config = app.server_config(&model);
+                let binary = app.state.build.binary.clone();
+                tokio::spawn(async move {
+                    let (log_tx, mut log_rx) = mpsc::channel(256);
+                    let log_app_tx = tx.clone();
+                    tokio::spawn(async move {
+                        while let Some(line) = log_rx.recv().await {
+                            if log_app_tx.send(AppEvent::ServerLog(line)).await.is_err() {
+                                break;
+                            }
+                        }
+                    });
+
+                    let caps = match lmml_compat::LlamaBinaryCapabilities::probe(&binary).await {
+                        Ok(caps) => caps,
+                        Err(error) => {
+                            let _ignored = tx
+                                .send(AppEvent::ServerStarted(Err(error.to_string())))
+                                .await;
+                            return;
+                        }
+                    };
+                    let manager = ServerManager { binary, caps };
+                    match manager.start(&model, &config, log_tx).await {
+                        Ok(handle) => {
+                            let mut status_rx = handle.subscribe();
+                            let status_tx = tx.clone();
+                            tokio::spawn(async move {
+                                while status_rx.changed().await.is_ok() {
+                                    let status = status_rx.borrow().clone();
+                                    let stopped =
+                                        matches!(status, lmml_server::ServerStatus::Stopped);
+                                    if status_tx
+                                        .send(AppEvent::ServerStatus(status))
+                                        .await
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
+                                    if stopped {
+                                        break;
+                                    }
+                                }
+                            });
+                            let _ignored = tx.send(AppEvent::ServerStarted(Ok(handle))).await;
+                        }
+                        Err(error) => {
+                            let _ignored = tx
+                                .send(AppEvent::ServerStarted(Err(error.to_string())))
+                                .await;
+                        }
+                    }
+                });
+            }
+            Action::StopServer => {
+                app.dispatch(Action::StopServer);
+                if let Some(handle) = self.server_handle.take() {
+                    handle.stop().await;
+                }
+                let _ignored = self
+                    .app_tx
+                    .send(AppEvent::ServerStatus(lmml_server::ServerStatus::Stopped))
+                    .await;
+            }
+            Action::Quit => {
+                if let Some(handle) = self.server_handle.take() {
+                    handle.stop().await;
+                }
+                app.dispatch(Action::Quit);
+            }
             Action::CancelBuild
-            | Action::StartServer
-            | Action::StopServer
             | Action::SelectModel(_)
             | Action::OpenHfSearch
             | Action::DeleteModel(_)
             | Action::AddModelAlias
             | Action::SaveSettings
-            | Action::ShowHelp
-            | Action::Quit => app.dispatch(action),
+            | Action::ShowHelp => app.dispatch(action),
         }
     }
 }

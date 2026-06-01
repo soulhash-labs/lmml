@@ -7,8 +7,10 @@ description = "Terminal UI binary for lmml"
 [dependencies]
 crossterm = "0.28"
 lmml-build = { path = "../lmml-build" }
+lmml-compat = { path = "../lmml-compat" }
 lmml-detect = { path = "../lmml-detect" }
 lmml-models = { path = "../lmml-models" }
+lmml-server = { path = "../lmml-server" }
 lmml-state = { path = "../lmml-state" }
 ratatui = "0.29"
 thiserror = "2"

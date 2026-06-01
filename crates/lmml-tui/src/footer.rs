@@ -16,7 +16,7 @@ pub fn render(area: Rect, app: &App, frame: &mut Frame) {
 
     let server = match &app.server_status {
         ServerStatus::Stopped => "Server: stopped".to_string(),
-        ServerStatus::Starting => "Server: starting".to_string(),
+        ServerStatus::Starting { elapsed } => format!("Server: starting {}s", elapsed.as_secs()),
         ServerStatus::Ready { url } => format!("Server: ready {url}"),
         ServerStatus::Failed { reason } => format!("Server: failed {reason}"),
     };

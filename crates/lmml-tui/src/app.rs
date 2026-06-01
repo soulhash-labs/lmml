@@ -9,6 +9,8 @@ use std::path::PathBuf;
 use lmml_build::{BuildEvent, UpdateCheck};
 use lmml_detect::{BuildBackend, SystemProfile};
 use lmml_models::{DownloadProgress, HfModelResult, ModelEntry};
+use lmml_server::ServerHandle;
+pub use lmml_server::ServerStatus;
 use lmml_state::AppState as PersistentState;
 
 use crate::action::Action;
@@ -57,19 +59,6 @@ impl Tab {
     }
 }
 
-/// Runtime server status for the Milestone 5 shell.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ServerStatus {
-    /// No managed server is running.
-    Stopped,
-    /// Start has been requested.
-    Starting,
-    /// Server is ready at a URL.
-    Ready { url: String },
-    /// Server failed.
-    Failed { reason: String },
-}
-
 /// Background and terminal events consumed by the app.
 #[derive(Debug, Clone)]
 pub enum AppEvent {
@@ -83,6 +72,8 @@ pub enum AppEvent {
     BuildEvent(BuildEvent),
     /// Server status changed.
     ServerStatus(ServerStatus),
+    /// Server startup completed.
+    ServerStarted(Result<ServerHandle, String>),
     /// Server log line.
     ServerLog(String),
     /// Download progress changed.
@@ -251,8 +242,28 @@ impl App {
                 self.server_status = status;
                 None
             }
+            AppEvent::ServerStarted(result) => {
+                match result {
+                    Ok(handle) => {
+                        self.server_status = handle.status();
+                        self.status_message = "Server ready".to_string();
+                    }
+                    Err(error) => {
+                        self.server_status = ServerStatus::Failed {
+                            reason: error.clone(),
+                        };
+                        self.status_message = format!("Server failed: {error}");
+                    }
+                }
+                None
+            }
             AppEvent::ServerLog(line) => {
                 self.server_log.push(line);
+                const MAX_SERVER_LOG_LINES: usize = 500;
+                if self.server_log.len() > MAX_SERVER_LOG_LINES {
+                    let overflow = self.server_log.len() - MAX_SERVER_LOG_LINES;
+                    self.server_log.drain(0..overflow);
+                }
                 None
             }
             AppEvent::DownloadProgress(progress) => {
@@ -329,7 +340,9 @@ impl App {
                 self.status_message = "Cancelling build".to_string();
             }
             Action::StartServer => {
-                self.server_status = ServerStatus::Starting;
+                self.server_status = ServerStatus::Starting {
+                    elapsed: std::time::Duration::ZERO,
+                };
                 self.status_message = "Starting server".to_string();
             }
             Action::StopServer => {
@@ -455,7 +468,14 @@ impl App {
             KeyCode::Char('B') => Some(Action::CleanBuild),
             KeyCode::Char('u') => Some(Action::CheckForUpdate),
             KeyCode::Char('s') => match self.active_tab {
-                Tab::Server => Some(Action::StartServer),
+                Tab::Server => match self.server_status {
+                    ServerStatus::Stopped | ServerStatus::Failed { .. } => {
+                        Some(Action::StartServer)
+                    }
+                    ServerStatus::Starting { .. } | ServerStatus::Ready { .. } => {
+                        Some(Action::StopServer)
+                    }
+                },
                 Tab::Settings => Some(Action::SaveSettings),
                 Tab::Detect | Tab::Build | Tab::Models => None,
             },
@@ -531,6 +551,60 @@ impl App {
             .as_ref()
             .and_then(|profile| profile.sccache.clone());
         config
+    }
+
+    /// Return the model that should be served, preferring the visible selection.
+    pub fn selected_server_model(&self) -> Option<ModelEntry> {
+        if let Some(model) = self.models.get(self.selected_model) {
+            return Some(model.clone());
+        }
+        let path = &self.state.model.last_used;
+        if path.as_os_str().is_empty() {
+            return None;
+        }
+        Some(ModelEntry {
+            path: path.clone(),
+            name: path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or("selected model")
+                .to_string(),
+            size_bytes: path.metadata().map(|metadata| metadata.len()).unwrap_or(0),
+            quant: "unknown".to_string(),
+            context_length: None,
+            architecture: None,
+            aliased: false,
+        })
+    }
+
+    /// Build a compat server config from persisted settings and model fit.
+    pub fn server_config(&self, model: &ModelEntry) -> lmml_compat::ServerConfig {
+        let mut n_gpu_layers = self.state.server.n_gpu_layers;
+        if n_gpu_layers == -1 {
+            n_gpu_layers = self
+                .detect_profile
+                .as_ref()
+                .map(|profile| model.recommended_ngl(&profile.gpus))
+                .unwrap_or(0);
+        }
+        lmml_compat::ServerConfig {
+            model: model.path.clone(),
+            port: self.state.server.port,
+            host: self.state.server.host.clone(),
+            ctx_size: self.state.server.ctx_size,
+            n_gpu_layers,
+            batch_size: self.state.server.batch_size,
+            ubatch_size: self.state.server.ubatch_size,
+            threads: self.state.server.threads,
+            flash_attn: self.state.server.flash_attn,
+            mlock: self.state.server.mlock,
+            api_key: (!self.state.server.api_key.is_empty())
+                .then(|| self.state.server.api_key.clone()),
+            chat_template: (!self.state.server.chat_template.is_empty())
+                .then(|| self.state.server.chat_template.clone()),
+            jinja: self.state.server.jinja,
+            extra_args: self.state.server.extra_args.clone(),
+        }
     }
 
     fn push_build_log(&mut self, line: impl Into<String>) {
@@ -739,6 +813,69 @@ mod tests {
                 .as_ref()
                 .map(|progress| progress.resumed_from),
             Some(2)
+        );
+    }
+
+    #[test]
+    fn server_config_auto_ngl_uses_detected_vram_fit() {
+        let mut app = App::default();
+        app.detect_profile = Some(SystemProfile {
+            compiler: None,
+            cmake: None,
+            git: None,
+            cuda: lmml_detect::CudaCompatibility::NoGpu,
+            gpus: vec![lmml_detect::GpuInfo {
+                name: "RTX".to_string(),
+                memory_total_mb: 8_192,
+                compute_cap: "8.6".to_string(),
+                arch: Some("sm_86"),
+            }],
+            sccache: None,
+            metal: lmml_detect::MetalSupport {
+                available: false,
+                displays: Vec::new(),
+            },
+            cpu: lmml_detect::CpuFeatures {
+                model: String::new(),
+                cores: 4,
+                threads: 8,
+                avx: false,
+                avx2: false,
+                avx512: false,
+                neon: false,
+                features: Vec::new(),
+            },
+            memory: lmml_detect::MemInfo {
+                total_mb: 16,
+                available_mb: 8,
+            },
+            disk: lmml_detect::DiskInfo {
+                available_bytes: 8,
+                path: PathBuf::from("."),
+            },
+        });
+        let model = ModelEntry {
+            size_bytes: 1024 * 1024 * 1024,
+            ..model_entry("small.gguf")
+        };
+
+        assert_eq!(app.server_config(&model).n_gpu_layers, -1);
+    }
+
+    #[test]
+    fn server_key_toggles_start_and_stop() {
+        let mut app = App::default();
+        app.active_tab = Tab::Server;
+        assert_eq!(
+            app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('s')))),
+            Some(Action::StartServer)
+        );
+        app.server_status = ServerStatus::Ready {
+            url: "http://127.0.0.1:8080".to_string(),
+        };
+        assert_eq!(
+            app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('s')))),
+            Some(Action::StopServer)
         );
     }
 
