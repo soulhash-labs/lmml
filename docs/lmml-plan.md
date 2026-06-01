@@ -990,7 +990,7 @@ original crate-build milestones:
 | E — Verification gate | Passing on current x86_64 Linux host | Workspace fmt/clippy/tests, release package generation, and HTTP binary/source installer smokes pass. Remaining release risk is this-machine CUDA validation and cross-target builders. |
 | F — Signed checksum authenticity | Complete for local v0.1.0 | Installer and packaging support minisign-signed `SHA256SUMS`. Real release-keypair verification is deferred until a future public/non-local release. |
 | G — Local v0.1.0 release closure | Verification passed; archive pending | Final gates and both binary/source HTTP install flows passed on Linux x86_64. Tag or archive remains pending. |
-| H — Debian-family Linux validation | CUDA validation complete; Linux matrix pending | Ubuntu 24.04 CUDA validation passed on this machine for binary and source installs. Debian-family x86_64 and ARM64 validation starts with Ubuntu 24.04/26.04 and still needs matching builders. macOS is deferred. |
+| H — Debian-family Linux validation | CUDA + live llama.cpp validation complete; Linux matrix pending | Ubuntu 24.04 CUDA validation passed on this machine for binary/source installs and live llama.cpp CUDA server startup. Debian-family x86_64 and ARM64 validation starts with Ubuntu 24.04/26.04 and still needs matching builders. macOS is deferred. |
 
 ### What changed during release hardening
 
@@ -1024,6 +1024,9 @@ package and smoke result:
 - This-machine CUDA validation: run default binary and explicit source installs without
   `LMML_GPU_MODE=cpu-only`; `lmml doctor` must report CUDA available with GPU
   name and compute capability.
+- Live llama.cpp validation: use installed lmml to run a clean CUDA build, start
+  `llama-server`, and confirm the server log reports the NVIDIA GPU and CUDA
+  architecture.
 - macOS Intel/Apple Silicon validation is deferred to Phase 10 or later.
 
 ### Preflight and source-build bootstrap plan

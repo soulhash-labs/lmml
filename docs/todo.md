@@ -330,12 +330,38 @@ Install validation evidence:
 - Both installs reported `CUDA available · NVIDIA GeForce GTX 1080 Ti · sm_61`
 - Both installs ran `lmml smoke` and uninstalled cleanly
 
+### 9C — Live llama.cpp CUDA Build and Server Validation
+
+- [x] Install lmml through the packaged LAN installer after the numeric CUDA
+  architecture fix
+- [x] Run a clean TUI build with CUDA backend selected by auto-detection
+- [x] Confirm the resulting server binary path:
+  `/home/angelo/.local/share/lmml/llama.cpp/build/bin/llama-server`
+- [x] Start `llama-server` through lmml with a local GGUF model:
+  `/home/angelo/.local/share/lmml/models/Qwen3.5-4B-Q6_K.gguf`
+- [x] Confirm server reaches ready state at `http://127.0.0.1:1200`
+- [x] Confirm llama.cpp runtime reports CUDA device usage:
+  `CUDA0: NVIDIA GeForce GTX 1080 Ti`
+- [x] Confirm llama.cpp runtime reports CUDA architecture:
+  `CUDA : ARCHS = 610`
+
+Live validation evidence:
+
+```text
+Binary: /home/angelo/.local/share/lmml/llama.cpp/build/bin/llama-server
+Model: /home/angelo/.local/share/lmml/models/Qwen3.5-4B-Q6_K.gguf
+Status: Ready { url: "http://127.0.0.1:1200" }
+CUDA0: NVIDIA GeForce GTX 1080 Ti (11157 MiB, 10658 MiB free)
+system_info: CUDA : ARCHS = 610
+```
+
 ### Phase 9 Acceptance
 
 - [ ] Debian-family x86_64 and ARM64 artifacts are built and smoke-tested on
   matching machines or CI, starting with Ubuntu 24.04/26.04
 - [x] This-machine Ubuntu CUDA validation proves GPU-required install flow on
   the actual local release target
+- [x] This-machine live llama.cpp CUDA build and server startup are validated
 - [ ] README release scope is broadened only to the targets actually validated
 
 ---

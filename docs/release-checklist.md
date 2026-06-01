@@ -218,3 +218,19 @@ Latest this-machine CUDA validation:
 - Source install: `BASE_URL=http://127.0.0.1:8127 INSTALL_MODE=source tests/integration/clean_install.sh`
 - GPU mode: default required mode; `LMML_GPU_MODE=cpu-only` was not set
 - Result: both install modes reported `CUDA available · NVIDIA GeForce GTX 1080 Ti · sm_61`, `lmml smoke` passed, and uninstall completed cleanly
+
+## Live llama.cpp CUDA Build and Server Validation
+
+The install checks above prove lmml install and CUDA detection. The live build
+check proves the managed llama.cpp build/server path.
+
+Latest live validation:
+
+- Date: 2026-06-01
+- Build trigger: installed lmml TUI clean build
+- Server binary: `/home/angelo/.local/share/lmml/llama.cpp/build/bin/llama-server`
+- Model: `/home/angelo/.local/share/lmml/models/Qwen3.5-4B-Q6_K.gguf`
+- Server URL: `http://127.0.0.1:1200`
+- Result: server reached ready state
+- Runtime GPU evidence: `CUDA0: NVIDIA GeForce GTX 1080 Ti`
+- Runtime architecture evidence: `CUDA : ARCHS = 610`

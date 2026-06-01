@@ -734,3 +734,9 @@ target.
 That validation passed for local v0.1.0 on 2026-06-01: both binary and source
 HTTP installs from `dist/` ran in default GPU-required mode and reported CUDA
 available on the NVIDIA GeForce GTX 1080 Ti.
+
+The later live TUI validation proved the actual llama.cpp path, not just lmml
+installation: a clean build produced
+`~/.local/share/lmml/llama.cpp/build/bin/llama-server`, started Qwen3.5-4B-Q6_K,
+reached `http://127.0.0.1:1200`, and llama.cpp reported
+`CUDA0: NVIDIA GeForce GTX 1080 Ti` with `CUDA : ARCHS = 610`.
