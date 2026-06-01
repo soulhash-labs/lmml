@@ -219,7 +219,12 @@ pub fn cmake_configure_args(config: &BuildConfig) -> Vec<String> {
         BuildBackend::Cuda { archs } => {
             args.push("-DGGML_CUDA=ON".to_string());
             if !archs.is_empty() {
-                args.push(format!("-DCMAKE_CUDA_ARCHITECTURES={}", archs.join(";")));
+                let cmake_archs = archs
+                    .iter()
+                    .map(|arch| cuda_arch_for_cmake(arch))
+                    .collect::<Vec<_>>()
+                    .join(";");
+                args.push(format!("-DCMAKE_CUDA_ARCHITECTURES={cmake_archs}"));
             }
         }
         BuildBackend::Metal => args.push("-DGGML_METAL=ON".to_string()),
@@ -237,6 +242,10 @@ pub fn cmake_configure_args(config: &BuildConfig) -> Vec<String> {
 
     args.extend(config.extra_cmake_flags.iter().cloned());
     args
+}
+
+fn cuda_arch_for_cmake(arch: &str) -> String {
+    arch.strip_prefix("sm_").unwrap_or(arch).to_string()
 }
 
 /// Hash the exact CMake configure argv.
@@ -797,7 +806,7 @@ mod tests {
                 "-DCMAKE_BUILD_TYPE=Release",
                 "-DLLAMA_BUILD_SERVER=ON",
                 "-DGGML_CUDA=ON",
-                "-DCMAKE_CUDA_ARCHITECTURES=sm_75;sm_86",
+                "-DCMAKE_CUDA_ARCHITECTURES=75;86",
                 "-DCMAKE_C_COMPILER_LAUNCHER=/usr/bin/sccache",
                 "-DCMAKE_CXX_COMPILER_LAUNCHER=/usr/bin/sccache",
                 "-DGGML_NATIVE=ON",
