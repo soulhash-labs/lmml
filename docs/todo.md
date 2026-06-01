@@ -107,3 +107,29 @@
 - [x] `~/.lmml/` diagnostic dump for issue reporting
 - [ ] Crash recovery: persist and restore scrollback
 - [x] Developer toolchain check for missing `rustfmt`/`clippy` components
+
+---
+
+## Phase 5 — Release Packaging & Distribution (Complete)
+
+- [x] Pre-release baseline commit after `cargo fmt --all -- --check`, `cargo clippy --workspace -- -D warnings`, and `cargo test --workspace`
+- [x] Release binary build via `cargo build --release -p lmml-tui`
+- [x] Dynamic-link audit via `ldd target/release/lmml`
+- [x] Switched HTTP dependencies to rustls TLS to remove OpenSSL/zlib/zstd runtime links
+- [x] Documented remaining Linux runtime links (`libgcc_s`, `libm`, `libc`, loader) in `docs/release-checklist.md`
+- [x] `lmml doctor` subcommand reuses `lmml-detect::SystemProfile::detect()` and exits non-zero only for hard prerequisite failures
+- [x] `lmml smoke` subcommand supports headless clean-install validation
+- [x] `scripts/package-release.sh` builds a versioned tarball from `crates/lmml-tui/Cargo.toml`
+- [x] `scripts/package-release.sh` writes `dist/latest`, `dist/SHA256SUMS`, full target-triple tarballs, and LAN-friendly alias tarballs
+- [x] `scripts/install.sh` detects Linux/macOS x86_64/aarch64 targets, checks hard prerequisites, downloads by `BASE_URL`, verifies SHA256, installs `lmml`, installs `lmml-uninstall`, and runs `lmml doctor`
+- [x] `scripts/uninstall.sh` removes `lmml` and `lmml-uninstall`, then optionally removes config/data directories
+- [x] `Makefile` release helpers added (`release`, `dist-serve`, `doctor`, `clean-release`)
+- [x] `README.md` updated with one-line install, LAN install, doctor, launch, and uninstall paths
+- [x] `tests/integration/clean_install.sh` validates install → doctor → smoke → uninstall with an isolated temporary HOME
+- [x] LAN-style local install simulation passed from `dist/` over `python3 -m http.server`
+
+### Release Packaging Follow-ups
+
+- [ ] Build and publish the remaining cross-target tarballs on matching builders or CI runners: `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`, `aarch64-apple-darwin`
+- [ ] Replace README placeholder release URL (`https://your-lan-or-github/install.sh`) with the real public release URL when hosting is chosen
+- [ ] Run `tests/integration/clean_install.sh` on a clean Ubuntu 24.04 x86_64 VM with CUDA drivers before tagging each release

@@ -415,3 +415,99 @@ The probe is best-effort and never blocks the detection pipeline — if `pkg-con
 ### Test Failure on Struct Field Addition
 
 Adding a new field to `ProbeResult` (e.g., `blas: BlasProbe`) breaks test fixtures that construct it with struct literal syntax. Every `ProbeResult { ... }` in tests must include the new field or use `..Default::default()`. The cmake.rs test helper `minimal_result()` needed explicit `blas: BlasProbe::NotFound`.
+
+---
+
+## 10. Session Learnings (2026-06-01) — Release Packaging
+
+### Package Name vs Binary Name Must Stay Distinct
+
+The release command is `cargo build --release -p lmml-tui`, but the installed executable must be `lmml`. Keep the package and binary names separate:
+
+```toml
+[package]
+name = "lmml-tui"
+
+[[bin]]
+name = "lmml"
+```
+
+This lets workspace commands target the crate unambiguously while preserving the user-facing command name.
+
+### LAN Installer Environment Variables in Pipelines
+
+This shell pattern does not pass `BASE_URL` to the installer process:
+
+```sh
+BASE_URL=http://host:8000 curl -fsSL http://host:8000/install.sh | sh
+```
+
+It only sets `BASE_URL` for `curl`. Use one of these instead:
+
+```sh
+curl -fsSL http://host:8000/install.sh | BASE_URL=http://host:8000 sh
+export BASE_URL=http://host:8000
+curl -fsSL http://host:8000/install.sh | sh
+```
+
+README and release docs should use the first form so copy/paste installs fetch tarballs from the LAN server.
+
+### rustls Removes OpenSSL Runtime Packaging Risk
+
+Default `reqwest` features pulled in OpenSSL, zlib, and zstd on Linux release builds. The release binary then depended on host shared libraries that may not exist on a clean target machine.
+
+Fix:
+
+```toml
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+```
+
+For downloads/searches, add `json` and `stream` features as needed. After switching to rustls, `ldd target/release/lmml` showed only `libgcc_s`, `libm`, `libc`, and the loader on the build host.
+
+### SHA256SUMS Must Support Multiple Tarballs
+
+Release packaging may run once per target triple. `SHA256SUMS` must update the current tarball entry without deleting entries for other targets. Pattern:
+
+1. Remove any existing line for the tarball name.
+2. Append the new checksum line.
+3. Keep both full target-triple names and LAN-friendly alias names when both files exist.
+
+This allows `dist/` to serve both `lmml-0.1.0-x86_64-unknown-linux-gnu.tar.gz` and `lmml-0.1.0-x86_64-linux.tar.gz` with the same checksum.
+
+### Install `lmml-uninstall` with the Binary
+
+The tarball includes `scripts/uninstall.sh`, but users should not need the source checkout after install. The installer copies that script to `$install_dir/lmml-uninstall` next to `$install_dir/lmml`. The uninstaller removes both files.
+
+### Doctor Is Hard-Prereq Gate, Not GPU Gate
+
+`lmml doctor` exits `1` only when hard prerequisites fail: compiler/C++17, cmake, git, or disk space. CUDA/GPU absence is a soft warning because CPU-only mode is valid. This keeps `curl | sh` installs successful on CPU-only machines while still surfacing the acceleration gap clearly.
+
+### Smoke Mode Is for Headless Install Validation
+
+The TUI cannot be launched safely from a non-interactive clean-install script. `lmml smoke` loads/creates state, runs the same detection path, checks hard prerequisites, prints a short success line, and exits without entering alternate-screen terminal mode.
+
+Clean-machine validation flow:
+
+```sh
+install.sh
+lmml doctor
+timeout 5s lmml smoke
+lmml-uninstall
+```
+
+### Validate Installers with Temporary HOME
+
+Installer tests should avoid clobbering the developer's real `~/.local/bin` and config. The clean-install script exports:
+
+```sh
+HOME=$(mktemp -d)
+XDG_CONFIG_HOME=$HOME/.config
+XDG_DATA_HOME=$HOME/.local/share
+PATH=$HOME/.local/bin:$PATH
+```
+
+This proves the default install path and state creation while leaving the real home directory untouched.
+
+### Localhost Integration Tests Need Sandbox Escalation
+
+Workspace tests and LAN install simulation bind local ports for mock HTTP servers and `python3 -m http.server`. In this sandbox, those fail with `Operation not permitted` unless rerun with network permission. Treat a non-escalated bind failure as an environment restriction, then rerun the same command with the appropriate permission instead of changing test code.
