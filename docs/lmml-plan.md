@@ -989,7 +989,7 @@ original crate-build milestones:
 | D — Docs truthfulness + backend claims | Complete | Docs distinguish current v2 from historical root-package rows. Vulkan backend selection/build support is proven in current crate tests; ROCm remains a production gap. |
 | E — Verification gate | Passing on current x86_64 Linux host | Workspace fmt/clippy/tests, release package generation, and HTTP binary/source installer smokes pass. Remaining release risk is clean CUDA VM and cross-target builders. |
 | F — Signed checksum authenticity | Complete for local v0.1.0 | Installer and packaging support minisign-signed `SHA256SUMS`. Real release-keypair verification is deferred until a future public/non-local release. |
-| G — Local v0.1.0 release closure | Next | Rerun final gates after Phase 7, verify binary/source HTTP install from `dist/`, then tag or archive the local-only release. |
+| G — Local v0.1.0 release closure | Verification passed; archive pending | Final gates and both binary/source HTTP install flows passed on Linux x86_64. Tag or archive remains pending. |
 
 ### What changed during release hardening
 

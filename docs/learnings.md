@@ -687,3 +687,33 @@ Release hardening moved from review findings to implemented fixes:
 Key lesson: keep local v0.1.0 claims narrow. The tested claim is local/LAN
 Linux x86_64 install readiness, not broad production readiness across every
 platform, GPU stack, or public distribution threat model.
+
+### Phase 8 Verification Result
+
+The final local v0.1.0 verification pass succeeded on 2026-06-01 for the tested
+Linux x86_64 host:
+
+- `cargo fmt --all -- --check`
+- `cargo clippy --workspace -- -D warnings`
+- `cargo test --workspace` with localhost bind permission
+- script fixture tests for syntax, preflight, and signed checksums
+- `scripts/package-release.sh`
+- `./target/release/lmml doctor`
+- `./target/release/lmml smoke`
+- HTTP binary clean install from `dist/`
+- HTTP source-build clean install from `dist/`
+
+Direct terminal verification of `./target/release/lmml doctor` reports CUDA
+available on the host:
+
+```text
+NVIDIA GeForce GTX 1080 Ti · sm_61
+```
+
+An earlier `nvidia-smi` failure occurred only inside the Codex tool execution
+environment, so it should be treated as sandbox/device visibility rather than a
+host driver, CUDA toolkit, or lmml probe failure.
+
+The release still should not be described as broadly production-ready. Remaining
+non-local work includes cross-target builders, clean CUDA VM validation, real
+public-release signing, and v2 ROCm/HIP production support.

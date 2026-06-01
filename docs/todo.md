@@ -20,7 +20,7 @@ Not current v2 CLI surface: `--model`, `--port`, `--build`, and `--diagnose`.
 Those entries below are historical root-package plan items and should not be
 used in release notes.
 
-Current production-readiness claim for v0.1.0: LAN install works on tested
+Current release-readiness claim for local v0.1.0: LAN install works on tested
 Linux x86_64 host/target with the generated `dist/` artifacts, SHA256 integrity
 checks, hard-prereq doctor gate, installed uninstaller, and clean-install smoke
 test. Broader platform readiness still requires target-specific builder or CI
@@ -238,16 +238,26 @@ trusted LAN hosts. Production/public release flows should require a signed
 
 ---
 
-## Phase 8 — Local v0.1.0 Release Closure (Next)
+## Phase 8 — Local v0.1.0 Release Closure (Verification Passed; Archive Pending)
 
 Goal: finish the local-only v0.1.0 release without broadening the readiness
 claim beyond the tested LAN target.
 
-- [ ] Run the final release gate after Phase 7 changes: `cargo fmt --all -- --check`, `cargo clippy --workspace -- -D warnings`, `cargo test --workspace`, script fixture tests, package, `lmml doctor`, and clean-install smoke
-- [ ] Re-run both documented HTTP install modes from `dist/`: default binary install and explicit `INSTALL_MODE=source`
-- [ ] Confirm `README.md` and `docs/release-checklist.md` still describe local/LAN v0.1.0 honestly, including GPU-primary and CPU-only opt-in semantics
-- [ ] Decide whether local release uses an ad hoc LAN host URL or a fixed internal host; replace placeholder URLs only if a fixed host is chosen
+- [x] Run the final release gate after Phase 7 changes: `cargo fmt --all -- --check`, `cargo clippy --workspace -- -D warnings`, `cargo test --workspace`, script fixture tests, package, `lmml doctor`, and clean-install smoke
+- [x] Re-run both documented HTTP install modes from `dist/`: default binary install and explicit `INSTALL_MODE=source`
+- [x] Confirm `README.md` and `docs/release-checklist.md` still describe local/LAN v0.1.0 honestly, including GPU-primary and CPU-only opt-in semantics
+- [x] Decide whether local release uses an ad hoc LAN host URL or a fixed internal host; replace placeholder URLs only if a fixed host is chosen
 - [ ] Tag or otherwise archive the local v0.1.0 release once verification passes
+
+Decision: local v0.1.0 continues to use ad hoc LAN host URLs. Keep placeholder
+`your-lan-or-github` examples until a fixed internal host is chosen.
+
+Latest local verification: 2026-06-01 on Linux x86_64. `cargo fmt`, clippy,
+workspace tests, script fixtures, package generation, `lmml doctor`,
+`lmml smoke`, default HTTP binary install, and explicit HTTP source install all
+passed. Direct terminal `./target/release/lmml doctor` detects CUDA correctly:
+`NVIDIA GeForce GTX 1080 Ti` with `sm_61`. Any earlier GPU warning was limited
+to the Codex tool sandbox environment, not the host driver/toolkit.
 
 ### Deferred Beyond Local v0.1.0
 
