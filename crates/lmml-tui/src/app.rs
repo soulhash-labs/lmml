@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use lmml_build::{BuildEvent, UpdateCheck};
 use lmml_detect::{BuildBackend, SystemProfile};
+use lmml_models::ModelEntry;
 use lmml_state::AppState as PersistentState;
 
 use crate::action::Action;
@@ -96,7 +97,7 @@ pub enum AppEvent {
     /// Download progress changed.
     DownloadProgress(DownloadProgress),
     /// Model scan completed.
-    ModelScanComplete(Vec<crate::action::ModelEntry>),
+    ModelScanComplete(Vec<ModelEntry>),
     /// Hugging Face search completed.
     HfSearchResults(Vec<crate::action::HfModelResult>),
     /// Update check completed.
@@ -132,6 +133,10 @@ pub struct App {
     pub build_error: Option<String>,
     /// Server tab log lines.
     pub server_log: Vec<String>,
+    /// Models found by the registry scan.
+    pub models: Vec<ModelEntry>,
+    /// Selected model list index.
+    pub selected_model: usize,
     /// Last update-check result.
     pub update_check: Option<UpdateCheck>,
     /// Last UI status message.
@@ -172,6 +177,8 @@ impl App {
             build_binary: None,
             build_error: None,
             server_log: Vec::new(),
+            models: Vec::new(),
+            selected_model: 0,
             update_check: None,
             status_message: "Ready".to_string(),
             terminal_size: None,
@@ -247,7 +254,10 @@ impl App {
                 None
             }
             AppEvent::ModelScanComplete(models) => {
-                self.status_message = format!("{} model(s) found", models.len());
+                let count = models.len();
+                self.models = models;
+                self.selected_model = self.selected_model.min(self.models.len().saturating_sub(1));
+                self.status_message = format!("{count} model(s) found");
                 None
             }
             AppEvent::HfSearchResults(results) => {
@@ -298,6 +308,9 @@ impl App {
             Action::SelectModel(path) => {
                 self.state.model.last_used = path;
                 self.status_message = "Model selected".to_string();
+            }
+            Action::ScanModels => {
+                self.status_message = "Scanning models".to_string();
             }
             Action::OpenHfSearch => {
                 self.status_message = "HF search opened".to_string();
@@ -357,6 +370,18 @@ impl App {
                 self.active_tab = Tab::Models;
                 None
             }
+            KeyCode::Up if self.active_tab == Tab::Models => {
+                self.select_previous_model();
+                None
+            }
+            KeyCode::Down if self.active_tab == Tab::Models => {
+                self.select_next_model();
+                None
+            }
+            KeyCode::Enter if self.active_tab == Tab::Models => self
+                .models
+                .get(self.selected_model)
+                .map(|model| Action::SelectModel(model.path.clone())),
             KeyCode::Char('4') => {
                 self.active_tab = Tab::Server;
                 None
@@ -391,6 +416,7 @@ impl App {
             },
             KeyCode::Char('/') => Some(Action::OpenHfSearch),
             KeyCode::Char('a') => Some(Action::AddModelAlias),
+            KeyCode::Char('r') if self.active_tab == Tab::Models => Some(Action::ScanModels),
             _ => None,
         }
     }
@@ -474,6 +500,16 @@ impl App {
             current - 1
         };
         self.active_tab = Tab::ALL[previous];
+    }
+
+    fn select_next_model(&mut self) {
+        if !self.models.is_empty() {
+            self.selected_model = (self.selected_model + 1).min(self.models.len() - 1);
+        }
+    }
+
+    fn select_previous_model(&mut self) {
+        self.selected_model = self.selected_model.saturating_sub(1);
     }
 }
 
@@ -606,5 +642,32 @@ mod tests {
             None
         );
         assert!(!app.first_run_onboarding);
+    }
+
+    #[test]
+    fn model_scan_and_selection_update_state() {
+        let mut app = App::default();
+        app.handle_event(AppEvent::ModelScanComplete(vec![
+            model_entry("a.gguf"),
+            model_entry("b.gguf"),
+        ]));
+        assert_eq!(app.models.len(), 2);
+        app.active_tab = Tab::Models;
+        app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Down)));
+        assert_eq!(app.selected_model, 1);
+        let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+        assert_eq!(action, Some(Action::SelectModel(PathBuf::from("b.gguf"))));
+    }
+
+    fn model_entry(path: &str) -> ModelEntry {
+        ModelEntry {
+            path: PathBuf::from(path),
+            name: path.to_string(),
+            size_bytes: 1024,
+            quant: "Q4_K_M".to_string(),
+            context_length: Some(4096),
+            architecture: Some("llama".to_string()),
+            aliased: false,
+        }
     }
 }

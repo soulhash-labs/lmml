@@ -989,6 +989,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lmml-models"
+version = "0.1.0"
+dependencies = [
+ "lmml-detect",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "lmml-state"
 version = "0.1.0"
 dependencies = [
@@ -1005,6 +1015,7 @@ dependencies = [
  "crossterm",
  "lmml-build",
  "lmml-detect",
+ "lmml-models",
  "lmml-state",
  "ratatui",
  "thiserror",

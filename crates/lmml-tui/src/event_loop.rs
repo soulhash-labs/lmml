@@ -108,6 +108,18 @@ impl EventLoop {
                     let _ignored = tx.send(AppEvent::UpdateCheckResult(update)).await;
                 });
             }
+            Action::ScanModels => {
+                app.dispatch(Action::ScanModels);
+                let tx = self.app_tx.clone();
+                let registry = lmml_models::ModelRegistry {
+                    models_dir: app.state.model.models_dir.clone(),
+                    aliases: app.state.model.aliases.clone(),
+                };
+                tokio::spawn(async move {
+                    let models = registry.scan().await;
+                    let _ignored = tx.send(AppEvent::ModelScanComplete(models)).await;
+                });
+            }
             Action::StartBuild | Action::CleanBuild | Action::UpdateAndRebuild => {
                 let clean = matches!(action, Action::CleanBuild);
                 app.dispatch(action);

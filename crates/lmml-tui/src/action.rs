@@ -19,6 +19,8 @@ pub enum Action {
     StopServer,
     /// Select a local model path.
     SelectModel(PathBuf),
+    /// Scan local model directories.
+    ScanModels,
     /// Open the Hugging Face search pane.
     OpenHfSearch,
     /// Search Hugging Face.
@@ -26,7 +28,7 @@ pub enum Action {
     /// Download a Hugging Face result.
     DownloadModel(HfModelResult),
     /// Delete a local model.
-    DeleteModel(ModelEntry),
+    DeleteModel(lmml_models::ModelEntry),
     /// Add an external model alias.
     AddModelAlias,
     /// Check llama.cpp for updates.
@@ -57,13 +59,4 @@ pub struct HfModelResult {
     pub filename: String,
     /// Download URL.
     pub url: String,
-}
-
-/// Minimal model record placeholder until `lmml-models` owns the type.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModelEntry {
-    /// Model path.
-    pub path: PathBuf,
-    /// Display name.
-    pub name: String,
 }

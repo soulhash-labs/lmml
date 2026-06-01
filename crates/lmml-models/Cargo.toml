@@ -1,0 +1,13 @@
+[package]
+name = "lmml-models"
+version = "0.1.0"
+edition = "2021"
+description = "GGUF model registry and metadata management for lmml"
+
+[dependencies]
+lmml-detect = { path = "../lmml-detect" }
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "rt"] }
+
+[dev-dependencies]
+tempfile = "3"

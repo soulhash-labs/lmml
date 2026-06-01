@@ -19,6 +19,7 @@ pub fn render(area: Rect, frame: &mut Frame) {
         Line::from("B          clean build"),
         Line::from("u          check for update"),
         Line::from("s          start server / save settings"),
+        Line::from("r          scan models"),
         Line::from("/          open HF search"),
         Line::from("a          add model alias"),
         Line::from("?          close help"),
