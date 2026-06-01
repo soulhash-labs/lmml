@@ -25,6 +25,7 @@ pub struct EventLoop {
     app_rx: mpsc::Receiver<AppEvent>,
     server_handle: Option<ServerHandle>,
     build_cancel: Option<watch::Sender<bool>>,
+    startup_actions_dispatched: bool,
 }
 
 impl EventLoop {
@@ -36,6 +37,7 @@ impl EventLoop {
             app_rx,
             server_handle: None,
             build_cancel: None,
+            startup_actions_dispatched: false,
         }
     }
 
@@ -61,9 +63,20 @@ impl EventLoop {
     /// Process one terminal/background event tick.
     #[tracing::instrument(skip(self, app), level = "trace")]
     pub async fn tick(&mut self, app: &mut App) -> Result<(), EventLoopError> {
+        self.dispatch_startup_actions(app).await;
         self.poll_terminal()?;
         self.drain_events(app).await;
         Ok(())
+    }
+
+    async fn dispatch_startup_actions(&mut self, app: &mut App) {
+        if self.startup_actions_dispatched {
+            return;
+        }
+        self.startup_actions_dispatched = true;
+        for action in startup_actions(app) {
+            self.dispatch_action(app, action).await;
+        }
     }
 
     fn poll_terminal(&self) -> Result<(), EventLoopError> {
@@ -138,6 +151,9 @@ impl EventLoop {
         tracing::debug!(action = ?action, "dispatching action");
         match action {
             Action::RunDetect => {
+                if app.detect_running {
+                    return;
+                }
                 app.dispatch(Action::RunDetect);
                 let tx = self.app_tx.clone();
                 tokio::spawn(async move {
@@ -163,6 +179,9 @@ impl EventLoop {
                 });
             }
             Action::ScanModels => {
+                if app.model_scan_running {
+                    return;
+                }
                 app.dispatch(Action::ScanModels);
                 let tx = self.app_tx.clone();
                 let registry = lmml_models::ModelRegistry {
@@ -415,6 +434,17 @@ impl Default for EventLoop {
     }
 }
 
+fn startup_actions(app: &App) -> Vec<Action> {
+    let mut actions = Vec::new();
+    if !app.detect_running && app.detect_profile.is_none() {
+        actions.push(Action::RunDetect);
+    }
+    if !app.model_scan_running && app.models.is_empty() {
+        actions.push(Action::ScanModels);
+    }
+    actions
+}
+
 async fn current_fingerprint(
     config: &lmml_build::BuildConfig,
 ) -> Result<lmml_build::BuildFingerprint, lmml_build::BuildError> {
@@ -547,6 +577,41 @@ mod tests {
     use lmml_detect::BuildBackend;
 
     use super::*;
+
+    #[test]
+    fn startup_actions_schedule_detect_and_model_scan_once() {
+        let mut app = App::default();
+        assert_eq!(
+            startup_actions(&app),
+            vec![Action::RunDetect, Action::ScanModels]
+        );
+
+        app.detect_running = true;
+        assert_eq!(startup_actions(&app), vec![Action::ScanModels]);
+
+        app.detect_running = false;
+        app.model_scan_running = true;
+        assert_eq!(startup_actions(&app), vec![Action::RunDetect]);
+    }
+
+    #[tokio::test]
+    async fn startup_dispatch_sets_in_flight_flags_and_is_one_shot() {
+        let mut app = App::default();
+        let mut event_loop = EventLoop::new();
+
+        event_loop.dispatch_startup_actions(&mut app).await;
+
+        assert!(app.detect_running);
+        assert!(app.model_scan_running);
+        assert_eq!(app.status_message, "Scanning models");
+
+        app.detect_running = false;
+        app.model_scan_running = false;
+        event_loop.dispatch_startup_actions(&mut app).await;
+
+        assert!(!app.detect_running);
+        assert!(!app.model_scan_running);
+    }
 
     #[test]
     fn persisted_fingerprint_skips_when_unchanged_and_rebuilds_on_flag_change() {

@@ -36,14 +36,21 @@ fn onboarding_lines(app: &App) -> Vec<Line<'static>> {
             .add_modifier(Modifier::BOLD),
     ));
     match app.onboarding_step {
-        OnboardingStep::Scan => vec![
-            title,
-            Line::from(""),
-            Line::from("Step 1 of 7: scan this system."),
-            Line::from(""),
-            Line::from("Press Enter or d to scan prerequisites."),
-            Line::from("Press Esc to leave onboarding."),
-        ],
+        OnboardingStep::Scan => {
+            let prompt = if app.detect_running {
+                "Scanning prerequisites..."
+            } else {
+                "Press Enter or d to scan prerequisites."
+            };
+            vec![
+                title,
+                Line::from(""),
+                Line::from("Step 1 of 7: scan this system."),
+                Line::from(""),
+                Line::from(prompt),
+                Line::from("Press Esc to leave onboarding."),
+            ]
+        }
         OnboardingStep::HardwareSummary => {
             let backend = app
                 .detect_profile

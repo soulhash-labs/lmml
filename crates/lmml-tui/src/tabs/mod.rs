@@ -414,6 +414,9 @@ mod tests {
         app.first_run_onboarding = true;
         app.onboarding_step = crate::app::OnboardingStep::Scan;
         insta::assert_snapshot!("first_run_onboarding_scan", render_app(&app));
+        app.detect_running = true;
+        insta::assert_snapshot!("first_run_onboarding_scan_running", render_app(&app));
+        app.detect_running = false;
         app.onboarding_step = crate::app::OnboardingStep::HardwareSummary;
         app.detect_profile = Some(healthy_profile());
         insta::assert_snapshot!("first_run_onboarding_hardware", render_app(&app));

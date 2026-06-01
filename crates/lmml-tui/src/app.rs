@@ -193,6 +193,8 @@ pub struct App {
     pub onboarding_error: Option<String>,
     /// Full detection profile for the current session.
     pub detect_profile: Option<SystemProfile>,
+    /// Whether hardware detection is currently running.
+    pub detect_running: bool,
     /// Current server status.
     pub server_status: ServerStatus,
     /// Last probed llama-server capabilities.
@@ -213,6 +215,8 @@ pub struct App {
     pub server_log: Vec<String>,
     /// Models found by the registry scan.
     pub models: Vec<ModelEntry>,
+    /// Whether a model directory scan is currently running.
+    pub model_scan_running: bool,
     /// Selected model list index.
     pub selected_model: usize,
     /// Whether HF search pane is open.
@@ -277,6 +281,7 @@ impl App {
             onboarding_port_buffer,
             onboarding_error: None,
             detect_profile: None,
+            detect_running: false,
             server_status: ServerStatus::Stopped,
             server_caps: None,
             server_caps_error: None,
@@ -287,6 +292,7 @@ impl App {
             build_error: None,
             server_log: Vec::new(),
             models: Vec::new(),
+            model_scan_running: false,
             selected_model: 0,
             hf_search_open: false,
             hf_query: "gguf".to_string(),
@@ -314,6 +320,7 @@ impl App {
                 None
             }
             AppEvent::DetectComplete(profile) => {
+                self.detect_running = false;
                 let profile = *profile;
                 self.state.system_profile = Some(lmml_state::SystemProfile {
                     cuda_toolkit: match &profile.cuda {
@@ -457,6 +464,7 @@ impl App {
                 None
             }
             AppEvent::ModelScanComplete(models) => {
+                self.model_scan_running = false;
                 let count = models.len();
                 self.models = models;
                 self.selected_model = self.selected_model.min(self.models.len().saturating_sub(1));
@@ -487,6 +495,7 @@ impl App {
     pub fn dispatch(&mut self, action: Action) {
         match action {
             Action::RunDetect => {
+                self.detect_running = true;
                 self.detect_log
                     .push("Starting system detection".to_string());
                 self.status_message = "Detecting system".to_string();
@@ -528,6 +537,7 @@ impl App {
                 self.save_state_after("Model selected");
             }
             Action::ScanModels => {
+                self.model_scan_running = true;
                 self.status_message = "Scanning models".to_string();
             }
             Action::OpenHfSearch => {
@@ -1468,6 +1478,25 @@ mod tests {
         app.state.build.backend = "CpuFallback".to_string();
         let config = app.build_config(false);
         assert_eq!(config.backend, BuildBackend::CpuFallback);
+    }
+
+    #[test]
+    fn startup_completion_clears_detect_and_scan_in_flight_state() {
+        let mut app = App::default();
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        app.state_save_path = Some(tempdir.path().join("state.toml"));
+        app.detect_running = true;
+        app.model_scan_running = true;
+
+        app.handle_event(AppEvent::DetectComplete(Box::new(cuda_profile())));
+        assert!(!app.detect_running);
+        assert!(app.detect_profile.is_some());
+
+        app.handle_event(AppEvent::ModelScanComplete(vec![model_entry(
+            "startup.gguf",
+        )]));
+        assert!(!app.model_scan_running);
+        assert_eq!(app.models.len(), 1);
     }
 
     #[test]
