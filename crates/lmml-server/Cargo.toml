@@ -8,7 +8,7 @@ description = "llama-server lifecycle management for lmml"
 libc = "0.2"
 lmml-compat = { path = "../lmml-compat" }
 lmml-models = { path = "../lmml-models" }
-reqwest = "0.12"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt", "sync", "time"] }
 tracing = "0.1"
