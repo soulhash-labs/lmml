@@ -1,0 +1,46 @@
+[package]
+name = "lmml"
+version = "0.1.0"
+edition = "2021"
+description = "Turnkey TUI for managing llama.cpp locally — auto-detect, build, serve, manage models"
+
+[workspace]
+members = [
+    ".",
+    "crates/lmml-detect",
+]
+resolver = "2"
+
+[dependencies]
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Async runtime
+tokio = { version = "1", features = ["full", "process"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# HTTP / downloads
+reqwest = { version = "0.12", features = ["stream"] }
+
+# Error handling
+color-eyre = "0.6"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# System info
+sysinfo = "0.33"
+
+# Async stream utilities
+futures-util = "0.3"
+
+# Utilities
+chrono = "0.4"
+
+# Unix signals (SIGTERM for graceful shutdown)
+libc = "0.2"
