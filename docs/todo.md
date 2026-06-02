@@ -192,7 +192,7 @@ release claims.
 
 - [ ] Build and publish the remaining cross-target tarballs on matching builders or CI runners: `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`, `aarch64-apple-darwin`
 - [ ] Replace README placeholder release URL (`https://your-lan-or-github/install.sh`) with the real public release URL when hosting is chosen
-- [ ] Run `tests/integration/clean_install.sh` on this Ubuntu 24.04 x86_64 CUDA machine before tagging each release
+- [ ] Run `tests/integration/clean_install.sh` on validated Ubuntu 24.04 and 26.04 x86_64 CUDA machines before tagging each broadened Debian-family release
 - [x] Add signed `SHA256SUMS` verification support before claiming checksum authenticity against tampering
 
 ---
@@ -252,7 +252,7 @@ claim beyond the tested LAN target.
 Decision: local v0.1.0 continues to use ad hoc LAN host URLs. Keep placeholder
 `your-lan-or-github` examples until a fixed internal host is chosen.
 
-Latest local verification: 2026-06-01 on Linux x86_64. `cargo fmt`, clippy,
+Latest local verification: 2026-06-02 on Ubuntu 26.04 Linux x86_64. `cargo fmt`, clippy,
 workspace tests, script fixtures, package generation, `lmml doctor`,
 `lmml smoke`, default HTTP binary install, and explicit HTTP source install all
 passed. Direct terminal `./target/release/lmml doctor` detects CUDA correctly:
@@ -262,7 +262,7 @@ to the Codex tool sandbox environment, not the host driver/toolkit.
 ### Deferred Beyond Local v0.1.0
 
 - [ ] Build and validate non-x86_64 target tarballs on matching builders or CI
-- [ ] Run CUDA validation on this Ubuntu 24.04 x86_64 machine before making broader GPU claims
+- [ ] Run CUDA validation on Ubuntu 24.04 and 26.04 x86_64 machines before making broader Debian-family GPU claims
 - [ ] Require real signed-checksum verification for any public/non-local release
 - [ ] Implement v2 ROCm/HIP production support before claiming AMD GPU production readiness
 
@@ -292,9 +292,9 @@ targets. macOS validation is deferred to a later phase.
 - [ ] Record per-target validation date, host/runner, target triple, and runtime
   dependency notes in `docs/release-checklist.md`
 
-### 9B — This-Machine Ubuntu 24.04 CUDA Validation
+### 9B — This-Machine Ubuntu 26.04 CUDA Validation
 
-- [x] Use this Ubuntu 24.04 x86_64 machine as the CUDA validation target; do not
+- [x] Use this Ubuntu 26.04 x86_64 machine as the CUDA validation target; do not
   require a separate VM for local v0.1.0 validation
 - [x] Confirm this machine has NVIDIA driver, CUDA toolkit, compiler, CMake, Git,
   curl/wget, Rust toolchain, sccache, and at least 4 GB free disk
@@ -329,6 +329,7 @@ Install validation evidence:
 - Did not set `LMML_GPU_MODE=cpu-only`
 - Both installs reported `CUDA available · NVIDIA GeForce GTX 1080 Ti · sm_61`
 - Both installs ran `lmml smoke` and uninstalled cleanly
+- Latest rerun: 2026-06-02 on Ubuntu 26.04 x86_64
 
 ### 9C — Live llama.cpp CUDA Build and Server Validation
 
@@ -362,6 +363,7 @@ system_info: CUDA : ARCHS = 610
 - [x] This-machine Ubuntu CUDA validation proves GPU-required install flow on
   the actual local release target
 - [x] This-machine live llama.cpp CUDA build and server startup are validated
+- [ ] Ubuntu 24.04 x86_64 CUDA install validation passes on a second machine
 - [ ] README release scope is broadened only to the targets actually validated
 
 ---

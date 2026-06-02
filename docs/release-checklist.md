@@ -1,6 +1,6 @@
 # lmml Release Checklist
 
-Before tagging the local release, this checklist must pass on this Ubuntu 24.04
+Before tagging the local release, this checklist must pass on the validated Ubuntu
 x86_64 CUDA machine.
 
 Passing this checklist supports a narrow local v0.1.0 claim: LAN install works
@@ -162,8 +162,10 @@ macOS targets are deferred to a later phase and should not block Ubuntu
 ## This-Machine CUDA Validation
 
 Before making broader GPU readiness claims for the local release target,
-validate on this Ubuntu 24.04 x86_64 machine with NVIDIA driver and CUDA toolkit
-installed. A separate VM is not required for local v0.1.0 validation.
+validate on this Ubuntu 26.04 x86_64 machine with NVIDIA driver and CUDA toolkit
+installed. Ubuntu 24.04 x86_64 CUDA validation should run on a second matching
+machine before broadening Debian-family GPU claims. A separate VM is not required
+for local v0.1.0 validation.
 
 Host prechecks:
 
@@ -207,8 +209,8 @@ Both install modes must pass without `LMML_GPU_MODE=cpu-only`, and
 
 Latest this-machine CUDA validation:
 
-- Date: 2026-06-01
-- Machine: Ubuntu 24.04 x86_64 local release target
+- Date: 2026-06-02
+- Machine: Ubuntu 26.04 x86_64 local release target
 - GPU: NVIDIA GeForce GTX 1080 Ti
 - Driver: 580.159.03
 - CUDA toolkit: 12.4, V12.4.131
@@ -218,6 +220,7 @@ Latest this-machine CUDA validation:
 - Source install: `BASE_URL=http://127.0.0.1:8127 INSTALL_MODE=source tests/integration/clean_install.sh`
 - GPU mode: default required mode; `LMML_GPU_MODE=cpu-only` was not set
 - Result: both install modes reported `CUDA available · NVIDIA GeForce GTX 1080 Ti · sm_61`, `lmml smoke` passed, and uninstall completed cleanly
+- Installer recheck: generated `dist/`, served it on `127.0.0.1:8127`, and reran both default binary and explicit source HTTP installer smokes successfully
 
 ## Live llama.cpp CUDA Build and Server Validation
 
