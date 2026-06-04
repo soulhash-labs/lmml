@@ -207,6 +207,10 @@ pub struct ModelState {
     pub models_dir: PathBuf,
     /// External model paths or directories.
     pub aliases: Vec<PathBuf>,
+    /// Per-model server profiles that override global server settings.
+    pub profiles: Vec<ModelRuntimeProfile>,
+    /// Active model runtime profile name.
+    pub active_profile: String,
 }
 
 impl Default for ModelState {
@@ -220,6 +224,198 @@ impl Default for ModelState {
             last_used: PathBuf::new(),
             models_dir: data_dir.join("models"),
             aliases: Vec::new(),
+            profiles: Vec::new(),
+            active_profile: String::new(),
+        }
+    }
+}
+
+impl ModelState {
+    /// Return the configured runtime profile for a model path.
+    pub fn runtime_profile_for_path(&self, path: &Path) -> Option<&ModelRuntimeProfile> {
+        let mut matching = self.runtime_profiles_for_path(path);
+        if matching.is_empty() {
+            return None;
+        }
+        matching
+            .iter()
+            .copied()
+            .find(|profile| profile.name == self.active_profile)
+            .or_else(|| matching.drain(..).next())
+    }
+
+    /// Return all configured runtime profiles for a model path.
+    pub fn runtime_profiles_for_path(&self, path: &Path) -> Vec<&ModelRuntimeProfile> {
+        self.profiles
+            .iter()
+            .filter(|profile| profile.matches_model_path(path))
+            .collect()
+    }
+
+    /// Cycle to the next runtime profile that matches a model path.
+    pub fn cycle_runtime_profile_for_path(&mut self, path: &Path) -> Option<&ModelRuntimeProfile> {
+        let matching_names: Vec<String> = self
+            .profiles
+            .iter()
+            .filter(|profile| profile.matches_model_path(path))
+            .map(|profile| profile.name.clone())
+            .collect();
+        if matching_names.is_empty() {
+            return None;
+        }
+
+        let next_index = matching_names
+            .iter()
+            .position(|name| name == &self.active_profile)
+            .map(|index| (index + 1) % matching_names.len())
+            .unwrap_or(0);
+        self.active_profile = matching_names[next_index].clone();
+        self.runtime_profile_for_path(path)
+    }
+
+    /// Add built-in model profiles that are missing from persisted state.
+    pub fn ensure_builtin_profiles(&mut self) {
+        let data_dir = default_data_dir_from_env(
+            env::var_os("XDG_DATA_HOME"),
+            env::var_os("HOME"),
+            env::var_os("USERPROFILE"),
+        );
+        let slot_save_path = data_dir.join("llama-slots").to_string_lossy().into_owned();
+        let builtins = builtin_model_profiles(slot_save_path);
+
+        for builtin in builtins {
+            let exists = self
+                .profiles
+                .iter()
+                .any(|profile| profile.name == builtin.name && profile.model == builtin.model);
+            if !exists {
+                self.profiles.push(builtin);
+            }
+        }
+
+        if self.active_profile.is_empty() {
+            self.active_profile = "orion-qwen-q8-deep".to_string();
+        }
+    }
+}
+
+fn builtin_model_profiles(slot_save_path: String) -> Vec<ModelRuntimeProfile> {
+    vec![
+        ModelRuntimeProfile {
+            name: "orion-qwen-q8-deep".to_string(),
+            model: PathBuf::from("Qwen3.5-4B-Q8_0.gguf"),
+            server: qwen_server_config(262_144, 1, 128, 4_096, &slot_save_path),
+        },
+        ModelRuntimeProfile {
+            name: "orion-qwen-q8-balanced".to_string(),
+            model: PathBuf::from("Qwen3.5-4B-Q8_0.gguf"),
+            server: qwen_server_config(262_144, 2, 128, 4_096, &slot_save_path),
+        },
+        ModelRuntimeProfile {
+            name: "5070ti-qwen4b-fanout4".to_string(),
+            model: PathBuf::from("Qwen3.5-4B-Q8_0.gguf"),
+            server: qwen_server_config(131_072, 4, 128, 2_048, &slot_save_path),
+        },
+        ModelRuntimeProfile {
+            name: "5070ti-qwen4b-dual".to_string(),
+            model: PathBuf::from("Qwen3.5-4B-Q8_0.gguf"),
+            server: qwen_server_config(262_144, 2, 128, 2_048, &slot_save_path),
+        },
+        ModelRuntimeProfile {
+            name: "m6000-qwen9b-deep".to_string(),
+            model: PathBuf::from("Qwen3.5-9B-Q8_0.gguf"),
+            server: qwen_server_config(262_144, 1, 128, 4_096, &slot_save_path),
+        },
+        ModelRuntimeProfile {
+            name: "m6000-qwen9b-fanout4".to_string(),
+            model: PathBuf::from("Qwen3.5-9B-Q8_0.gguf"),
+            server: qwen_server_config(262_144, 4, 128, 4_096, &slot_save_path),
+        },
+        ModelRuntimeProfile {
+            name: "m6000-qwen9b-fanout6".to_string(),
+            model: PathBuf::from("Qwen3.5-9B-Q8_0.gguf"),
+            server: qwen_server_config(262_144, 6, 96, 8_192, &slot_save_path),
+        },
+        ModelRuntimeProfile {
+            name: "5070ti-qwen9b-deep".to_string(),
+            model: PathBuf::from("Qwen3.5-9B-Q8_0.gguf"),
+            server: qwen_server_config(196_608, 1, 128, 4_096, &slot_save_path),
+        },
+        ModelRuntimeProfile {
+            name: "5070ti-qwen9b-balanced2".to_string(),
+            model: PathBuf::from("Qwen3.5-9B-Q8_0.gguf"),
+            server: qwen_server_config(131_072, 2, 128, 4_096, &slot_save_path),
+        },
+    ]
+}
+
+fn qwen_server_config(
+    ctx_size: u32,
+    parallel: usize,
+    ubatch_size: u32,
+    cache_ram_mb: u32,
+    slot_save_path: &str,
+) -> ServerConfig {
+    ServerConfig {
+        port: 1200,
+        host: "127.0.0.1".to_string(),
+        ctx_size,
+        n_gpu_layers: -1,
+        batch_size: 512,
+        ubatch_size,
+        threads: 8,
+        flash_attn: true,
+        mlock: false,
+        api_key: String::new(),
+        jinja: true,
+        chat_template: String::new(),
+        extra_args: vec![
+            "--parallel".to_string(),
+            parallel.to_string(),
+            "--slot-save-path".to_string(),
+            slot_save_path.to_string(),
+            "-ctk".to_string(),
+            "q8_0".to_string(),
+            "-ctv".to_string(),
+            "q8_0".to_string(),
+            "--cache-ram".to_string(),
+            cache_ram_mb.to_string(),
+        ],
+    }
+}
+
+/// Server settings that should apply when a matching model is selected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModelRuntimeProfile {
+    /// Human-readable profile name.
+    pub name: String,
+    /// Exact GGUF path or file name this profile applies to.
+    pub model: PathBuf,
+    /// Server settings to apply for this model.
+    pub server: ServerConfig,
+}
+
+impl ModelRuntimeProfile {
+    /// Return whether this profile applies to a selected model path.
+    pub fn matches_model_path(&self, path: &Path) -> bool {
+        if self.model == path {
+            return true;
+        }
+
+        let Some(profile_name) = self.model.file_name() else {
+            return false;
+        };
+        path.file_name() == Some(profile_name)
+    }
+}
+
+impl Default for ModelRuntimeProfile {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            model: PathBuf::new(),
+            server: ServerConfig::default(),
         }
     }
 }
@@ -707,6 +903,141 @@ mod tests {
         assert_eq!(state.runtime.opencode_fast.parallel, 2);
         assert_eq!(state.runtime.opencode.gpu_layers, -1);
         assert_eq!(state.runtime.state.opencode.status, RuntimeStatus::Stopped);
+        assert!(state.model.profiles.is_empty());
+        assert!(state.model.active_profile.is_empty());
+    }
+
+    #[test]
+    fn model_runtime_profiles_match_exact_path_or_file_name() {
+        let profile = ModelRuntimeProfile {
+            name: "nemotron-native".to_string(),
+            model: PathBuf::from("Nemotron3-Nano-4B-Q8_K_P.gguf"),
+            server: ServerConfig {
+                chat_template: String::new(),
+                jinja: true,
+                ..ServerConfig::default()
+            },
+        };
+        let model_state = ModelState {
+            profiles: vec![profile],
+            ..ModelState::default()
+        };
+
+        assert_eq!(
+            model_state
+                .runtime_profile_for_path(Path::new(
+                    "/home/angelo/.local/share/lmml/models/Nemotron3-Nano-4B-Q8_K_P.gguf"
+                ))
+                .map(|profile| profile.name.as_str()),
+            Some("nemotron-native")
+        );
+        assert!(model_state
+            .runtime_profile_for_path(Path::new("/models/Qwen3.5-4B-Q6_K.gguf"))
+            .is_none());
+    }
+
+    #[test]
+    fn builtin_qwen_profiles_are_added_without_overwriting_custom_profiles() {
+        let mut model_state = ModelState {
+            profiles: vec![ModelRuntimeProfile {
+                name: "custom".to_string(),
+                model: PathBuf::from("custom.gguf"),
+                server: ServerConfig::default(),
+            }],
+            ..ModelState::default()
+        };
+
+        model_state.ensure_builtin_profiles();
+        model_state.ensure_builtin_profiles();
+
+        let qwen_profiles =
+            model_state.runtime_profiles_for_path(Path::new("/models/Qwen3.5-4B-Q8_0.gguf"));
+        assert_eq!(qwen_profiles.len(), 4);
+        assert_eq!(model_state.active_profile, "orion-qwen-q8-deep");
+        assert_eq!(model_state.profiles.len(), 10);
+    }
+
+    #[test]
+    fn qwen_profiles_cycle_through_matching_4b_profiles() {
+        let mut model_state = ModelState::default();
+        let model = Path::new("/models/Qwen3.5-4B-Q8_0.gguf");
+        model_state.ensure_builtin_profiles();
+
+        assert_eq!(
+            model_state
+                .runtime_profile_for_path(model)
+                .map(|profile| profile.name.as_str()),
+            Some("orion-qwen-q8-deep")
+        );
+        assert_eq!(
+            model_state
+                .cycle_runtime_profile_for_path(model)
+                .map(|profile| profile.name.as_str()),
+            Some("orion-qwen-q8-balanced")
+        );
+        let extra_args = &model_state
+            .runtime_profile_for_path(model)
+            .expect("balanced profile")
+            .server
+            .extra_args;
+        assert_eq!(extra_args[0], "--parallel");
+        assert_eq!(extra_args[1], "2");
+        assert_eq!(extra_args[2], "--slot-save-path");
+        assert!(extra_args[3].ends_with("lmml/llama-slots"));
+        assert_eq!(
+            &extra_args[4..],
+            ["-ctk", "q8_0", "-ctv", "q8_0", "--cache-ram", "4096"]
+        );
+        assert_eq!(
+            model_state
+                .cycle_runtime_profile_for_path(model)
+                .map(|profile| profile.name.as_str()),
+            Some("5070ti-qwen4b-fanout4")
+        );
+        assert_eq!(
+            model_state
+                .cycle_runtime_profile_for_path(model)
+                .map(|profile| profile.name.as_str()),
+            Some("5070ti-qwen4b-dual")
+        );
+        assert_eq!(
+            model_state
+                .cycle_runtime_profile_for_path(model)
+                .map(|profile| profile.name.as_str()),
+            Some("orion-qwen-q8-deep")
+        );
+    }
+
+    #[test]
+    fn qwen9b_fleet_profiles_are_available() {
+        let mut model_state = ModelState::default();
+        let model = Path::new("/models/Qwen3.5-9B-Q8_0.gguf");
+        model_state.ensure_builtin_profiles();
+
+        let profiles = model_state.runtime_profiles_for_path(model);
+        let names: Vec<&str> = profiles
+            .iter()
+            .map(|profile| profile.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "m6000-qwen9b-deep",
+                "m6000-qwen9b-fanout4",
+                "m6000-qwen9b-fanout6",
+                "5070ti-qwen9b-deep",
+                "5070ti-qwen9b-balanced2"
+            ]
+        );
+        assert_eq!(profiles[1].server.ctx_size, 262_144);
+        assert_eq!(&profiles[1].server.extra_args[0..2], ["--parallel", "4"]);
+        assert_eq!(profiles[2].server.ubatch_size, 96);
+        assert_eq!(
+            &profiles[2].server.extra_args[8..10],
+            ["--cache-ram", "8192"]
+        );
+        assert_eq!(profiles[3].server.ctx_size, 196_608);
+        assert_eq!(&profiles[4].server.extra_args[0..2], ["--parallel", "2"]);
     }
 
     #[test]
@@ -842,6 +1173,15 @@ mod tests {
                 last_used: PathBuf::from("/models/mistral.gguf"),
                 models_dir: PathBuf::from("/models"),
                 aliases: vec![PathBuf::from("/external")],
+                profiles: vec![ModelRuntimeProfile {
+                    name: "mistral".to_string(),
+                    model: PathBuf::from("/models/mistral.gguf"),
+                    server: ServerConfig {
+                        port: 8081,
+                        ..ServerConfig::default()
+                    },
+                }],
+                active_profile: "mistral".to_string(),
             },
             server: ServerConfig {
                 port: 8081,

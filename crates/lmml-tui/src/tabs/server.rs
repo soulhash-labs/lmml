@@ -16,9 +16,20 @@ pub fn render(area: Rect, app: &App, frame: &mut Frame) {
         .selected_server_model()
         .map(|model| model.path.display().to_string())
         .unwrap_or_else(|| "No model selected".to_string());
+    let profile = app
+        .selected_server_model()
+        .and_then(|model| {
+            app.state
+                .model
+                .runtime_profile_for_path(&model.path)
+                .map(|profile| profile.name.clone())
+        })
+        .unwrap_or_else(|| "custom/global".to_string());
     let left = vec![
         Line::from(action),
+        Line::from("Press p to switch runtime profile."),
         Line::from(format!("Status: {:?}", app.server_status)),
+        Line::from(format!("Profile: {profile}")),
         Line::from(format!("Model: {model}")),
         Line::from(format!("Binary: {}", app.state.build.binary.display())),
         Line::from(format!("Host: {}", app.state.server.host)),

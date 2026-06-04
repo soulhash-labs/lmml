@@ -204,6 +204,47 @@ lmml smoke
 lmml-uninstall
 ```
 
+Optional hardware/profile hint smoke for Quadro M6000 24GB + Qwen3.5 9B Q8:
+
+```sh
+curl -fsSL http://<release-host>:8000/install.sh | BASE_URL=http://<release-host>:8000 LMML_PROFILE_HINT=quadro-m6000-qwen35-9b-q8 sh
+```
+
+The installer should print:
+
+```text
+llama-server ctx_size:              262144 tokens
+OpenCode compaction.reserved:       49152 tokens for 4-slot fanout
+per-slot context at parallel 4:     65536 tokens
+recommended subagent soft cap:      32768 tokens
+recommended extra_args:             ["--parallel", "4", "--slot-save-path", "/home/angelo/.local/share/lmml/llama-slots"]
+Qwen thinking sampling:             temperature=0.6 top_p=0.95 top_k=20 min_p=0
+Qwen non-thinking sampling:         temperature=0.7 top_p=0.8 top_k=20 min_p=0
+minimum context for thinking:       128000 tokens
+vision/video support:               requires matching mmproj vision encoder beside the GGUF
+MTP support:                        supported by model, keep disabled until profiled
+```
+
+Optional hardware/profile hint smoke for Orion GTX 1080 Ti 11GB + Qwen3.5 4B Q8:
+
+```sh
+curl -fsSL http://<release-host>:8000/install.sh | BASE_URL=http://<release-host>:8000 LMML_PROFILE_HINT=orion-qwen35-4b-q8 sh
+```
+
+The installer should print:
+
+```text
+llama-server ctx_size:              262144 tokens
+OpenCode compaction.reserved:       65536 tokens
+OpenCode usable input limit:        196608 tokens
+OpenCode output limit:              18000 tokens
+OpenCode provider timeout:          7200 seconds
+OpenCode stream chunk timeout:      2400 seconds
+llama-server parallel slots:        1
+recommended extra_args:             ["--parallel", "1", "--slot-save-path", "$HOME/.local/share/lmml/llama-slots"]
+recommended KV/cache args:          ["-ctk", "q8_0", "-ctv", "q8_0", "--cache-ram", "4096"]
+```
+
 Both install modes must pass without `LMML_GPU_MODE=cpu-only`, and
 `lmml doctor` must report CUDA available with GPU name and compute capability.
 
@@ -229,11 +270,12 @@ check proves the managed llama.cpp build/server path.
 
 Latest live validation:
 
-- Date: 2026-06-01
+- Date: 2026-06-03
 - Build trigger: installed lmml TUI clean build
 - Server binary: `/home/angelo/.local/share/lmml/llama.cpp/build/bin/llama-server`
-- Model: `/home/angelo/.local/share/lmml/models/Qwen3.5-4B-Q6_K.gguf`
+- Model: `/home/angelo/.local/share/lmml/models/Qwen3.5-4B-Q8_0.gguf`
 - Server URL: `http://127.0.0.1:1200`
-- Result: server reached ready state
+- Result: server reached ready state with `ctx_size=262144`, `parallel=1`,
+  Q8 KV cache, and `cache_ram=4096`
 - Runtime GPU evidence: `CUDA0: NVIDIA GeForce GTX 1080 Ti`
 - Runtime architecture evidence: `CUDA : ARCHS = 610`

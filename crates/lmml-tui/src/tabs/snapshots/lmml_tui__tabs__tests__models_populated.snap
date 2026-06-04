@@ -1,5 +1,6 @@
 ---
 source: crates/lmml-tui/src/tabs/mod.rs
+assertion_line: 330
 expression: render_app(&app)
 ---
 "┌lmml────────────────────────────────────────────────────────────────────────────────────────────────────────┐"
@@ -8,14 +9,14 @@ expression: render_app(&app)
 "┌Models──────────────────────────────────────────┐┌Model Details─────────────────────────────────────────────┐"
 "│Press r to scan local models.                   ││Name: mistral-7b-Q4_K_M.gguf                              │"
 "│Press / to search Hugging Face. Press D to downl││Path: mistral-7b-Q4_K_M.gguf                              │"
-"│Press a to add a model alias. Press x to delete ││Size: 3.8 GB                                              │"
+"│Press a to add a model alias. Press x to delete ││Runtime profile: custom/global                            │"
+"│Press p to switch selected model runtime profile││Size: 3.8 GB                                              │"
 "│Models dir: $HOME/.local/share/lmml/model││Quant: Q4_K_M                                             │"
 "│                                                ││Architecture: llama                                       │"
 "│> mistral-7b-Q4_K_M.gguf  3.8 GB  Q4_K_M  CPU on││Context: 4096                                             │"
 "│                                                ││Alias: false                                              │"
 "│                                                ││VRAM: CPU only                                            │"
 "│                                                ││Recommended ngl: 0                                        │"
-"│                                                ││                                                          │"
 "│                                                ││                                                          │"
 "│                                                ││                                                          │"
 "│                                                ││                                                          │"

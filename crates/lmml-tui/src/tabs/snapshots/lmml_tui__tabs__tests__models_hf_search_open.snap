@@ -1,5 +1,6 @@
 ---
 source: crates/lmml-tui/src/tabs/mod.rs
+assertion_line: 345
 expression: render_app(&app)
 ---
 "┌lmml────────────────────────────────────────────────────────────────────────────────────────────────────────┐"
@@ -9,10 +10,10 @@ expression: render_app(&app)
 "│Press r to scan local models.                   ││Query: mistral gguf                                       │"
 "│Press / to search Hugging Face. Press D to downl││Results: 1                                                │"
 "│Press a to add a model alias. Press x to delete ││                                                          │"
-"│Models dir: $HOME/.local/share/lmml/model││> org/mistral / mistral-7b-Q4_K_M.gguf  3.8 GB  1234 downl│"
+"│Press p to switch selected model runtime profile││> org/mistral / mistral-7b-Q4_K_M.gguf  3.8 GB  1234 downl│"
+"│Models dir: $HOME/.local/share/lmml/model││                                                          │"
 "│                                                ││                                                          │"
 "│> mistral-7b-Q4_K_M.gguf  3.8 GB  Q4_K_M  fits (││                                                          │"
-"│                                                ││                                                          │"
 "│                                                ││                                                          │"
 "│                                                ││                                                          │"
 "│                                                ││                                                          │"

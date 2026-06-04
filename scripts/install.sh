@@ -4,6 +4,7 @@ set -eu
 BASE_URL=${BASE_URL:-https://github.com/YOUR_ORG/lmml/releases/latest}
 VERSION=${VERSION:-}
 INSTALL_MODE=${INSTALL_MODE:-binary}
+LMML_PROFILE_HINT=${LMML_PROFILE_HINT:-}
 LMML_CHECKSUM_VERIFY=${LMML_CHECKSUM_VERIFY:-optional}
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/lmml-install.XXXXXX")
 
@@ -170,6 +171,11 @@ case "$INSTALL_MODE" in
   *) fail "Unsupported INSTALL_MODE=$INSTALL_MODE" "Use INSTALL_MODE=binary or INSTALL_MODE=source." ;;
 esac
 
+case "$LMML_PROFILE_HINT" in
+  ""|orion-qwen35-4b-q8|quadro-m6000-qwen35-9b-q8) ;;
+  *) fail "Unsupported LMML_PROFILE_HINT=$LMML_PROFILE_HINT" "Supported hints: orion-qwen35-4b-q8, quadro-m6000-qwen35-9b-q8." ;;
+esac
+
 case "$LMML_CHECKSUM_VERIFY" in
   optional|required|off) ;;
   *) fail "Unsupported LMML_CHECKSUM_VERIFY=$LMML_CHECKSUM_VERIFY" "Use LMML_CHECKSUM_VERIFY=optional, required, or off." ;;
@@ -332,3 +338,62 @@ echo
 echo "  Get started:"
 echo "    lmml doctor       — check your system"
 echo "    lmml              — launch the TUI"
+
+if [ "$LMML_PROFILE_HINT" = "orion-qwen35-4b-q8" ]; then
+  echo
+  echo "  Orion GTX 1080 Ti 11GB + Qwen3.5 4B Q8 deep profile target:"
+  echo "    llama-server ctx_size:              262144 tokens"
+  echo "    OpenCode compaction.reserved:       65536 tokens"
+  echo "    OpenCode usable input limit:        196608 tokens"
+  echo "    OpenCode output limit:              18000 tokens"
+  echo "    operator compact target:            90000-120000 live prompt tokens"
+  echo "    operator red zone:                  120000-170000 live prompt tokens"
+  echo "    operator hard compress/reject:      170000-190000 live prompt tokens"
+  echo "    OpenCode provider timeout:          7200 seconds"
+  echo "    OpenCode stream chunk timeout:      2400 seconds"
+  echo "    llama-server parallel slots:        1"
+  echo "    recommended extra_args:             [\"--parallel\", \"1\", \"--slot-save-path\", \"\$HOME/.local/share/lmml/llama-slots\"]"
+  echo "    recommended KV/cache args:          [\"-ctk\", \"q8_0\", \"-ctv\", \"q8_0\", \"--cache-ram\", \"4096\"]"
+  echo
+  echo "  TUI runtime profiles for Qwen3.5-4B-Q8_0.gguf:"
+  echo "    orion-qwen-q8-deep:                 ctx 262144, parallel 1, 0 subagents"
+  echo "    orion-qwen-q8-balanced:             ctx 262144, parallel 2, 1 subagent max"
+  echo "    5070ti-qwen4b-fanout4:              ctx 131072, parallel 4, 3 subagents max"
+  echo "    5070ti-qwen4b-dual:                 ctx 262144, parallel 2, 1 subagent max"
+  echo "    TUI switch key:                     p on Models or Server tab"
+  echo
+  echo "  Notes:"
+  echo "    Restart OpenCode after changing opencode.json; provider settings are loaded at session start."
+  echo "    Use embedded GGUF chat templates by leaving lmml chat_template empty unless a per-model override is proven."
+  echo "    Orion single-shot complex mode is one resident slot; do not spawn background subagents."
+fi
+
+if [ "$LMML_PROFILE_HINT" = "quadro-m6000-qwen35-9b-q8" ]; then
+  echo
+  echo "  Quadro M6000 24GB + Qwen3.5 9B Q8 profile target:"
+  echo "    llama-server ctx_size:              262144 tokens"
+  echo "    OpenCode compaction.reserved:       49152 tokens for 4-slot fanout"
+  echo "    per-slot context at parallel 4:     65536 tokens"
+  echo "    recommended subagent soft cap:      32768 tokens"
+  echo "    llama-server parallel slots:        4"
+  echo "    deep-run alternate reserve:         65536 tokens at parallel 1"
+  echo "    Qwen thinking sampling:             temperature=0.6 top_p=0.95 top_k=20 min_p=0"
+  echo "    Qwen non-thinking sampling:         temperature=0.7 top_p=0.8 top_k=20 min_p=0"
+  echo "    minimum context for thinking:       128000 tokens"
+  echo "    recommended extra_args:             [\"--parallel\", \"4\", \"--slot-save-path\", \"\$HOME/.local/share/lmml/llama-slots\"]"
+  echo "    recommended KV/cache args:          [\"-ctk\", \"q8_0\", \"-ctv\", \"q8_0\", \"--cache-ram\", \"4096\"]"
+  echo "    vision/video support:               requires matching mmproj vision encoder beside the GGUF"
+  echo "    MTP support:                        supported by model, keep disabled until profiled"
+  echo
+  echo "  TUI runtime profiles for Qwen3.5-9B-Q8_0.gguf:"
+  echo "    m6000-qwen9b-deep:                  ctx 262144, parallel 1, 0 subagents"
+  echo "    m6000-qwen9b-fanout4:               ctx 262144, parallel 4, 3 subagents max"
+  echo "    m6000-qwen9b-fanout6:               ctx 262144, parallel 6, 5 subagents after validation"
+  echo "    5070ti-qwen9b-deep:                 ctx 196608, parallel 1, 0 subagents"
+  echo "    5070ti-qwen9b-balanced2:            ctx 131072, parallel 2, 1 subagent max"
+  echo "    TUI switch key:                     p on Models or Server tab"
+  echo
+  echo "  Fallback ladder if runtime memory pressure appears:"
+  echo "    ctx_size 196608, reserved 65536, parallel 1, practical 131072"
+  echo "    ctx_size 131072, reserved 32768, parallel 1, practical 98304"
+fi

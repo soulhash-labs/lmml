@@ -1,5 +1,6 @@
 ---
 source: crates/lmml-tui/src/tabs/mod.rs
+assertion_line: 376
 expression: render_app(&app)
 ---
 "┌lmml────────────────────────────────────────────────────────────────────────────────────────────────────────┐"
@@ -7,7 +8,9 @@ expression: render_app(&app)
 "└────────────────────────────────────────────────────────────────────────────────────────────────────────────┘"
 "┌Server──────────────────────────────────────────┐┌Server Log────────────────────────────────────────────────┐"
 "│Press s to start server.                        ││server listening                                          │"
+"│Press p to switch runtime profile.              ││                                                          │"
 "│Status: Failed { reason: "llama-server exited wi││                                                          │"
+"│Profile: custom/global                          ││                                                          │"
 "│Model: llama.gguf                               ││                                                          │"
 "│Binary: $HOME/.local/share/lmml/bin/llama││                                                          │"
 "│Host: 127.0.0.1                                 ││                                                          │"
@@ -16,8 +19,6 @@ expression: render_app(&app)
 "│GPU layers: -1                                  ││                                                          │"
 "│Batch: 512                                      ││                                                          │"
 "│Threads: 8                                      ││                                                          │"
-"│                                                ││                                                          │"
-"│                                                ││                                                          │"
 "│                                                ││                                                          │"
 "│                                                ││                                                          │"
 "│                                                ││                                                          │"

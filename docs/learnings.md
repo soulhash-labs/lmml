@@ -751,14 +751,21 @@ readiness checks, logs, restart behavior, model/profile switching, and long
 timeouts. `llama-cli` remains valuable for one-shot diagnostics, but it is not
 the right default runtime boundary for multi-turn coding agents.
 
-The current OpenCode config already expects OpenAI-compatible HTTP endpoints:
+The current proven OpenCode config expects OpenAI-compatible HTTP endpoints
+served by the TUI-managed lmml server:
 
 ```text
-full: http://127.0.0.1:4010/v1
-fast: http://127.0.0.1:4011/v1
+full: http://127.0.0.1:1200/v1
+fast: http://127.0.0.1:1200/v1
 timeout: 7200s
-chunk timeout: 300s
-reserved compaction tokens: 32768
+chunk timeout: 2400s
+server context: 262144
+reserved compaction tokens: 65536
+OpenCode model output limit: 18000
+usable input before compaction: 196608
+practical single-agent input target: 120000-170000
+hard reject/compress threshold: about 196000
+parallel slots: 1
 ```
 
 This points toward lmml runtime profiles: `opencode` and `opencode-fast`, each
@@ -775,3 +782,196 @@ OpenCode configuration should be explicit about routing. lmml's default is
 local-first: add lmml-managed `llamacpp` providers and route top-level `model`
 and `small_model` to local llama.cpp. Operators can intentionally preserve cloud
 provider routing with `--model-source existing --small-model-source existing`.
+
+---
+
+## 13. Orion OpenCode Q8 Deep Profile Field Notes (2026-06-03)
+
+The current validated Orion route is:
+
+```text
+OpenCode -> http://127.0.0.1:1200/v1 -> lmml TUI llama-server
+model: Qwen3.5-4B-Q8_0.gguf
+ctx_size: 262144
+parallel: 1
+KV cache: q8_0 / q8_0
+cache_ram: 4096 MiB
+compaction.reserved: 65536
+OpenCode input limit: 196608
+OpenCode output limit: 18000
+provider timeout: 7200s
+chunk timeout: 2400s
+```
+
+The server endpoint confirmed the model metadata:
+
+```text
+n_ctx:       262144
+n_ctx_train: 262144
+n_params:    4205751296
+```
+
+### What We Did
+
+- Added model-specific lmml runtime profiles so Qwen and Nemotron can carry
+  different server settings instead of sharing one global profile.
+- Added and installed the Orion Qwen Q8 deep profile:
+  `Qwen3.5-4B-Q8_0.gguf`, `ctx_size=262144`, `parallel=1`, Q8 KV cache,
+  `cache_ram=4096`, port `1200`.
+- Removed the shared external Qwen chat template from active lmml profiles.
+  The working policy is `jinja=true` with `chat_template=""`, letting
+  llama-server use the GGUF embedded `tokenizer.chat_template`.
+- Updated OpenCode top-level routing, oh-my-openagent agent/category routing,
+  and validator lane routing to the local Q8 model on port `1200`.
+- Increased OpenCode provider `chunkTimeout` from `300s` to `2400s` while
+  keeping the long-run provider timeout at `7200s`.
+- Added installer profile hints for the validated Orion Q8 deep profile and
+  corrected the Quadro M6000 fanout hint.
+
+### What We Learned
+
+The repeated stop around `42000-46000` tokens was not a llama-server context
+ceiling once the server was running at 256k. The server had enough context. The
+remaining caps were upstream and operational:
+
+- OpenCode and oh-my-openagent can keep stale model/category routing in files
+  outside `opencode.json`.
+- `validator.ts` was still mapping deep/quick lanes to old `4010/4011` GlyphOS
+  lane names even after `opencode.json` pointed at `1200`.
+- OpenCode must be fully restarted after provider/model/category/compaction
+  changes. A llama-server restart alone does not reload client-side routing.
+- `SSE read timed out` on a background task is a client stream timeout, not a
+  server crash. For long local background agents, `chunkTimeout=2400s` is a
+  better floor than `300s`; the full request timeout remains `7200s`.
+- `forcing full prompt re-processing` in llama.cpp logs is usually cache
+  invalidation or insufficient prefix match after a model/config/template change.
+  It is slower, but not a failure by itself.
+- Slot save/restore is prompt-prefix persistence, not live context overflow. It
+  cannot make an 80k live request fit into a 65k slot.
+
+### Current Production Rule
+
+For Orion deep-agent work, keep one resident slot:
+
+```text
+ctx_size=262144
+parallel=1
+compaction.reserved=65536
+usable OpenCode input=196608
+operator compact target=90000-120000
+operator red zone=120000-170000
+hard compress/reject around 170000-190000
+```
+
+Subagents on Orion should be serialized, summarized, or sent to another fleet
+machine. Do not enable fanout on the same 256k single-agent server.
+
+### Single-Shot Complex Operator Rule
+
+After the 256k Qwen Q8 profile reached `n_tokens = 89408`, the practical
+operator target was tightened. The provider still advertises `196608` input
+tokens because the server can hold it, but OpenCode/Sisyphus should compact
+earlier for stable long runs:
+
+```text
+green: 0-80000 live prompt tokens
+compact target: 90000-120000 live prompt tokens
+red: 120000-170000 live prompt tokens
+hard compress/reject: 170000-190000 live prompt tokens
+```
+
+This is not a llama-server limit. It is an operator policy that leaves room for
+tool schemas, system prompts, output reserve, reasoning overhead, and
+prompt-cache/checkpoint margin. Keep `ctx_size=262144`,
+`compaction.reserved=65536`, `max output=18000`, and `parallel=1`; change the
+agent behavior, not the server ceiling.
+
+The same profile switch pattern now covers the planned fleet:
+
+```text
+Orion / GTX 1080 Ti / Qwen3.5 4B Q8:
+  orion-qwen-q8-deep       ctx 262144, parallel 1, 0 subagents
+  orion-qwen-q8-balanced   ctx 262144, parallel 2, 1 subagent
+
+Quadro M6000 24GB / Qwen3.5 9B Q8:
+  m6000-qwen9b-deep        ctx 262144, parallel 1, 0 subagents
+  m6000-qwen9b-fanout4     ctx 262144, parallel 4, 3 subagents
+  m6000-qwen9b-fanout6     ctx 262144, parallel 6, 5 subagents after validation
+
+RTX 5070 Ti 16GB / Qwen3.5 4B Q8:
+  5070ti-qwen4b-fanout4    ctx 131072, parallel 4, 3 subagents
+  5070ti-qwen4b-dual       ctx 262144, parallel 2, 1 subagent
+
+RTX 5070 Ti 16GB / Qwen3.5 9B Q8:
+  5070ti-qwen9b-deep       ctx 196608, parallel 1, 0 subagents
+  5070ti-qwen9b-balanced2  ctx 131072, parallel 2, 1 subagent
+```
+
+The M6000 fanout6 and 5070 Ti 9B profiles are proposed operating profiles, not
+yet field-validated like Orion. They should be started with Q8 KV cache and
+host cache enabled, then reduced by the fallback ladder if pinned-memory,
+KV-cache, or prompt-processing pressure appears.
+
+### Template Rule
+
+Do not deploy a shared external Qwen template across Qwen and Nemotron. Use the
+embedded GGUF template by default:
+
+```toml
+jinja = true
+chat_template = ""
+```
+
+Only reintroduce a template as a model-specific profile override after checking
+`/props`, verifying visible output, and testing at least one tool/deep-agent
+turn.
+
+---
+
+## 14. Qwen3.5 9B Model-Channel Settings (2026-06-03)
+
+Qwen3.5 9B is not just a larger text model. The model channel describes it as a
+native multimodal model with a separate `mmproj` vision encoder. The main GGUF
+alone is text-only in practice; image/video inputs require loading the matching
+`mmproj` file alongside the model in llama.cpp or another compatible runtime.
+
+Model facts to preserve in lmml presets:
+
+```text
+parameters: 9B dense
+layers: 32
+architecture: hybrid Gated DeltaNet linear attention + full softmax attention
+native context: 262k
+thinking context floor: at least 128k
+vocabulary: 248k
+languages: 201
+multimodal: text, image, video with matching mmproj
+MTP: supported, but keep disabled until profiled
+```
+
+Official Qwen sampling settings:
+
+```text
+thinking/default:
+  temperature = 0.6
+  top_p       = 0.95
+  top_k       = 20
+  min_p       = 0
+
+non-thinking/fast:
+  temperature = 0.7
+  top_p       = 0.8
+  top_k       = 20
+  min_p       = 0
+```
+
+The Quadro M6000 Qwen3.5 9B Q8 fleet profile should carry these sampling values
+so a LAN install does not have to rediscover them. It should also show a
+configured `mmproj` path, but that field remains a proposed profile field until
+lmml-state and lmml-compat can persist it and emit the correct llama.cpp
+projector flag.
+
+Production/high-throughput note: the model authors recommend vLLM, SGLang, or
+KTransformers for high-throughput serving. That does not replace lmml for local
+LAN orchestration; it means lmml should treat llama.cpp as the controlled local
+runtime and leave high-throughput fleet serving as a separate deployment mode.

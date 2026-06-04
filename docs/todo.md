@@ -356,6 +356,20 @@ CUDA0: NVIDIA GeForce GTX 1080 Ti (11157 MiB, 10658 MiB free)
 system_info: CUDA : ARCHS = 610
 ```
 
+Latest Orion deep-profile runtime evidence:
+
+```text
+Date: 2026-06-03
+Model: /home/angelo/.local/share/lmml/models/Qwen3.5-4B-Q8_0.gguf
+Status: Ready { url: "http://127.0.0.1:1200" }
+Context: 262144
+parallel: 1
+KV cache: q8_0 / q8_0
+cache_ram: 4096 MiB
+OpenCode chunkTimeout: 2400s
+OpenCode timeout: 7200s
+```
+
 ### Phase 9 Acceptance
 
 - [ ] Debian-family x86_64 and ARM64 artifacts are built and smoke-tested on
@@ -394,14 +408,55 @@ Decision: harnesses should use managed `llama-server` HTTP endpoints, not
 Current OpenCode local config:
 
 - path: `~/.config/opencode/opencode.json`
-- full provider base URL: `http://127.0.0.1:4010/v1`
-- fast provider base URL: `http://127.0.0.1:4011/v1`
+- full provider base URL: `http://127.0.0.1:1200/v1`
+- fast provider base URL: `http://127.0.0.1:1200/v1`
 - timeout: `7200s`
-- chunk timeout: `300s`
-- compaction reserve: `32768` tokens
+- chunk timeout: `2400s`
+- server context: `262144` tokens
+- compaction reserve: `65536` tokens
+- usable input before compaction: `196608` tokens
+- practical single-agent input target: `120000-170000` tokens
+- hard reject/compress threshold: about `196000` tokens
+- local model: `llamacpp/Qwen3.5-4B-Q8_0.gguf`
+- local fast model: `llamacpp_fast/Qwen3.5-4B-Q8_0.gguf`
+
+Current workstation override:
+
+- The TUI-managed server is the active runtime for OpenCode.
+- Keep OpenCode on `http://127.0.0.1:1200/v1` while the TUI Server tab reports
+  `Ready { url: "http://127.0.0.1:1200" }`.
+- Do not switch this machine back to `4010/4011` unless detached runtime
+  profiles are started and verified with `lmml runtime start opencode --detach`
+  and `lmml runtime start opencode-fast --detach`.
+- Current server context: `262144` tokens.
+- Current OpenCode `compaction.reserved`: `65536` tokens.
+- Current OpenCode local model output limit: `18000` tokens.
+- Current OpenCode chunk timeout: `2400s`.
+- Usable input before compaction: `196608` tokens.
+- Practical single-agent input target before compaction: `120000-170000` tokens.
+- Hard reject/compress threshold: about `196000` tokens.
+- Current `llama-server` slot policy:
+  `extra_args = ["--parallel", "1", "--slot-save-path", "/home/angelo/.local/share/lmml/llama-slots", "-ctk", "q8_0", "-ctv", "q8_0", "--cache-ram", "4096"]`.
+- Expected local model routing:
+  `model = "llamacpp/Qwen3.5-4B-Q8_0.gguf"` and
+  `small_model = "llamacpp_fast/Qwen3.5-4B-Q8_0.gguf"`.
+- Frozen evidence snapshot:
+  `docs/opencode-1200-evidence.md`.
 
 - [x] Add runtime profile config schema for harness-managed servers
 - [x] Add separate runtime state schema for PID, status, health, and log path
+- [x] Add model-specific runtime profile schema so Qwen and Nemotron can carry
+  different server settings and chat-template policy
+- [x] Apply model-specific server settings when selecting a model in the TUI and
+  when building the server config
+- [x] Validate Orion Qwen3.5-4B-Q8_0 deep profile at `ctx_size=262144`,
+  `parallel=1`, Q8 KV cache, `cache_ram=4096`, and port `1200`
+- [x] Remove the shared external Qwen chat template from the active Orion
+  profiles; use embedded GGUF templates unless a per-model override is proven
+- [x] Update active OpenCode provider timeout policy to `timeout=7200s` and
+  `chunkTimeout=2400s`
+- [x] Fix stale OpenCode validator routing that still mapped deep/quick lanes to
+  `4010/4011` and GlyphOS lane names
 - [x] Support at least `opencode` on port `4010` and `opencode-fast` on port
   `4011`
 - [ ] Allow simultaneous managed `llama-server` instances for full and fast
@@ -411,11 +466,74 @@ Current OpenCode local config:
   reconciliation and stop
 - [ ] Add health polling every `5s` and mark unhealthy after three consecutive
   failures
+- [ ] Add `docs/llama-server-integration-contract.md` implementation coverage:
+  profile schema fields, `lmml-compat` flag generation, context guard, VRAM
+  budget guard, prompt-cache controls, and OpenCode compaction drift detection
 - [x] Add initial CLI commands: `lmml runtime status`, `lmml runtime
   print-config opencode`, and `lmml runtime configure opencode`
 - [x] Add process CLI commands: `lmml runtime start|stop|logs`
 - [x] Add `lmml runtime start <profile> --detach`
 - [ ] Add `lmml runtime status --json`
+- [ ] Add `lmml runtime validate <profile>` and `lmml runtime health <profile>`
+- [ ] Add `lmml runtime restart <profile>` with confirmed cold-restart/model-swap semantics
+- [ ] Add profile CLI commands: `profile presets`, `profile list`,
+  `profile show`, `profile copy`, `profile validate`, and `profile set`
+- [ ] Extend runtime profile schema with `compaction_reserved`, `ubatch_size`,
+  `flash_attn`, `continuous_batch`, `split_mode`, `api_key`, KV cache type,
+  fit, prompt-cache, slot-save, sampling, MTP, and `mmproj` fields
+- [ ] Extend `lmml-compat` to probe and emit `-ctk/-ctv`, `-fit/-fitt/-fitc`,
+  `-np`, `-cb`, `--split-mode`, `--cache-prompt`, `--cache-reuse`,
+  `--cache-ram`, `--slot-save-path`, multimodal projector flags, and sampling
+  flags
+- [ ] Add built-in read-only hardware presets and `lmml profile copy`
+- [ ] Promote the current Orion `Qwen3.5-4B-Q8_0` 256k profile from manual
+  `state.toml` config into a built-in read-only preset
+- [ ] Add profile-aware OpenCode configure output so the CLI can emit Q8 model
+  limits, 65536 reserve, 2400s chunk timeout, and validator/category guidance
+  without hand-editing `~/.config/opencode`
+- [ ] Add a safe managed command or documented external helper for patching
+  `~/.config/opencode/oh-my-openagent.json` and `validator.ts`; today this is a
+  manually maintained local integration
+- [ ] Add context validation guard: `ctx_size >= compaction_reserved + 4096`
+- [ ] Add effective working-window warning for OpenCode/Sisyphus profiles:
+  estimate `ctx_size - compaction_reserved - 20000..24000` and warn when the
+  usable window cannot meet the target live prompt size
+- [ ] Add VRAM budget validation for single profiles and combined running
+  profiles, including tight-margin warnings
+- [ ] Add profile presets for both 24GB 131k single-agent mode
+  (`ctx_size=131072`, `compaction_reserved=32768`) and 24GB 256k deep-run mode
+  (`ctx_size=262144`, `compaction_reserved=65536`)
+- [ ] Probe/emit `-ctk q8_0 -ctv q8_0` for supported 131k+ coding profiles
+  where KV cache pressure is the limiting factor
+- [x] Field-test an 11GB 256k Qwen3.5-4B-Q8 profile:
+  `ctx_size=262144`, `compaction_reserved=65536`, `ubatch_size=128`,
+  `cache_type_k/v=q8_0`, `cache_ram_mb=4096`, `parallel=1`
+- [ ] Add that field-tested 11GB 256k Qwen3.5-4B-Q8 profile as a built-in
+  preset and migration target
+- [ ] Keep the older experimental 11GB 256k Qwen3.5-4B-Q6 profile available
+  only as a fallback/test preset:
+  `ctx_size=262144`, `compaction_reserved=65536`, `ubatch_size=128`,
+  `cache_type_k/v=q8_0`, `cache_ram_mb=4096`, `parallel=1`
+- [ ] Add a 256k fallback profile with `batch_size=256`, `ubatch_size=64`,
+  `cache_type_k/v=q4_1`, and `cache_ram_mb=6144`
+- [ ] Add doctor opportunity warning when `ctx_size` is below model training
+  context, including the note that 256k on <16GB VRAM needs Q8 KV cache and
+  `cache_ram_mb >= 4096`
+- [ ] Add log guidance for `ggml_cuda_host_alloc` pinned-memory failures during
+  `--cache-ram` testing
+- [ ] Add fleet profile support from `docs/lmml-fleet-profiles.md`,
+  including validation status, per-slot context checks, LAN host/auth checks,
+  and proposed-vs-validated labels
+- [ ] Add Qwen3.5 9B model preset metadata:
+  262k native context, 128k minimum thinking context, 9B dense/32 layers,
+  multimodal requires matching `mmproj`, MTP is supported but disabled by
+  default
+- [ ] Add Qwen sampling presets:
+  thinking/default `temperature=0.6 top_p=0.95 top_k=20 min_p=0`;
+  non-thinking/fast `temperature=0.7 top_p=0.8 top_k=20 min_p=0`
+- [ ] Add doctor/profile validation for Qwen multimodal mode: if a Qwen profile
+  enables image/video inputs, require the configured `mmproj` file to exist and
+  show the exact llama.cpp projector argument that will be used
 - [x] Make `lmml runtime print-config opencode` print ready-to-paste OpenCode
   JSON
 - [ ] Keep `lmml doctor` read-only for OpenCode integration; it may detect

@@ -264,9 +264,17 @@ impl App {
 
     /// Construct an app with injected state and onboarding flag for tests.
     pub fn new_with_state_and_first_run(
-        state: PersistentState,
+        mut state: PersistentState,
         first_run_onboarding: bool,
     ) -> Self {
+        state.model.ensure_builtin_profiles();
+        if let Some(profile) = state
+            .model
+            .runtime_profile_for_path(&state.model.last_used)
+            .cloned()
+        {
+            state.server = profile.server;
+        }
         let onboarding_models_dir_buffer = state.model.models_dir.to_string_lossy().into_owned();
         let onboarding_port_buffer = state.server.port.to_string();
         Self {
@@ -393,7 +401,7 @@ impl App {
                 match result {
                     Ok(handle) => {
                         self.server_status = handle.status();
-                        self.state.model.last_used = model.path.clone();
+                        self.select_model_path(model.path.clone());
                         if let Some(index) = self
                             .models
                             .iter()
@@ -452,7 +460,7 @@ impl App {
                     Ok(model) => {
                         self.download_error = None;
                         self.status_message = format!("Downloaded {}", model.name);
-                        self.state.model.last_used = model.path.clone();
+                        self.select_model_path(model.path.clone());
                         self.models.push(model);
                         self.save_state_after("Model downloaded");
                     }
@@ -532,9 +540,34 @@ impl App {
                 self.status_message = "Probing server capabilities".to_string();
             }
             Action::SelectModel(path) => {
-                self.state.model.last_used = path;
+                let applied_profile = self.select_model_path(path);
                 self.status_message = "Model selected".to_string();
+                if applied_profile {
+                    self.status_message = "Model selected; runtime profile applied".to_string();
+                }
                 self.save_state_after("Model selected");
+            }
+            Action::CycleRuntimeProfile(path) => {
+                let running = matches!(
+                    self.server_status,
+                    ServerStatus::Starting { .. } | ServerStatus::Ready { .. }
+                );
+                if let Some(profile) = self
+                    .state
+                    .model
+                    .cycle_runtime_profile_for_path(&path)
+                    .cloned()
+                {
+                    self.state.server = profile.server;
+                    self.status_message = if running {
+                        format!("Profile {}; restart server to apply", profile.name)
+                    } else {
+                        format!("Profile {} applied", profile.name)
+                    };
+                    self.save_state_after("Runtime profile selected");
+                } else {
+                    self.status_message = "No runtime profiles for selected model".to_string();
+                }
             }
             Action::ScanModels => {
                 self.model_scan_running = true;
@@ -669,6 +702,10 @@ impl App {
                 .models
                 .get(self.selected_model)
                 .map(|model| Action::SelectModel(model.path.clone())),
+            KeyCode::Char('p') if self.active_tab == Tab::Models => self
+                .models
+                .get(self.selected_model)
+                .map(|model| Action::CycleRuntimeProfile(model.path.clone())),
             KeyCode::Char('4') => {
                 self.active_tab = Tab::Server;
                 None
@@ -688,6 +725,9 @@ impl App {
             KeyCode::Char('?') => Some(Action::ShowHelp),
             KeyCode::Char('q') => Some(Action::Quit),
             KeyCode::Enter if self.first_run_onboarding => Some(Action::StartBuild),
+            KeyCode::Char('p') if self.active_tab == Tab::Server => self
+                .selected_server_model()
+                .map(|model| Action::CycleRuntimeProfile(model.path)),
             KeyCode::Esc if self.first_run_onboarding => {
                 self.first_run_onboarding = false;
                 None
@@ -714,8 +754,12 @@ impl App {
                 match self.server_status {
                     ServerStatus::Stopped | ServerStatus::Failed { .. } => {
                         self.selected_model = next_index;
-                        self.state.model.last_used = model.path.clone();
+                        let applied_profile = self.select_model_path(model.path.clone());
                         self.status_message = format!("Selected {}", model.name);
+                        if applied_profile {
+                            self.status_message =
+                                format!("Selected {}; runtime profile applied", model.name);
+                        }
                         self.save_state_after("Model selected");
                     }
                     ServerStatus::Starting { .. } | ServerStatus::Ready { .. } => {
@@ -1165,7 +1209,13 @@ impl App {
 
     /// Build a compat server config from persisted settings and model fit.
     pub fn server_config(&self, model: &ModelEntry) -> lmml_compat::ServerConfig {
-        let mut n_gpu_layers = self.state.server.n_gpu_layers;
+        let server = self
+            .state
+            .model
+            .runtime_profile_for_path(&model.path)
+            .map(|profile| &profile.server)
+            .unwrap_or(&self.state.server);
+        let mut n_gpu_layers = server.n_gpu_layers;
         if n_gpu_layers == -1 {
             n_gpu_layers = self
                 .detect_profile
@@ -1175,21 +1225,29 @@ impl App {
         }
         lmml_compat::ServerConfig {
             model: model.path.clone(),
-            port: self.state.server.port,
-            host: self.state.server.host.clone(),
-            ctx_size: self.state.server.ctx_size,
+            port: server.port,
+            host: server.host.clone(),
+            ctx_size: server.ctx_size,
             n_gpu_layers,
-            batch_size: self.state.server.batch_size,
-            ubatch_size: self.state.server.ubatch_size,
-            threads: self.state.server.threads,
-            flash_attn: self.state.server.flash_attn,
-            mlock: self.state.server.mlock,
-            api_key: (!self.state.server.api_key.is_empty())
-                .then(|| self.state.server.api_key.clone()),
-            chat_template: (!self.state.server.chat_template.is_empty())
-                .then(|| self.state.server.chat_template.clone()),
-            jinja: self.state.server.jinja,
-            extra_args: self.state.server.extra_args.clone(),
+            batch_size: server.batch_size,
+            ubatch_size: server.ubatch_size,
+            threads: server.threads,
+            flash_attn: server.flash_attn,
+            mlock: server.mlock,
+            api_key: (!server.api_key.is_empty()).then(|| server.api_key.clone()),
+            chat_template: (!server.chat_template.is_empty()).then(|| server.chat_template.clone()),
+            jinja: server.jinja,
+            extra_args: server.extra_args.clone(),
+        }
+    }
+
+    fn select_model_path(&mut self, path: PathBuf) -> bool {
+        self.state.model.last_used = path.clone();
+        if let Some(profile) = self.state.model.runtime_profile_for_path(&path).cloned() {
+            self.state.server = profile.server;
+            true
+        } else {
+            false
         }
     }
 
@@ -1712,6 +1770,121 @@ mod tests {
         };
 
         assert_eq!(app.server_config(&model).n_gpu_layers, -1);
+    }
+
+    #[test]
+    fn server_config_uses_matching_model_runtime_profile() {
+        let mut app = App::default();
+        app.state.server.chat_template = "/templates/global-qwen.jinja".to_string();
+        app.state.server.jinja = true;
+        app.state.model.profiles = vec![lmml_state::ModelRuntimeProfile {
+            name: "nemotron-native".to_string(),
+            model: PathBuf::from("Nemotron3-Nano-4B-Q8_K_P.gguf"),
+            server: lmml_state::ServerConfig {
+                port: 1200,
+                host: "127.0.0.1".to_string(),
+                ctx_size: 262_144,
+                n_gpu_layers: -1,
+                batch_size: 512,
+                ubatch_size: 128,
+                threads: 8,
+                flash_attn: false,
+                mlock: false,
+                api_key: String::new(),
+                jinja: true,
+                chat_template: String::new(),
+                extra_args: vec!["--parallel".to_string(), "1".to_string()],
+            },
+        }];
+
+        let config = app.server_config(&model_entry(
+            "/home/angelo/.local/share/lmml/models/Nemotron3-Nano-4B-Q8_K_P.gguf",
+        ));
+
+        assert_eq!(config.chat_template, None);
+        assert!(config.jinja);
+        assert_eq!(config.ctx_size, 262_144);
+        assert_eq!(config.extra_args, vec!["--parallel", "1"]);
+    }
+
+    #[test]
+    fn selecting_model_applies_runtime_profile_to_visible_settings() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut app = App::default();
+        app.state_save_path = Some(tempdir.path().join("state.toml"));
+        app.state.server.chat_template = "/templates/qwen.jinja".to_string();
+        app.state.model.profiles = vec![lmml_state::ModelRuntimeProfile {
+            name: "nemotron-native".to_string(),
+            model: PathBuf::from("Nemotron3-Nano-4B-Q8_K_P.gguf"),
+            server: lmml_state::ServerConfig {
+                chat_template: String::new(),
+                jinja: true,
+                ctx_size: 262_144,
+                ubatch_size: 128,
+                ..lmml_state::ServerConfig::default()
+            },
+        }];
+
+        app.dispatch(Action::SelectModel(PathBuf::from(
+            "/models/Nemotron3-Nano-4B-Q8_K_P.gguf",
+        )));
+
+        assert_eq!(
+            app.state.model.last_used,
+            PathBuf::from("/models/Nemotron3-Nano-4B-Q8_K_P.gguf")
+        );
+        assert!(app.state.server.chat_template.is_empty());
+        assert!(app.state.server.jinja);
+        assert_eq!(app.state.server.ctx_size, 262_144);
+        assert_eq!(
+            app.status_message,
+            "Model selected; runtime profile applied"
+        );
+    }
+
+    #[test]
+    fn profile_key_cycles_qwen_runtime_profiles_from_models_tab() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut app = App::default();
+        app.state_save_path = Some(tempdir.path().join("state.toml"));
+        app.active_tab = Tab::Models;
+        app.models = vec![model_entry(
+            "/home/angelo/.local/share/lmml/models/Qwen3.5-4B-Q8_0.gguf",
+        )];
+        app.selected_model = 0;
+
+        let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('p'))));
+        assert!(matches!(action, Some(Action::CycleRuntimeProfile(_))));
+        app.dispatch(action.expect("profile cycle action"));
+
+        assert_eq!(app.state.model.active_profile, "orion-qwen-q8-balanced");
+        assert_eq!(app.state.server.ctx_size, 262_144);
+        assert_eq!(app.state.server.ubatch_size, 128);
+        assert_eq!(&app.state.server.extra_args[0..2], ["--parallel", "2"]);
+        assert_eq!(app.status_message, "Profile orion-qwen-q8-balanced applied");
+    }
+
+    #[test]
+    fn profile_key_warns_when_switching_while_server_is_running() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut app = App::default();
+        app.state_save_path = Some(tempdir.path().join("state.toml"));
+        app.active_tab = Tab::Server;
+        app.state.model.last_used =
+            PathBuf::from("/home/angelo/.local/share/lmml/models/Qwen3.5-4B-Q8_0.gguf");
+        app.server_status = ServerStatus::Ready {
+            url: "http://127.0.0.1:1200".to_string(),
+        };
+
+        let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('p'))));
+        assert!(matches!(action, Some(Action::CycleRuntimeProfile(_))));
+        app.dispatch(action.expect("profile cycle action"));
+
+        assert_eq!(app.state.model.active_profile, "orion-qwen-q8-balanced");
+        assert_eq!(
+            app.status_message,
+            "Profile orion-qwen-q8-balanced; restart server to apply"
+        );
     }
 
     #[test]

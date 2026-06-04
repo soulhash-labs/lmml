@@ -21,6 +21,8 @@ pub enum Action {
     ProbeServerCapabilities,
     /// Select a local model path.
     SelectModel(PathBuf),
+    /// Cycle the runtime profile for a local model path.
+    CycleRuntimeProfile(PathBuf),
     /// Scan local model directories.
     ScanModels,
     /// Open the Hugging Face search pane.

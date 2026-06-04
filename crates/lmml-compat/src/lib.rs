@@ -271,6 +271,11 @@ pub fn build_argv(config: &ServerConfig, caps: &LlamaBinaryCapabilities) -> Vec<
             );
         }
     }
+    // llama-server accepts arbitrary template files only when --jinja appears
+    // before --chat-template-file on the command line.
+    if config.jinja && caps.jinja {
+        push_switch(&mut argv, caps, &[FlagName::Long("--jinja")]);
+    }
     if let Some(chat_template) = config
         .chat_template
         .as_ref()
@@ -287,9 +292,6 @@ pub fn build_argv(config: &ServerConfig, caps: &LlamaBinaryCapabilities) -> Vec<
                 chat_template.clone(),
             );
         }
-    }
-    if config.jinja && caps.jinja {
-        push_switch(&mut argv, caps, &[FlagName::Long("--jinja")]);
     }
 
     argv.extend(config.extra_args.iter().cloned());
@@ -621,9 +623,9 @@ mod tests {
                 "--mlock",
                 "--api-key",
                 "secret",
+                "--jinja",
                 "--chat-template",
                 "chatml",
-                "--jinja",
                 "--verbose",
             ]
         );

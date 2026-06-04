@@ -13,6 +13,7 @@ pub fn render(area: Rect, app: &App, frame: &mut Frame) {
         Line::from("Press r to scan local models."),
         Line::from("Press / to search Hugging Face. Press D to download selected HF result."),
         Line::from("Press a to add a model alias. Press x to delete selected model."),
+        Line::from("Press p to switch selected model runtime profile."),
         Line::from(format!(
             "Models dir: {}",
             app.state.model.models_dir.display()
@@ -122,6 +123,14 @@ fn selected_model_lines(app: &App) -> Vec<Line<'static>> {
     vec![
         Line::from(format!("Name: {}", model.name)),
         Line::from(format!("Path: {}", model.path.display())),
+        Line::from(format!(
+            "Runtime profile: {}",
+            app.state
+                .model
+                .runtime_profile_for_path(&model.path)
+                .map(|profile| profile.name.as_str())
+                .unwrap_or("custom/global")
+        )),
         Line::from(format!(
             "Size: {}",
             lmml_models::format_size(model.size_bytes)

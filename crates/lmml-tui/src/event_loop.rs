@@ -419,6 +419,7 @@ impl EventLoop {
                 }
             }
             Action::SelectModel(_)
+            | Action::CycleRuntimeProfile(_)
             | Action::OpenHfSearch
             | Action::DeleteModel(_)
             | Action::AddModelAlias
