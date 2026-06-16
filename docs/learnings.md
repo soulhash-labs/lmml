@@ -892,22 +892,38 @@ The same profile switch pattern now covers the planned fleet:
 Orion / GTX 1080 Ti / Qwen3.5 4B Q8:
   orion-qwen-q8-deep       ctx 262144, parallel 1, 0 subagents
   orion-qwen-q8-balanced   ctx 262144, parallel 2, 1 subagent
+  orion-qwen-q8-kvu-fanout4/6/8  ctx 65536, parallel 4/6/8, q4 KV, kv-unified
 
 Quadro M6000 24GB / Qwen3.5 9B Q8:
   m6000-qwen9b-deep        ctx 262144, parallel 1, 0 subagents
+  m6000-qwen9b-fanout1     ctx 262144, parallel 2, 1 subagent max
+  m6000-qwen9b-fanout2     ctx 262144, parallel 2, 2 subagents max
+  m6000-qwen9b-fanout3     ctx 262144, parallel 3, 3 subagents max
   m6000-qwen9b-fanout4     ctx 262144, parallel 4, 3 subagents
   m6000-qwen9b-fanout6     ctx 262144, parallel 6, 5 subagents after validation
+  m6000-qwen9b-mtp-deep    ctx 262144, parallel 1, MTP enabled, text-only
+  m6000-qwen9b-mtp-vision  ctx 262144, parallel 1, MTP + mmproj vision
+
+RTX 5060 Ti 16GB / Qwen3.5 4B Q8:
+  5060ti-qwen4b-fanout4    ctx 131072, parallel 4, 3 subagents
+  5060ti-qwen4b-dual       ctx 262144, parallel 2, 1 subagent
+  5060ti-qwen4b-kvu-fanout4/6/8  ctx 73728, parallel 4/6/8, q4 KV, kv-unified
+
+RTX 5060 Ti 16GB / Qwen3.5 9B Q8:
+  5060ti-qwen9b-deep       ctx 196608, parallel 1, 0 subagents
+  5060ti-qwen9b-balanced2  ctx 131072, parallel 2, 1 subagent
 
 RTX 5070 Ti 16GB / Qwen3.5 4B Q8:
   5070ti-qwen4b-fanout4    ctx 131072, parallel 4, 3 subagents
   5070ti-qwen4b-dual       ctx 262144, parallel 2, 1 subagent
+  5070ti-qwen4b-kvu-fanout4/6/8  ctx 73728, parallel 4/6/8, q4 KV, kv-unified
 
 RTX 5070 Ti 16GB / Qwen3.5 9B Q8:
   5070ti-qwen9b-deep       ctx 196608, parallel 1, 0 subagents
   5070ti-qwen9b-balanced2  ctx 131072, parallel 2, 1 subagent
 ```
 
-The M6000 fanout6 and 5070 Ti 9B profiles are proposed operating profiles, not
+The M6000 fanout6 plus 5060 Ti/5070 Ti 9B profiles are proposed operating profiles, not
 yet field-validated like Orion. They should be started with Q8 KV cache and
 host cache enabled, then reduced by the fallback ladder if pinned-memory,
 KV-cache, or prompt-processing pressure appears.
@@ -975,3 +991,34 @@ Production/high-throughput note: the model authors recommend vLLM, SGLang, or
 KTransformers for high-throughput serving. That does not replace lmml for local
 LAN orchestration; it means lmml should treat llama.cpp as the controlled local
 runtime and leave high-throughput fleet serving as a separate deployment mode.
+
+---
+
+## 15. CUDA 11.x, GCC 13, and glibc `_FloatN` Headers (2026-06-04)
+
+Ubuntu 24.04-class CUDA 11.8 machines can fail llama.cpp CUDA builds with
+`_Float32`, `_Float64`, `_Float32x`, or `_Float128` undefined when the default
+host compiler is GCC 13+. The failure comes from CUDA 11's `cicc` consuming
+preprocessed glibc headers as if GCC 13 native `_FloatN` support were available,
+while `cicc` itself does not support those types.
+
+The reliable local fix is to configure CUDA with GCC 11 as the host compiler:
+
+```sh
+-DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-11
+```
+
+lmml should treat this as a CUDA 11.x compatibility workaround, not a universal
+hard prerequisite. Source preflight should warn only when CUDA 11.x, GCC 13+,
+and no `g++-11` are detected. When `g++-11` exists, CUDA builds should pass the
+CMake host compiler override automatically. CUDA 12+ machines should keep using
+their normal host compiler unless another incompatibility is detected.
+
+## 15. CUDA Host Compiler Compatibility
+
+CUDA 13.1 with GCC 13 can fail during CMake CUDA compiler detection with
+`rsqrt` / `rsqrtf` exception-specification conflicts between CUDA headers and
+glibc math headers. Treat this like the existing CUDA 11.x host compiler issue:
+when `g++-11` exists, lmml passes
+`-DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-11` for CUDA 11.x and CUDA 13.x with
+GCC 13+. CUDA 12.4 remains on the default host compiler path.

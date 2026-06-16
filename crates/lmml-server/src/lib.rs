@@ -6,7 +6,7 @@
 //! readiness before reporting the server as usable.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -123,6 +123,7 @@ impl ServerManager {
 
         let mut config = config.clone();
         config.model = model.path.clone();
+        prepare_server_directories(&config).await?;
         let argv = lmml_compat::build_argv(&config, &self.caps);
         let _ignored = log_tx
             .send(format!(
@@ -190,6 +191,24 @@ impl ServerManager {
             }),
         })
     }
+}
+
+async fn prepare_server_directories(config: &ServerConfig) -> Result<(), ServerError> {
+    for path in flag_values(&config.extra_args, "--slot-save-path") {
+        tokio::fs::create_dir_all(path)
+            .await
+            .map_err(|source| ServerError::CreateRuntimeDir {
+                path: path.to_path_buf(),
+                source,
+            })?;
+    }
+    Ok(())
+}
+
+fn flag_values<'a>(args: &'a [String], flag: &'a str) -> impl Iterator<Item = &'a Path> {
+    args.windows(2)
+        .filter(move |window| window[0] == flag)
+        .map(|window| Path::new(&window[1]))
 }
 
 /// Check whether a host/port can be bound before spawning llama-server.
@@ -417,6 +436,15 @@ pub enum ServerError {
         /// Conflicting port.
         port: u16,
         /// OS bind error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// A runtime directory required by llama-server could not be created.
+    #[error("failed to create llama-server runtime directory {path}: {source}")]
+    CreateRuntimeDir {
+        /// Runtime directory path.
+        path: PathBuf,
+        /// Source IO error.
         #[source]
         source: std::io::Error,
     },

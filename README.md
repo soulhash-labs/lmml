@@ -11,6 +11,13 @@ This is a local/LAN release scope, not a broad production-ready claim. GPU
 acceleration is the primary path; intentional CPU-only nodes are supported by
 explicit opt-in during preflight/install.
 
+## How To Use
+
+Start with [`docs/how-to-use.md`](docs/how-to-use.md). It covers the human TUI
+workflow, agent/harness integration, runtime profiles, LAN install, and common
+troubleshooting. For training-specific workflows, use
+[`docs/training-how-to-use.md`](docs/training-how-to-use.md).
+
 ## Install
 
 ### One-line install (Linux / macOS)
@@ -65,7 +72,10 @@ curl -fsSL http://192.168.1.100:8000/preflight.sh | LMML_INSTALL_MODE=source LMM
 curl -fsSL http://192.168.1.100:8000/install.sh | BASE_URL=http://192.168.1.100:8000 INSTALL_MODE=source LMML_GPU_MODE=cpu-only bash
 ```
 
-Narrow apt fixes for compiler/CMake/Git/curl/sccache are opt-in:
+Narrow apt fixes for compiler/CMake/Git/curl/sccache are opt-in. On Ubuntu
+CUDA 11.x hosts with GCC 13+, preflight also recommends `g++-11` because
+CUDA 11's device compiler can fail on glibc `_FloatN` headers unless CMake is
+configured with `-DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-11`:
 
 ```sh
 curl -fsSL http://192.168.1.100:8000/preflight.sh | LMML_INSTALL_MODE=source LMML_FIX_DEPS=1 bash
@@ -128,6 +138,28 @@ lmml doctor    # check your system
 lmml           # launch the TUI
 ```
 
+For the full training procedure, dataset formatting examples, agent checklist,
+and VRAM guidance, see [`docs/training-how-to-use.md`](docs/training-how-to-use.md).
+
+Experimental fine-tuning uses llama.cpp's native C++ training binaries, not a
+Python/PyTorch training script. Current upstream `llama-finetune` performs
+full-model GGUF fine-tuning: lmml maps `--train-data` to `--file`, maps
+`--model-base` to `--model` unless the binary advertises `--model-base`, and
+passes `--output` through as the fine-tuned GGUF output:
+
+```sh
+lmml train \
+  --model-base ./models/Qwen3.5-9B-BF16.gguf \
+  --train-data ./data/train.txt \
+  --output ./models/Qwen3.5-9B-Finetuned.gguf \
+  -- --epochs 3 --ctx-size 512 --batch-size 4 --n-gpu-layers 32
+```
+
+Use an F16/BF16 base GGUF for training, then quantize the output GGUF afterward
+with `llama-quantize` if you need Q8/Q4 deployment artifacts. lmml only enables
+custom-fork adapter flags such as `--lora-out`, `--checkpoint-in`, and
+`--checkpoint-out` when `llama-finetune --help` explicitly advertises them.
+
 The installer runs `lmml doctor` before reporting success. Missing hard
 prerequisites such as a compiler, CMake, Git, or required disk space cause the
 install command to fail clearly even though the binary has already been copied.
@@ -153,6 +185,8 @@ cargo build --release -p lmml-tui
 ```
 
 ## Harness Runtime Direction
+
+For the practical agent setup path, see [`docs/how-to-use.md`](docs/how-to-use.md).
 
 For coding harnesses such as OpenCode and Claude Code, lmml should manage
 long-running `llama-server` HTTP endpoints. `llama-cli` is reserved for one-shot
@@ -262,6 +296,28 @@ orion-qwen-q8-balanced:
   practical per-agent target: 60000-80000
   hard compress/reject: 100000-115000
 
+orion-qwen-q8-kvu-fanout4 / fanout6 / fanout8:
+  ctx_size: 65536
+  parallel: 4, 6, or 8
+  KV: q4_0 key/value with --kv-unified
+  target: high-concurrency experimental harness runs on 11/12GB GPUs
+
+5060ti-qwen4b-fanout4:
+  ctx_size: 131072
+  parallel: 4
+  OpenCode/Sisyphus: 3 subagents max
+  per-slot theoretical context: 32768
+  practical per-agent target: 16000-24000
+
+5060ti-qwen4b-dual:
+  ctx_size: 262144
+  parallel: 2
+
+5060ti-qwen4b-kvu-fanout4 / fanout6 / fanout8:
+  ctx_size: 73728
+  parallel: 4, 6, or 8
+  KV: q4_0 key/value with --kv-unified
+
 5070ti-qwen4b-fanout4:
   ctx_size: 131072
   parallel: 4
@@ -275,6 +331,11 @@ orion-qwen-q8-balanced:
   OpenCode/Sisyphus: 1 subagent max
   per-slot theoretical context: 131072
   practical per-agent target: 60000-90000
+
+5070ti-qwen4b-kvu-fanout4 / fanout6 / fanout8:
+  ctx_size: 73728
+  parallel: 4, 6, or 8
+  KV: q4_0 key/value with --kv-unified
 
 m6000-qwen9b-deep:
   ctx_size: 262144

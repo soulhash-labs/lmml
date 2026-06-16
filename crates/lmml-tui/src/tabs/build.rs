@@ -45,10 +45,16 @@ pub fn render(area: Rect, app: &App, frame: &mut Frame) {
         Line::from(format!("sccache: {sccache}")),
         Line::from(format!("Update: {update}")),
     ];
+    let visible_log_lines = usize::from(area.height.saturating_sub(2));
     let right = if app.build_log.is_empty() {
         vec![Line::from("Build output will appear here.")]
     } else {
-        app.build_log.iter().cloned().map(Line::from).collect()
+        app.build_log
+            .iter()
+            .skip(app.build_log.len().saturating_sub(visible_log_lines))
+            .cloned()
+            .map(Line::from)
+            .collect()
     };
     super::render_two_pane(
         area,

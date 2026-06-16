@@ -223,6 +223,7 @@ fn caps() -> LlamaBinaryCapabilities {
     LlamaBinaryCapabilities {
         version: Some("stub".to_string()),
         flash_attn: false,
+        flash_attn_requires_value: false,
         mlock: false,
         api_key: false,
         ubatch_size: true,
@@ -250,6 +251,7 @@ fn profile() -> lmml_detect::SystemProfile {
         cuda: CudaCompatibility::NoGpu,
         gpus: Vec::new(),
         gpu_probe_error: None,
+        nvidia_devices: lmml_detect::NvidiaDeviceNodes::default(),
         sccache: None,
         metal: MetalSupport {
             available: false,

@@ -45,6 +45,40 @@ async fn stub_ready_reports_ready_within_two_seconds() {
 }
 
 #[tokio::test]
+async fn start_creates_missing_slot_save_path() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let binary = write_stub_server(tempdir.path());
+    let port = free_port();
+    let manager = ServerManager {
+        binary,
+        caps: caps(),
+    };
+    let (log_tx, _log_rx) = mpsc::channel(32);
+    let slot_save_path = tempdir.path().join("runtime").join("llama-slots");
+    let mut config = config(port);
+    config.extra_args = vec![
+        "--slot-save-path".to_string(),
+        slot_save_path.display().to_string(),
+    ];
+
+    let handle = tokio::time::timeout(
+        Duration::from_secs(2),
+        manager.start_with_timeout(
+            &model(tempdir.path()),
+            &config,
+            log_tx,
+            Duration::from_secs(2),
+        ),
+    )
+    .await
+    .expect("start should finish within two seconds")
+    .expect("server should start");
+
+    assert!(slot_save_path.is_dir());
+    handle.stop().await;
+}
+
+#[tokio::test]
 async fn stub_that_never_listens_fails_with_timeout() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let binary = write_stub_server(tempdir.path());
@@ -189,6 +223,7 @@ fn caps() -> LlamaBinaryCapabilities {
     LlamaBinaryCapabilities {
         version: Some("stub".to_string()),
         flash_attn: false,
+        flash_attn_requires_value: false,
         mlock: false,
         api_key: false,
         ubatch_size: true,

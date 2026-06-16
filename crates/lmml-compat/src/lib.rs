@@ -62,6 +62,8 @@ pub struct LlamaBinaryCapabilities {
     pub version: Option<String>,
     /// Whether flash attention can be enabled.
     pub flash_attn: bool,
+    /// Whether `--flash-attn` requires an explicit value.
+    pub flash_attn_requires_value: bool,
     /// Whether memory locking can be enabled.
     pub mlock: bool,
     /// Whether API key authentication can be configured.
@@ -117,14 +119,15 @@ where
         });
     }
 
-    let flags = parse_help_flags(&format!("{}\n{}", help.stdout, help.stderr));
+    let help_text = format!("{}\n{}", help.stdout, help.stderr);
+    let flags = parse_help_flags(&help_text);
     let version = if version.success {
         parse_version_line(&version.stdout, &version.stderr)
     } else {
         None
     };
 
-    let caps = capabilities_from_flags(version, flags);
+    let caps = capabilities_from_help(version, &help_text, flags);
     tracing::info!(
         version = ?caps.version,
         flags = caps.flags.len(),
@@ -252,11 +255,20 @@ pub fn build_argv(config: &ServerConfig, caps: &LlamaBinaryCapabilities) -> Vec<
         );
     }
     if config.flash_attn && caps.flash_attn {
-        push_switch(
-            &mut argv,
-            caps,
-            &[FlagName::Long("--flash-attn"), FlagName::Long("-fa")],
-        );
+        if caps.flash_attn_requires_value {
+            push_value(
+                &mut argv,
+                caps,
+                &[FlagName::Long("--flash-attn"), FlagName::Short("-fa")],
+                "on".to_string(),
+            );
+        } else {
+            push_switch(
+                &mut argv,
+                caps,
+                &[FlagName::Long("--flash-attn"), FlagName::Short("-fa")],
+            );
+        }
     }
     if config.mlock && caps.mlock {
         push_switch(&mut argv, caps, &[FlagName::Long("--mlock")]);
@@ -372,10 +384,20 @@ impl FlagName {
     }
 }
 
+#[cfg(test)]
 fn capabilities_from_flags(version: Option<String>, flags: Vec<String>) -> LlamaBinaryCapabilities {
+    capabilities_from_help(version, "", flags)
+}
+
+fn capabilities_from_help(
+    version: Option<String>,
+    help: &str,
+    flags: Vec<String>,
+) -> LlamaBinaryCapabilities {
     let mut caps = LlamaBinaryCapabilities {
         version,
         flash_attn: false,
+        flash_attn_requires_value: flash_attn_help_requires_value(help),
         mlock: false,
         api_key: false,
         ubatch_size: false,
@@ -392,6 +414,15 @@ fn capabilities_from_flags(version: Option<String>, flags: Vec<String>) -> Llama
     caps.jinja = caps.has_any(&["--jinja"]);
     caps.reranking = caps.has_any(&["--reranking", "--rerank"]);
     caps
+}
+
+fn flash_attn_help_requires_value(help: &str) -> bool {
+    help.lines().any(|line| {
+        line.contains("--flash-attn")
+            && (line.contains("[on|off|auto]")
+                || line.contains("<on|off|auto>")
+                || line.contains("on|off|auto"))
+    })
 }
 
 fn push_value(
@@ -572,6 +603,7 @@ mod tests {
             .expect("probe should succeed");
         assert_eq!(caps.version, Some("llama build 123".to_string()));
         assert!(caps.flash_attn);
+        assert!(!caps.flash_attn_requires_value);
         assert!(caps.has_any(&["--model"]));
     }
 
@@ -627,6 +659,58 @@ mod tests {
                 "--chat-template",
                 "chatml",
                 "--verbose",
+            ]
+        );
+    }
+
+    #[test]
+    fn builds_argv_with_value_flash_attn_spellings() {
+        let help = r#"
+            --model FNAME
+            --host HOST
+            --port PORT
+            --ctx-size N
+            -ngl N
+            --batch-size N
+            --ubatch-size N
+            --threads N
+            -fa, --flash-attn [on|off|auto]
+            --jinja
+        "#;
+        let caps = capabilities_from_help(
+            Some("value-flash-attn".to_string()),
+            help,
+            parse_help_flags(help),
+        );
+        let mut config = full_config();
+        config.mlock = false;
+        config.api_key = None;
+        config.chat_template = None;
+        config.extra_args.clear();
+
+        assert!(caps.flash_attn_requires_value);
+        assert_eq!(
+            build_argv(&config, &caps),
+            vec![
+                "--model",
+                "/models/mistral.gguf",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "8081",
+                "--ctx-size",
+                "8192",
+                "-ngl",
+                "35",
+                "--batch-size",
+                "256",
+                "--ubatch-size",
+                "128",
+                "--threads",
+                "12",
+                "--flash-attn",
+                "on",
+                "--jinja",
             ]
         );
     }

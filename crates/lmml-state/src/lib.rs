@@ -97,10 +97,12 @@ impl AppState {
             path: path.to_path_buf(),
             source,
         })?;
-        toml::from_str(&content).map_err(|source| StateError::Parse {
+        let mut state: Self = toml::from_str(&content).map_err(|source| StateError::Parse {
             path: path.to_path_buf(),
             source,
-        })
+        })?;
+        state.repair_legacy_build_binary();
+        Ok(state)
     }
 
     /// Load state from a specific path without creating it when missing.
@@ -114,10 +116,12 @@ impl AppState {
             path: path.to_path_buf(),
             source,
         })?;
-        toml::from_str(&content).map_err(|source| StateError::Parse {
+        let mut state: Self = toml::from_str(&content).map_err(|source| StateError::Parse {
             path: path.to_path_buf(),
             source,
-        })
+        })?;
+        state.repair_legacy_build_binary();
+        Ok(state)
     }
 
     /// Save state to a specific path.
@@ -139,6 +143,13 @@ impl AppState {
     /// Reset a specific state file to default values.
     pub fn reset_path(path: impl AsRef<Path>) -> Result<(), StateError> {
         Self::default().save_to_path(path)
+    }
+
+    fn repair_legacy_build_binary(&mut self) {
+        let legacy = legacy_server_binary(&self.build.source_dir);
+        if self.build.binary == legacy {
+            self.build.binary = expected_server_binary(&self.build.source_dir);
+        }
     }
 }
 
@@ -173,9 +184,10 @@ impl Default for BuildState {
             env::var_os("HOME"),
             env::var_os("USERPROFILE"),
         );
+        let source_dir = data_dir.join("llama.cpp");
         Self {
-            source_dir: data_dir.join("llama.cpp"),
-            binary: data_dir.join("bin").join(binary_name("llama-server")),
+            binary: expected_server_binary(&source_dir),
+            source_dir,
             commit: String::new(),
             cmake_hash: String::new(),
             backend: "Auto".to_string(),
@@ -312,6 +324,46 @@ fn builtin_model_profiles(slot_save_path: String) -> Vec<ModelRuntimeProfile> {
             server: qwen_server_config(262_144, 2, 128, 4_096, &slot_save_path),
         },
         ModelRuntimeProfile {
+            name: "orion-qwen-q8-kvu-fanout4".to_string(),
+            model: PathBuf::from("Qwen3.5-4B-Q8_0.gguf"),
+            server: qwen_kv_unified_server_config(65_536, 4, 128, 4_096, &slot_save_path),
+        },
+        ModelRuntimeProfile {
+            name: "orion-qwen-q8-kvu-fanout6".to_string(),
+            model: PathBuf::from("Qwen3.5-4B-Q8_0.gguf"),
+            server: qwen_kv_unified_server_config(65_536, 6, 96, 4_096, &slot_save_path),
+        },
+        ModelRuntimeProfile {
+            name: "orion-qwen-q8-kvu-fanout8".to_string(),
+            model: PathBuf::from("Qwen3.5-4B-Q8_0.gguf"),
+            server: qwen_kv_unified_server_config(65_536, 8, 64, 4_096, &slot_save_path),
+        },
+        ModelRuntimeProfile {
+            name: "5060ti-qwen4b-fanout4".to_string(),
+            model: PathBuf::from("Qwen3.5-4B-Q8_0.gguf"),
+            server: qwen_server_config(131_072, 4, 128, 2_048, &slot_save_path),
+        },
+        ModelRuntimeProfile {
+            name: "5060ti-qwen4b-dual".to_string(),
+            model: PathBuf::from("Qwen3.5-4B-Q8_0.gguf"),
+            server: qwen_server_config(262_144, 2, 128, 2_048, &slot_save_path),
+        },
+        ModelRuntimeProfile {
+            name: "5060ti-qwen4b-kvu-fanout4".to_string(),
+            model: PathBuf::from("Qwen3.5-4B-Q8_0.gguf"),
+            server: qwen_kv_unified_server_config(73_728, 4, 128, 6_144, &slot_save_path),
+        },
+        ModelRuntimeProfile {
+            name: "5060ti-qwen4b-kvu-fanout6".to_string(),
+            model: PathBuf::from("Qwen3.5-4B-Q8_0.gguf"),
+            server: qwen_kv_unified_server_config(73_728, 6, 96, 6_144, &slot_save_path),
+        },
+        ModelRuntimeProfile {
+            name: "5060ti-qwen4b-kvu-fanout8".to_string(),
+            model: PathBuf::from("Qwen3.5-4B-Q8_0.gguf"),
+            server: qwen_kv_unified_server_config(73_728, 8, 64, 6_144, &slot_save_path),
+        },
+        ModelRuntimeProfile {
             name: "5070ti-qwen4b-fanout4".to_string(),
             model: PathBuf::from("Qwen3.5-4B-Q8_0.gguf"),
             server: qwen_server_config(131_072, 4, 128, 2_048, &slot_save_path),
@@ -322,19 +374,99 @@ fn builtin_model_profiles(slot_save_path: String) -> Vec<ModelRuntimeProfile> {
             server: qwen_server_config(262_144, 2, 128, 2_048, &slot_save_path),
         },
         ModelRuntimeProfile {
+            name: "5070ti-qwen4b-kvu-fanout4".to_string(),
+            model: PathBuf::from("Qwen3.5-4B-Q8_0.gguf"),
+            server: qwen_kv_unified_server_config(73_728, 4, 128, 6_144, &slot_save_path),
+        },
+        ModelRuntimeProfile {
+            name: "5070ti-qwen4b-kvu-fanout6".to_string(),
+            model: PathBuf::from("Qwen3.5-4B-Q8_0.gguf"),
+            server: qwen_kv_unified_server_config(73_728, 6, 96, 6_144, &slot_save_path),
+        },
+        ModelRuntimeProfile {
+            name: "5070ti-qwen4b-kvu-fanout8".to_string(),
+            model: PathBuf::from("Qwen3.5-4B-Q8_0.gguf"),
+            server: qwen_kv_unified_server_config(73_728, 8, 64, 6_144, &slot_save_path),
+        },
+        ModelRuntimeProfile {
             name: "m6000-qwen9b-deep".to_string(),
             model: PathBuf::from("Qwen3.5-9B-Q8_0.gguf"),
-            server: qwen_server_config(262_144, 1, 128, 4_096, &slot_save_path),
+            server: m6000_qwen_server_config(262_144, 1, 128, 4_096, &slot_save_path),
+        },
+        ModelRuntimeProfile {
+            name: "m6000-qwen9b-fanout1".to_string(),
+            model: PathBuf::from("Qwen3.5-9B-Q8_0.gguf"),
+            server: m6000_qwen_server_config(262_144, 2, 128, 4_096, &slot_save_path),
+        },
+        ModelRuntimeProfile {
+            name: "m6000-qwen9b-fanout2".to_string(),
+            model: PathBuf::from("Qwen3.5-9B-Q8_0.gguf"),
+            server: m6000_qwen_server_config(262_144, 2, 128, 4_096, &slot_save_path),
+        },
+        ModelRuntimeProfile {
+            name: "m6000-qwen9b-fanout3".to_string(),
+            model: PathBuf::from("Qwen3.5-9B-Q8_0.gguf"),
+            server: m6000_qwen_server_config(262_144, 3, 128, 4_096, &slot_save_path),
         },
         ModelRuntimeProfile {
             name: "m6000-qwen9b-fanout4".to_string(),
             model: PathBuf::from("Qwen3.5-9B-Q8_0.gguf"),
-            server: qwen_server_config(262_144, 4, 128, 4_096, &slot_save_path),
+            server: m6000_qwen_server_config(262_144, 4, 128, 4_096, &slot_save_path),
         },
         ModelRuntimeProfile {
             name: "m6000-qwen9b-fanout6".to_string(),
             model: PathBuf::from("Qwen3.5-9B-Q8_0.gguf"),
-            server: qwen_server_config(262_144, 6, 96, 8_192, &slot_save_path),
+            server: m6000_qwen_server_config(262_144, 6, 96, 8_192, &slot_save_path),
+        },
+        ModelRuntimeProfile {
+            name: "m6000-qwen9b-mtp-deep".to_string(),
+            model: PathBuf::from("Qwen3.5-9B-Q8_0.gguf"),
+            server: m6000_qwen_mtp_deep_server_config(&slot_save_path),
+        },
+        ModelRuntimeProfile {
+            name: "m6000-qwen9b-mtp-vision".to_string(),
+            model: PathBuf::from("Qwen3.5-9B-Q8_0.gguf"),
+            server: m6000_qwen_mtp_vision_server_config(&slot_save_path),
+        },
+        ModelRuntimeProfile {
+            name: "m6000-qwen9b-kvu-fanout4".to_string(),
+            model: PathBuf::from("Qwen3.5-9B-Q8_0.gguf"),
+            server: qwen_kv_unified_server_config(86_016, 4, 128, 8_192, &slot_save_path),
+        },
+        ModelRuntimeProfile {
+            name: "m6000-qwen9b-kvu-fanout6".to_string(),
+            model: PathBuf::from("Qwen3.5-9B-Q8_0.gguf"),
+            server: qwen_kv_unified_server_config(86_016, 6, 96, 8_192, &slot_save_path),
+        },
+        ModelRuntimeProfile {
+            name: "m6000-qwen9b-kvu-fanout8".to_string(),
+            model: PathBuf::from("Qwen3.5-9B-Q8_0.gguf"),
+            server: qwen_kv_unified_server_config(86_016, 8, 64, 8_192, &slot_save_path),
+        },
+        ModelRuntimeProfile {
+            name: "5060ti-qwen9b-deep".to_string(),
+            model: PathBuf::from("Qwen3.5-9B-Q8_0.gguf"),
+            server: qwen_server_config(196_608, 1, 128, 4_096, &slot_save_path),
+        },
+        ModelRuntimeProfile {
+            name: "5060ti-qwen9b-balanced2".to_string(),
+            model: PathBuf::from("Qwen3.5-9B-Q8_0.gguf"),
+            server: qwen_server_config(131_072, 2, 128, 4_096, &slot_save_path),
+        },
+        ModelRuntimeProfile {
+            name: "5060ti-qwen9b-kvu-fanout4".to_string(),
+            model: PathBuf::from("Qwen3.5-9B-Q8_0.gguf"),
+            server: qwen_kv_unified_server_config(73_728, 4, 128, 6_144, &slot_save_path),
+        },
+        ModelRuntimeProfile {
+            name: "5060ti-qwen9b-kvu-fanout6".to_string(),
+            model: PathBuf::from("Qwen3.5-9B-Q8_0.gguf"),
+            server: qwen_kv_unified_server_config(73_728, 6, 96, 6_144, &slot_save_path),
+        },
+        ModelRuntimeProfile {
+            name: "5060ti-qwen9b-kvu-fanout8".to_string(),
+            model: PathBuf::from("Qwen3.5-9B-Q8_0.gguf"),
+            server: qwen_kv_unified_server_config(73_728, 8, 64, 6_144, &slot_save_path),
         },
         ModelRuntimeProfile {
             name: "5070ti-qwen9b-deep".to_string(),
@@ -346,7 +478,93 @@ fn builtin_model_profiles(slot_save_path: String) -> Vec<ModelRuntimeProfile> {
             model: PathBuf::from("Qwen3.5-9B-Q8_0.gguf"),
             server: qwen_server_config(131_072, 2, 128, 4_096, &slot_save_path),
         },
+        ModelRuntimeProfile {
+            name: "5070ti-qwen9b-kvu-fanout4".to_string(),
+            model: PathBuf::from("Qwen3.5-9B-Q8_0.gguf"),
+            server: qwen_kv_unified_server_config(73_728, 4, 128, 6_144, &slot_save_path),
+        },
+        ModelRuntimeProfile {
+            name: "5070ti-qwen9b-kvu-fanout6".to_string(),
+            model: PathBuf::from("Qwen3.5-9B-Q8_0.gguf"),
+            server: qwen_kv_unified_server_config(73_728, 6, 96, 6_144, &slot_save_path),
+        },
+        ModelRuntimeProfile {
+            name: "5070ti-qwen9b-kvu-fanout8".to_string(),
+            model: PathBuf::from("Qwen3.5-9B-Q8_0.gguf"),
+            server: qwen_kv_unified_server_config(73_728, 8, 64, 6_144, &slot_save_path),
+        },
     ]
+}
+
+fn m6000_qwen_mtp_deep_server_config(slot_save_path: &str) -> ServerConfig {
+    let mut server = m6000_qwen_server_config(262_144, 1, 128, 4_096, slot_save_path);
+    server.extra_args.extend([
+        "--spec-type".to_string(),
+        "draft-mtp".to_string(),
+        "--temp".to_string(),
+        "0.6".to_string(),
+        "--top-p".to_string(),
+        "0.95".to_string(),
+        "--top-k".to_string(),
+        "20".to_string(),
+        "--min-p".to_string(),
+        "0".to_string(),
+    ]);
+    server
+}
+
+fn m6000_qwen_mtp_vision_server_config(slot_save_path: &str) -> ServerConfig {
+    let mut server = m6000_qwen_mtp_deep_server_config(slot_save_path);
+    let mmproj = Path::new(slot_save_path)
+        .parent()
+        .unwrap_or_else(|| Path::new(slot_save_path))
+        .join("models")
+        .join("mmproj-Qwen3.5-9B-BF16.gguf");
+    server
+        .extra_args
+        .extend(["--mmproj".to_string(), mmproj.display().to_string()]);
+    server
+}
+
+fn m6000_qwen_server_config(
+    ctx_size: u32,
+    parallel: usize,
+    ubatch_size: u32,
+    cache_ram_mb: u32,
+    slot_save_path: &str,
+) -> ServerConfig {
+    let mut server = qwen_server_config(
+        ctx_size,
+        parallel,
+        ubatch_size,
+        cache_ram_mb,
+        slot_save_path,
+    );
+    server.flash_attn = false;
+    server
+}
+
+fn qwen_kv_unified_server_config(
+    ctx_size: u32,
+    parallel: usize,
+    ubatch_size: u32,
+    cache_ram_mb: u32,
+    slot_save_path: &str,
+) -> ServerConfig {
+    let mut server = qwen_server_config(
+        ctx_size,
+        parallel,
+        ubatch_size,
+        cache_ram_mb,
+        slot_save_path,
+    );
+    for value in &mut server.extra_args {
+        if value == "q8_0" {
+            *value = "q4_0".to_string();
+        }
+    }
+    server.extra_args.push("--kv-unified".to_string());
+    server
 }
 
 fn qwen_server_config(
@@ -800,6 +1018,21 @@ fn default_data_dir_from_env(
         .join(APP_DIR_NAME)
 }
 
+fn expected_server_binary(source_dir: &Path) -> PathBuf {
+    source_dir
+        .join("build")
+        .join("bin")
+        .join(binary_name("llama-server"))
+}
+
+fn legacy_server_binary(source_dir: &Path) -> PathBuf {
+    source_dir
+        .parent()
+        .unwrap_or(source_dir)
+        .join("bin")
+        .join(binary_name("llama-server"))
+}
+
 fn default_state_dir_from_env(
     xdg_state_home: Option<std::ffi::OsString>,
     home: Option<std::ffi::OsString>,
@@ -952,9 +1185,9 @@ mod tests {
 
         let qwen_profiles =
             model_state.runtime_profiles_for_path(Path::new("/models/Qwen3.5-4B-Q8_0.gguf"));
-        assert_eq!(qwen_profiles.len(), 4);
+        assert_eq!(qwen_profiles.len(), 15);
         assert_eq!(model_state.active_profile, "orion-qwen-q8-deep");
-        assert_eq!(model_state.profiles.len(), 10);
+        assert_eq!(model_state.profiles.len(), 37);
     }
 
     #[test]
@@ -992,6 +1225,62 @@ mod tests {
             model_state
                 .cycle_runtime_profile_for_path(model)
                 .map(|profile| profile.name.as_str()),
+            Some("orion-qwen-q8-kvu-fanout4")
+        );
+        let extra_args = &model_state
+            .runtime_profile_for_path(model)
+            .expect("orion kv-unified fanout4 profile")
+            .server
+            .extra_args;
+        assert_eq!(&extra_args[0..2], ["--parallel", "4"]);
+        assert_eq!(&extra_args[4..8], ["-ctk", "q4_0", "-ctv", "q4_0"]);
+        assert!(extra_args.iter().any(|arg| arg == "--kv-unified"));
+        assert_eq!(
+            model_state
+                .cycle_runtime_profile_for_path(model)
+                .map(|profile| profile.name.as_str()),
+            Some("orion-qwen-q8-kvu-fanout6")
+        );
+        assert_eq!(
+            model_state
+                .cycle_runtime_profile_for_path(model)
+                .map(|profile| profile.name.as_str()),
+            Some("orion-qwen-q8-kvu-fanout8")
+        );
+        assert_eq!(
+            model_state
+                .cycle_runtime_profile_for_path(model)
+                .map(|profile| profile.name.as_str()),
+            Some("5060ti-qwen4b-fanout4")
+        );
+        assert_eq!(
+            model_state
+                .cycle_runtime_profile_for_path(model)
+                .map(|profile| profile.name.as_str()),
+            Some("5060ti-qwen4b-dual")
+        );
+        assert_eq!(
+            model_state
+                .cycle_runtime_profile_for_path(model)
+                .map(|profile| profile.name.as_str()),
+            Some("5060ti-qwen4b-kvu-fanout4")
+        );
+        assert_eq!(
+            model_state
+                .cycle_runtime_profile_for_path(model)
+                .map(|profile| profile.name.as_str()),
+            Some("5060ti-qwen4b-kvu-fanout6")
+        );
+        assert_eq!(
+            model_state
+                .cycle_runtime_profile_for_path(model)
+                .map(|profile| profile.name.as_str()),
+            Some("5060ti-qwen4b-kvu-fanout8")
+        );
+        assert_eq!(
+            model_state
+                .cycle_runtime_profile_for_path(model)
+                .map(|profile| profile.name.as_str()),
             Some("5070ti-qwen4b-fanout4")
         );
         assert_eq!(
@@ -999,6 +1288,24 @@ mod tests {
                 .cycle_runtime_profile_for_path(model)
                 .map(|profile| profile.name.as_str()),
             Some("5070ti-qwen4b-dual")
+        );
+        assert_eq!(
+            model_state
+                .cycle_runtime_profile_for_path(model)
+                .map(|profile| profile.name.as_str()),
+            Some("5070ti-qwen4b-kvu-fanout4")
+        );
+        assert_eq!(
+            model_state
+                .cycle_runtime_profile_for_path(model)
+                .map(|profile| profile.name.as_str()),
+            Some("5070ti-qwen4b-kvu-fanout6")
+        );
+        assert_eq!(
+            model_state
+                .cycle_runtime_profile_for_path(model)
+                .map(|profile| profile.name.as_str()),
+            Some("5070ti-qwen4b-kvu-fanout8")
         );
         assert_eq!(
             model_state
@@ -1023,21 +1330,80 @@ mod tests {
             names,
             vec![
                 "m6000-qwen9b-deep",
+                "m6000-qwen9b-fanout1",
+                "m6000-qwen9b-fanout2",
+                "m6000-qwen9b-fanout3",
                 "m6000-qwen9b-fanout4",
                 "m6000-qwen9b-fanout6",
+                "m6000-qwen9b-mtp-deep",
+                "m6000-qwen9b-mtp-vision",
+                "m6000-qwen9b-kvu-fanout4",
+                "m6000-qwen9b-kvu-fanout6",
+                "m6000-qwen9b-kvu-fanout8",
+                "5060ti-qwen9b-deep",
+                "5060ti-qwen9b-balanced2",
+                "5060ti-qwen9b-kvu-fanout4",
+                "5060ti-qwen9b-kvu-fanout6",
+                "5060ti-qwen9b-kvu-fanout8",
                 "5070ti-qwen9b-deep",
-                "5070ti-qwen9b-balanced2"
+                "5070ti-qwen9b-balanced2",
+                "5070ti-qwen9b-kvu-fanout4",
+                "5070ti-qwen9b-kvu-fanout6",
+                "5070ti-qwen9b-kvu-fanout8"
             ]
         );
         assert_eq!(profiles[1].server.ctx_size, 262_144);
-        assert_eq!(&profiles[1].server.extra_args[0..2], ["--parallel", "4"]);
-        assert_eq!(profiles[2].server.ubatch_size, 96);
+        assert_eq!(&profiles[1].server.extra_args[0..2], ["--parallel", "2"]);
+        assert!(!profiles[1].server.flash_attn);
+        assert_eq!(&profiles[2].server.extra_args[0..2], ["--parallel", "2"]);
+        assert!(!profiles[2].server.flash_attn);
+        assert_eq!(&profiles[3].server.extra_args[0..2], ["--parallel", "3"]);
+        assert!(!profiles[3].server.flash_attn);
+        assert_eq!(&profiles[4].server.extra_args[0..2], ["--parallel", "4"]);
+        assert!(!profiles[4].server.flash_attn);
+        assert_eq!(profiles[5].server.ubatch_size, 96);
         assert_eq!(
-            &profiles[2].server.extra_args[8..10],
+            &profiles[5].server.extra_args[8..10],
             ["--cache-ram", "8192"]
         );
-        assert_eq!(profiles[3].server.ctx_size, 196_608);
-        assert_eq!(&profiles[4].server.extra_args[0..2], ["--parallel", "2"]);
+        assert_eq!(
+            &profiles[6].server.extra_args[10..12],
+            ["--spec-type", "draft-mtp"]
+        );
+        assert_eq!(
+            &profiles[6].server.extra_args[12..],
+            ["--temp", "0.6", "--top-p", "0.95", "--top-k", "20", "--min-p", "0"]
+        );
+        assert_eq!(
+            &profiles[7].server.extra_args[10..12],
+            ["--spec-type", "draft-mtp"]
+        );
+        assert_eq!(profiles[7].server.extra_args[20], "--mmproj");
+        assert!(
+            profiles[7].server.extra_args[21].ends_with("lmml/models/mmproj-Qwen3.5-9B-BF16.gguf")
+        );
+        assert_eq!(profiles[8].server.ctx_size, 86_016);
+        assert_eq!(&profiles[8].server.extra_args[0..2], ["--parallel", "4"]);
+        assert_eq!(
+            &profiles[8].server.extra_args[4..8],
+            ["-ctk", "q4_0", "-ctv", "q4_0"]
+        );
+        assert!(profiles[8]
+            .server
+            .extra_args
+            .iter()
+            .any(|arg| arg == "--kv-unified"));
+        assert_eq!(profiles[9].server.ctx_size, 86_016);
+        assert_eq!(&profiles[9].server.extra_args[0..2], ["--parallel", "6"]);
+        assert_eq!(profiles[10].server.ctx_size, 86_016);
+        assert_eq!(&profiles[10].server.extra_args[0..2], ["--parallel", "8"]);
+        assert_eq!(profiles[11].server.ctx_size, 196_608);
+        assert_eq!(&profiles[12].server.extra_args[0..2], ["--parallel", "2"]);
+        assert_eq!(profiles[13].server.ctx_size, 73_728);
+        assert_eq!(&profiles[14].server.extra_args[0..2], ["--parallel", "6"]);
+        assert_eq!(&profiles[17].server.extra_args[0..2], ["--parallel", "2"]);
+        assert_eq!(profiles[18].server.ctx_size, 73_728);
+        assert_eq!(&profiles[20].server.extra_args[0..2], ["--parallel", "8"]);
     }
 
     #[test]
@@ -1097,6 +1463,56 @@ mod tests {
         let loaded = AppState::load_from_path(&path).expect("load state");
 
         assert_eq!(loaded, state);
+    }
+
+    #[test]
+    fn default_build_binary_points_to_llama_cpp_build() {
+        let state = AppState::default();
+
+        assert_eq!(
+            state.build.binary,
+            state
+                .build
+                .source_dir
+                .join("build")
+                .join("bin")
+                .join(binary_name("llama-server"))
+        );
+    }
+
+    #[test]
+    fn load_repairs_legacy_build_binary_default() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir.path().join("lmml").join("state.toml");
+        let mut state = sample_state();
+        state.build.source_dir = tempdir.path().join("data").join("lmml").join("llama.cpp");
+        state.build.binary = tempdir
+            .path()
+            .join("data")
+            .join("lmml")
+            .join("bin")
+            .join(binary_name("llama-server"));
+        state.save_to_path(&path).expect("save legacy state");
+
+        let loaded = AppState::load_from_path(&path).expect("load migrated state");
+
+        assert_eq!(
+            loaded.build.binary,
+            expected_server_binary(&state.build.source_dir)
+        );
+    }
+
+    #[test]
+    fn load_preserves_custom_build_binary() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir.path().join("lmml").join("state.toml");
+        let mut state = sample_state();
+        state.build.binary = tempdir.path().join("custom").join("llama-server");
+        state.save_to_path(&path).expect("save custom state");
+
+        let loaded = AppState::load_from_path(&path).expect("load state");
+
+        assert_eq!(loaded.build.binary, state.build.binary);
     }
 
     #[test]
@@ -1160,7 +1576,7 @@ mod tests {
         AppState {
             build: BuildState {
                 source_dir: PathBuf::from("/data/lmml/llama.cpp"),
-                binary: PathBuf::from("/data/lmml/bin/llama-server"),
+                binary: PathBuf::from("/data/lmml/custom/llama-server"),
                 commit: "abc1234".to_string(),
                 cmake_hash: "e3b0c44298fc".to_string(),
                 backend: "Cuda".to_string(),

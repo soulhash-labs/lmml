@@ -511,6 +511,20 @@ orion-qwen-q8-balanced:
   compact target=60000-80000 per active agent
   hard compress/reject=100000-115000 per active agent
 
+5060ti-qwen4b-fanout4:
+  ctx_size=131072
+  parallel=4
+  subagents=3 max
+  per-slot theoretical context=32768
+  compact target=16000-24000 per active agent
+
+5060ti-qwen4b-dual:
+  ctx_size=262144
+  parallel=2
+  subagents=1 max
+  per-slot theoretical context=131072
+  compact target=60000-90000 per active agent
+
 5070ti-qwen4b-fanout4:
   ctx_size=131072
   parallel=4
@@ -531,6 +545,24 @@ m6000-qwen9b-deep:
   subagents=0 by default
   compact target=120000-170000
 
+m6000-qwen9b-fanout1:
+  ctx_size=262144
+  parallel=2
+  subagents=1 max
+  compact target=60000-90000 per active agent
+
+m6000-qwen9b-fanout2:
+  ctx_size=262144
+  parallel=2
+  subagents=2 max
+  compact target=60000-90000 per active agent
+
+m6000-qwen9b-fanout3:
+  ctx_size=262144
+  parallel=3
+  subagents=3 max
+  compact target=42000-60000 per active agent
+
 m6000-qwen9b-fanout4:
   ctx_size=262144
   parallel=4
@@ -545,6 +577,41 @@ m6000-qwen9b-fanout6:
   per-slot theoretical context=43690
   compact target=20000-30000 per active agent
 
+m6000-qwen9b-mtp-deep:
+  ctx_size=262144
+  parallel=1
+  MTP enabled with --spec-type draft-mtp
+  text-only; does not load mmproj
+
+m6000-qwen9b-mtp-vision:
+  ctx_size=262144
+  parallel=1
+  MTP enabled with --spec-type draft-mtp
+  loads mmproj-Qwen3.5-9B-BF16.gguf for multimodal inputs
+
+m6000-qwen9b-kvu-fanout4 / fanout6 / fanout8:
+  ctx_size=86016
+  parallel=4, 6, or 8
+  KV=q4_0 key/value with --kv-unified
+
+5060ti-qwen9b-deep:
+  ctx_size=196608
+  parallel=1
+  subagents=0 by default
+  compact target=90000-130000
+
+5060ti-qwen9b-balanced2:
+  ctx_size=131072
+  parallel=2
+  subagents=1 max
+  per-slot theoretical context=65536
+  compact target=32000-48000 per active agent
+
+5060ti-qwen9b-kvu-fanout4 / fanout6 / fanout8:
+  ctx_size=73728
+  parallel=4, 6, or 8
+  KV=q4_0 key/value with --kv-unified
+
 5070ti-qwen9b-deep:
   ctx_size=196608
   parallel=1
@@ -557,6 +624,11 @@ m6000-qwen9b-fanout6:
   subagents=1 max
   per-slot theoretical context=65536
   compact target=32000-48000 per active agent
+
+5070ti-qwen9b-kvu-fanout4 / fanout6 / fanout8:
+  ctx_size=73728
+  parallel=4, 6, or 8
+  KV=q4_0 key/value with --kv-unified
 ```
 
 The TUI `p` key switches the saved lmml runtime profile for the selected model.

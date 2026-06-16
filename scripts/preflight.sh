@@ -50,6 +50,10 @@ first_version() {
   sed -n 's/[^0-9]*\([0-9][0-9.]*\).*/\1/p' | head -n 1
 }
 
+major_version() {
+  printf '%s\n' "$1" | sed -n 's/[^0-9]*\([0-9][0-9]*\).*/\1/p' | head -n 1
+}
+
 version_ge() {
   local current=$1
   local minimum=$2
@@ -231,6 +235,20 @@ fi
 if command -v nvcc >/dev/null 2>&1; then
   NVCC_VERSION=$(nvcc --version | sed -n 's/.*release \([^,]*\).*/\1/p' | head -n 1)
   ok "nvcc ${NVCC_VERSION:-found}"
+  GCC_MAJOR=""
+  if command -v g++ >/dev/null 2>&1; then
+    GCC_MAJOR=$(major_version "$(g++ -dumpfullversion -dumpversion)")
+  fi
+  NVCC_MAJOR=$(major_version "$NVCC_VERSION")
+  if [[ ( "$NVCC_MAJOR" == "11" || "${NVCC_MAJOR:-0}" -ge 13 ) && "${GCC_MAJOR:-0}" -ge 13 ]]; then
+    if command -v g++-11 >/dev/null 2>&1; then
+      ok "g++-11 found — CUDA ${NVCC_VERSION} host compiler workaround available"
+    else
+      warn "CUDA ${NVCC_VERSION} with GCC ${GCC_MAJOR} can fail on CUDA/glibc math headers"
+      warn "Install g++-11 so lmml can pass -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-11"
+      need_apt g++-11
+    fi
+  fi
 else
   if [[ "$GPU_MODE" == "cpu-only" ]]; then
     warn "nvcc not found"
@@ -274,7 +292,7 @@ if (( ${#APT_PACKAGES[@]} > 0 )); then
     sudo apt-get install -y "${UNIQUE_APT_PACKAGES[@]}"
   else
     warn "apt packages may fix hard or recommended prerequisites: ${UNIQUE_APT_PACKAGES[*]}"
-    printf '  Re-run with LMML_FIX_DEPS=1 to install compiler/cmake/git/curl/sccache via apt.\n'
+    printf '  Re-run with LMML_FIX_DEPS=1 to install compiler/cmake/git/curl/sccache/g++-11 via apt.\n'
   fi
 fi
 

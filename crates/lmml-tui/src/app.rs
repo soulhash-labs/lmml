@@ -6,7 +6,7 @@
 mod settings_state;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use lmml_build::{BuildEvent, UpdateCheck};
 use lmml_compat::LlamaBinaryCapabilities;
@@ -273,6 +273,7 @@ impl App {
             .runtime_profile_for_path(&state.model.last_used)
             .cloned()
         {
+            state.model.active_profile = profile.name;
             state.server = profile.server;
         }
         let onboarding_models_dir_buffer = state.model.models_dir.to_string_lossy().into_owned();
@@ -335,7 +336,8 @@ impl App {
                         lmml_detect::CudaCompatibility::Compatible { .. } => {
                             Some("available".to_string())
                         }
-                        lmml_detect::CudaCompatibility::ToolkitTooOld { found_toolkit, .. } => {
+                        lmml_detect::CudaCompatibility::ToolkitTooOld { found_toolkit, .. }
+                        | lmml_detect::CudaCompatibility::ToolkitTooNew { found_toolkit, .. } => {
                             Some(found_toolkit.clone())
                         }
                         lmml_detect::CudaCompatibility::NoGpu
@@ -350,6 +352,7 @@ impl App {
                     vram_mb: profile.gpus.iter().map(|gpu| gpu.memory_total_mb).collect(),
                     sccache: profile.sccache.is_some(),
                 });
+                self.sync_build_backend_after_detection(&profile);
                 self.detect_log.push(format!(
                     "Detected backend: {:?}",
                     profile.recommended_backend()
@@ -1126,6 +1129,10 @@ impl App {
                 self.state.build.last_built = unix_timestamp_string();
                 self.build_binary = Some(self.state.build.binary.clone());
                 self.build_error = None;
+                self.push_build_log(format!(
+                    "Build complete: {}",
+                    self.state.build.binary.display()
+                ));
                 self.status_message = "Build complete".to_string();
                 self.save_state_after("Build complete");
             }
@@ -1159,9 +1166,33 @@ impl App {
         }
     }
 
+    fn sync_build_backend_after_detection(&mut self, profile: &SystemProfile) {
+        if self.state.build.backend != "Cuda" {
+            return;
+        }
+        let BuildBackend::Cuda { archs } = profile.recommended_backend() else {
+            return;
+        };
+        let detected_archs = archs
+            .iter()
+            .map(|arch| (*arch).to_string())
+            .collect::<Vec<_>>();
+        if detected_archs.is_empty() || detected_archs == self.state.build.archs {
+            return;
+        }
+
+        let previous = format_arch_list(&self.state.build.archs);
+        let current = format_arch_list(&detected_archs);
+        self.state.build.archs = detected_archs;
+        self.state.build.cmake_hash.clear();
+        self.state.build.last_built.clear();
+        self.detect_log
+            .push(format!("CUDA build archs updated: {previous} -> {current}"));
+    }
+
     /// Build a `lmml-build` config from current app state.
     pub fn build_config(&self, clean: bool) -> lmml_build::BuildConfig {
-        let backend = if self.state.build.backend == "Auto" {
+        let requested_backend = if self.state.build.backend == "Auto" {
             self.detect_profile
                 .as_ref()
                 .map(SystemProfile::recommended_backend)
@@ -1169,12 +1200,36 @@ impl App {
         } else {
             backend_from_state(&self.state.build.backend, &self.state.build.archs)
         };
+        let requested_backend = refresh_cuda_backend_for_detected_profile(
+            requested_backend,
+            self.detect_profile.as_ref(),
+        );
+
+        let cuda_compiler = matches!(requested_backend, BuildBackend::Cuda { .. })
+            .then(|| detect_cuda_compiler_preference(&requested_backend))
+            .flatten();
+        let backend = if cuda_backend_dropped_by_selected_toolkit(
+            &requested_backend,
+            cuda_compiler.as_deref(),
+        ) {
+            fallback_non_cuda_backend(self.detect_profile.as_ref())
+        } else {
+            requested_backend
+        };
+
         let mut config = lmml_build::BuildConfig::new(self.state.build.source_dir.clone(), backend);
         config.clean = clean;
         config.sccache = self
             .detect_profile
             .as_ref()
             .and_then(|profile| profile.sccache.clone());
+        if matches!(config.backend, BuildBackend::Cuda { .. }) {
+            config.cuda_compiler = cuda_compiler;
+            config.cuda_glibc_compat_shim =
+                cuda_glibc_compat_shim_needed(config.cuda_compiler.as_deref());
+            config.cuda_host_compiler =
+                detect_cuda_host_compiler_workaround(config.cuda_compiler.as_deref());
+        }
         if self.state.build.track_mode == lmml_state::TrackMode::Tag
             && !self.state.build.commit.is_empty()
         {
@@ -1244,6 +1299,7 @@ impl App {
     fn select_model_path(&mut self, path: PathBuf) -> bool {
         self.state.model.last_used = path.clone();
         if let Some(profile) = self.state.model.runtime_profile_for_path(&path).cloned() {
+            self.state.model.active_profile = profile.name;
             self.state.server = profile.server;
             true
         } else {
@@ -1345,6 +1401,51 @@ fn backend_archs(backend: &BuildBackend) -> Vec<String> {
     }
 }
 
+fn refresh_cuda_backend_for_detected_profile(
+    backend: BuildBackend,
+    profile: Option<&SystemProfile>,
+) -> BuildBackend {
+    let BuildBackend::Cuda { .. } = backend else {
+        return backend;
+    };
+    match profile.map(SystemProfile::recommended_backend) {
+        Some(BuildBackend::Cuda { archs }) if !archs.is_empty() => BuildBackend::Cuda { archs },
+        Some(BuildBackend::Cuda { .. })
+        | Some(BuildBackend::Metal)
+        | Some(BuildBackend::Vulkan)
+        | Some(BuildBackend::CpuAvx2)
+        | Some(BuildBackend::CpuAvx)
+        | Some(BuildBackend::CpuFallback)
+        | None => backend,
+    }
+}
+
+fn format_arch_list(archs: &[String]) -> String {
+    if archs.is_empty() {
+        "none".to_string()
+    } else {
+        archs.join(",")
+    }
+}
+
+fn fallback_non_cuda_backend(profile: Option<&SystemProfile>) -> BuildBackend {
+    if let Some(profile) = profile {
+        if profile.metal.available {
+            return BuildBackend::Metal;
+        }
+        if profile.vulkan.available {
+            return BuildBackend::Vulkan;
+        }
+        if profile.cpu.avx2 {
+            return BuildBackend::CpuAvx2;
+        }
+        if profile.cpu.avx {
+            return BuildBackend::CpuAvx;
+        }
+    }
+    BuildBackend::CpuFallback
+}
+
 fn next_backend(current: BuildBackend) -> BuildBackend {
     match current {
         BuildBackend::Cuda { .. } => BuildBackend::Metal,
@@ -1391,6 +1492,12 @@ fn owned_arch_to_static(arch: &str) -> Option<&'static str> {
         "sm_90a" => Some("sm_90a"),
         "sm_100" => Some("sm_100"),
         "sm_100a" => Some("sm_100a"),
+        "sm_101" => Some("sm_101"),
+        "sm_101a" => Some("sm_101a"),
+        "sm_102" => Some("sm_102"),
+        "sm_102a" => Some("sm_102a"),
+        "sm_120" => Some("sm_120"),
+        "sm_120a" => Some("sm_120a"),
         _ => None,
     }
 }
@@ -1438,6 +1545,235 @@ fn quant_from_char(value: char) -> Option<QuantTier> {
 fn non_empty_filter(value: &str) -> Option<String> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn detect_cuda_compiler_preference(backend: &BuildBackend) -> Option<PathBuf> {
+    detect_cuda_compiler_override().or_else(|| preferred_legacy_cuda_compiler(backend))
+}
+
+fn detect_cuda_compiler_override() -> Option<PathBuf> {
+    ["LMML_CUDA_COMPILER", "CUDACXX"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .map(PathBuf::from)
+        .find(|path| path.exists())
+}
+
+fn preferred_legacy_cuda_compiler(backend: &BuildBackend) -> Option<PathBuf> {
+    if !cuda_backend_targets_legacy_archs(backend) {
+        return None;
+    }
+
+    nvcc_candidates()
+        .into_iter()
+        .filter(|path| path.is_absolute() && path.exists())
+        .find(|path| {
+            nvcc_version_output_for(path)
+                .as_deref()
+                .is_some_and(cuda_major_works_for_legacy_archs)
+        })
+}
+
+fn cuda_backend_targets_legacy_archs(backend: &BuildBackend) -> bool {
+    match backend {
+        BuildBackend::Cuda { archs } => {
+            !archs.is_empty()
+                && archs
+                    .iter()
+                    .all(|arch| cuda_arch_number(arch).is_some_and(|number| number <= 75))
+        }
+        BuildBackend::Metal
+        | BuildBackend::Vulkan
+        | BuildBackend::CpuAvx2
+        | BuildBackend::CpuAvx
+        | BuildBackend::CpuFallback => false,
+    }
+}
+
+fn cuda_backend_dropped_by_selected_toolkit(
+    backend: &BuildBackend,
+    cuda_compiler: Option<&Path>,
+) -> bool {
+    if !cuda_backend_targets_archs_dropped_by_cuda13(backend) {
+        return false;
+    }
+    let nvcc_output = match cuda_compiler {
+        Some(cuda_compiler) => nvcc_version_output_for(cuda_compiler),
+        None => nvcc_version_output(),
+    };
+    nvcc_output
+        .as_deref()
+        .is_some_and(|output| cuda_backend_dropped_by_toolkit_version(backend, output))
+}
+
+fn cuda_backend_dropped_by_toolkit_version(
+    backend: &BuildBackend,
+    nvcc_version_output: &str,
+) -> bool {
+    cuda_backend_targets_archs_dropped_by_cuda13(backend)
+        && parsed_cuda_major(nvcc_version_output).is_some_and(|major| major >= 13)
+}
+
+fn cuda_backend_targets_archs_dropped_by_cuda13(backend: &BuildBackend) -> bool {
+    match backend {
+        BuildBackend::Cuda { archs } => archs
+            .iter()
+            .any(|arch| cuda_arch_number(arch).is_some_and(|number| number <= 72)),
+        BuildBackend::Metal
+        | BuildBackend::Vulkan
+        | BuildBackend::CpuAvx2
+        | BuildBackend::CpuAvx
+        | BuildBackend::CpuFallback => false,
+    }
+}
+
+fn cuda_arch_number(arch: &str) -> Option<u32> {
+    arch.strip_prefix("sm_")
+        .unwrap_or(arch)
+        .trim_end_matches('a')
+        .parse()
+        .ok()
+}
+
+fn cuda_major_works_for_legacy_archs(nvcc_version_output: &str) -> bool {
+    parsed_cuda_major(nvcc_version_output).is_some_and(|major| (11..=12).contains(&major))
+}
+
+fn cuda_glibc_compat_shim_needed(cuda_compiler: Option<&Path>) -> bool {
+    let nvcc_output = match cuda_compiler {
+        Some(cuda_compiler) => nvcc_version_output_for(cuda_compiler),
+        None => nvcc_version_output(),
+    };
+    nvcc_output
+        .as_deref()
+        .is_some_and(cuda_glibc_compat_shim_needed_for_version)
+}
+
+fn cuda_glibc_compat_shim_needed_for_version(nvcc_version_output: &str) -> bool {
+    parsed_cuda_major(nvcc_version_output).is_some_and(|major| major >= 13)
+}
+
+fn detect_cuda_host_compiler_workaround(cuda_compiler: Option<&Path>) -> Option<PathBuf> {
+    let nvcc_output = match cuda_compiler {
+        Some(cuda_compiler) => nvcc_version_output_for(cuda_compiler),
+        None => nvcc_version_output(),
+    }?;
+    let compiler_version = compiler_version_output("g++")?;
+    let candidate_majors = cuda_host_compiler_majors_for_versions(&nvcc_output, &compiler_version)?;
+    cuda_host_compiler_candidate(&candidate_majors)
+}
+
+fn cuda_host_compiler_majors_for_versions(
+    nvcc_version_output: &str,
+    compiler_version_output: &str,
+) -> Option<Vec<u32>> {
+    let cuda_major = parsed_cuda_major(nvcc_version_output)?;
+    let compiler_major = parsed_major_version(compiler_version_output)?;
+    if cuda_major >= 13 && compiler_major >= 15 {
+        return Some(vec![14, 13, 12, 11]);
+    }
+    if cuda_major == 11 && compiler_major >= 13 {
+        return Some(vec![11, 10, 9]);
+    }
+    None
+}
+
+fn compiler_version_output(program: &str) -> Option<String> {
+    std::process::Command::new(program)
+        .arg("-dumpfullversion")
+        .arg("-dumpversion")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+}
+
+fn cuda_host_compiler_candidate(majors: &[u32]) -> Option<PathBuf> {
+    majors
+        .iter()
+        .map(|major| PathBuf::from(format!("/usr/bin/g++-{major}")))
+        .find(|path| path.exists() && compiler_path_major(path).is_some())
+}
+
+fn compiler_path_major(path: &Path) -> Option<u32> {
+    let output = std::process::Command::new(path)
+        .arg("-dumpfullversion")
+        .arg("-dumpversion")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    let version = String::from_utf8(output.stdout).ok()?;
+    parsed_major_version(&version)
+}
+
+fn nvcc_version_output() -> Option<String> {
+    nvcc_candidates()
+        .into_iter()
+        .find_map(|nvcc| nvcc_version_output_for(&nvcc))
+}
+
+fn nvcc_version_output_for(nvcc: &Path) -> Option<String> {
+    let output = std::process::Command::new(nvcc)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    String::from_utf8(output.stdout).ok()
+}
+
+fn nvcc_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    push_unique_path(&mut candidates, PathBuf::from("nvcc"));
+    for env_name in ["CUDA_HOME", "CUDA_PATH"] {
+        if let Some(path) = std::env::var_os(env_name) {
+            push_unique_path(
+                &mut candidates,
+                PathBuf::from(path).join("bin").join("nvcc"),
+            );
+        }
+    }
+    push_unique_path(&mut candidates, PathBuf::from("/usr/local/cuda/bin/nvcc"));
+    if let Ok(entries) = std::fs::read_dir("/usr/local") {
+        let mut cuda_dirs = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("cuda-"))
+            })
+            .collect::<Vec<_>>();
+        cuda_dirs.sort();
+        cuda_dirs.reverse();
+        for cuda_dir in cuda_dirs {
+            push_unique_path(&mut candidates, cuda_dir.join("bin").join("nvcc"));
+        }
+    }
+    candidates
+}
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if !paths.iter().any(|existing| paths_equal(existing, &path)) {
+        paths.push(path);
+    }
+}
+
+fn paths_equal(left: &Path, right: &Path) -> bool {
+    left == right
+}
+
+fn parsed_cuda_major(output: &str) -> Option<u32> {
+    output
+        .split("release ")
+        .nth(1)
+        .and_then(|tail| parsed_major_version(tail.trim_start()))
+}
+
+fn parsed_major_version(output: &str) -> Option<u32> {
+    output
+        .split(|ch: char| !ch.is_ascii_digit())
+        .find(|part| !part.is_empty())
+        .and_then(|part| part.parse().ok())
 }
 
 impl Default for App {
@@ -1509,6 +1845,43 @@ mod tests {
     }
 
     #[test]
+    fn detect_complete_refreshes_stale_cuda_archs_after_gpu_upgrade() {
+        let mut app = App::default();
+        app.state.build.backend = "Cuda".to_string();
+        app.state.build.archs = vec!["sm_61".to_string()];
+        app.state.build.cmake_hash = "stale".to_string();
+        app.state.build.last_built = "old".to_string();
+
+        let mut profile = cuda_profile();
+        profile.cuda = lmml_detect::CudaCompatibility::Compatible {
+            archs: vec!["sm_120"],
+        };
+        profile.gpus = vec![lmml_detect::GpuInfo {
+            name: "NVIDIA GeForce RTX 5060 Ti".to_string(),
+            memory_total_mb: 16_384,
+            compute_cap: "12.0".to_string(),
+            arch: Some("sm_120"),
+        }];
+
+        app.handle_event(AppEvent::DetectComplete(Box::new(profile)));
+
+        assert_eq!(app.state.build.backend, "Cuda");
+        assert_eq!(app.state.build.archs, vec!["sm_120"]);
+        assert!(app.state.build.cmake_hash.is_empty());
+        assert!(app.state.build.last_built.is_empty());
+        assert!(app
+            .detect_log
+            .iter()
+            .any(|line| line == "CUDA build archs updated: sm_61 -> sm_120"));
+        assert_eq!(
+            app.build_config(false).backend,
+            BuildBackend::Cuda {
+                archs: vec!["sm_120"]
+            }
+        );
+    }
+
+    #[test]
     fn build_config_uses_persisted_backend_and_clean_flag() {
         let mut app = App::default();
         app.state.build.backend = "Cuda".to_string();
@@ -1573,6 +1946,7 @@ mod tests {
             cuda: lmml_detect::CudaCompatibility::NoGpu,
             gpus: Vec::new(),
             gpu_probe_error: None,
+            nvidia_devices: lmml_detect::NvidiaDeviceNodes::default(),
             sccache: None,
             metal: lmml_detect::MetalSupport {
                 available: false,
@@ -1736,6 +2110,7 @@ mod tests {
                 arch: Some("sm_86"),
             }],
             gpu_probe_error: None,
+            nvidia_devices: lmml_detect::NvidiaDeviceNodes::default(),
             sccache: None,
             metal: lmml_detect::MetalSupport {
                 available: false,
@@ -1865,6 +2240,139 @@ mod tests {
     }
 
     #[test]
+    fn qwen9b_m6000_profiles_are_available_from_tui_profile_switcher() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut app = App::default();
+        app.state_save_path = Some(tempdir.path().join("state.toml"));
+        app.active_tab = Tab::Models;
+        app.models = vec![model_entry(
+            "/home/angelo/.local/share/lmml/models/Qwen3.5-9B-Q8_0.gguf",
+        )];
+        app.selected_model = 0;
+
+        app.dispatch(Action::SelectModel(app.models[0].path.clone()));
+
+        assert_eq!(app.state.model.active_profile, "m6000-qwen9b-deep");
+        assert_eq!(app.state.server.ctx_size, 262_144);
+        assert_eq!(&app.state.server.extra_args[0..2], ["--parallel", "1"]);
+
+        let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('p'))));
+        assert!(matches!(action, Some(Action::CycleRuntimeProfile(_))));
+        app.dispatch(action.expect("profile cycle action"));
+        assert_eq!(app.state.model.active_profile, "m6000-qwen9b-fanout1");
+        assert_eq!(&app.state.server.extra_args[0..2], ["--parallel", "2"]);
+        assert_eq!(app.state.server.ubatch_size, 128);
+        assert!(!app.state.server.flash_attn);
+        assert_eq!(&app.state.server.extra_args[8..10], ["--cache-ram", "4096"]);
+
+        let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('p'))));
+        app.dispatch(action.expect("profile cycle action"));
+        assert_eq!(app.state.model.active_profile, "m6000-qwen9b-fanout2");
+        assert_eq!(&app.state.server.extra_args[0..2], ["--parallel", "2"]);
+        assert_eq!(app.state.server.ubatch_size, 128);
+
+        let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('p'))));
+        app.dispatch(action.expect("profile cycle action"));
+        assert_eq!(app.state.model.active_profile, "m6000-qwen9b-fanout3");
+        assert_eq!(&app.state.server.extra_args[0..2], ["--parallel", "3"]);
+        assert_eq!(app.state.server.ubatch_size, 128);
+
+        let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('p'))));
+        app.dispatch(action.expect("profile cycle action"));
+        assert_eq!(app.state.model.active_profile, "m6000-qwen9b-fanout4");
+        assert_eq!(&app.state.server.extra_args[0..2], ["--parallel", "4"]);
+        assert_eq!(app.state.server.ubatch_size, 128);
+
+        let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('p'))));
+        app.dispatch(action.expect("profile cycle action"));
+        assert_eq!(app.state.model.active_profile, "m6000-qwen9b-fanout6");
+        assert_eq!(&app.state.server.extra_args[0..2], ["--parallel", "6"]);
+        assert_eq!(app.state.server.ubatch_size, 96);
+        assert_eq!(&app.state.server.extra_args[8..10], ["--cache-ram", "8192"]);
+
+        let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('p'))));
+        app.dispatch(action.expect("profile cycle action"));
+        assert_eq!(app.state.model.active_profile, "m6000-qwen9b-mtp-deep");
+        assert_eq!(
+            &app.state.server.extra_args[10..12],
+            ["--spec-type", "draft-mtp"]
+        );
+        assert!(!app
+            .state
+            .server
+            .extra_args
+            .iter()
+            .any(|arg| arg == "--mmproj"));
+
+        let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('p'))));
+        app.dispatch(action.expect("profile cycle action"));
+        assert_eq!(app.state.model.active_profile, "m6000-qwen9b-mtp-vision");
+        assert_eq!(
+            &app.state.server.extra_args[10..12],
+            ["--spec-type", "draft-mtp"]
+        );
+        assert!(app
+            .state
+            .server
+            .extra_args
+            .iter()
+            .any(|arg| arg == "--mmproj"));
+
+        let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('p'))));
+        app.dispatch(action.expect("profile cycle action"));
+        assert_eq!(app.state.model.active_profile, "m6000-qwen9b-kvu-fanout4");
+        assert_eq!(app.state.server.ctx_size, 86_016);
+        assert_eq!(&app.state.server.extra_args[0..2], ["--parallel", "4"]);
+        assert_eq!(
+            &app.state.server.extra_args[4..8],
+            ["-ctk", "q4_0", "-ctv", "q4_0"]
+        );
+        assert!(app
+            .state
+            .server
+            .extra_args
+            .iter()
+            .any(|arg| arg == "--kv-unified"));
+
+        let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('p'))));
+        app.dispatch(action.expect("profile cycle action"));
+        assert_eq!(app.state.model.active_profile, "m6000-qwen9b-kvu-fanout6");
+        assert_eq!(&app.state.server.extra_args[0..2], ["--parallel", "6"]);
+
+        let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('p'))));
+        app.dispatch(action.expect("profile cycle action"));
+        assert_eq!(app.state.model.active_profile, "m6000-qwen9b-kvu-fanout8");
+        assert_eq!(&app.state.server.extra_args[0..2], ["--parallel", "8"]);
+
+        let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('p'))));
+        app.dispatch(action.expect("profile cycle action"));
+        assert_eq!(app.state.model.active_profile, "5060ti-qwen9b-deep");
+        assert_eq!(app.state.server.ctx_size, 196_608);
+
+        let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('p'))));
+        app.dispatch(action.expect("profile cycle action"));
+        assert_eq!(app.state.model.active_profile, "5060ti-qwen9b-balanced2");
+        assert_eq!(&app.state.server.extra_args[0..2], ["--parallel", "2"]);
+
+        let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('p'))));
+        app.dispatch(action.expect("profile cycle action"));
+        assert_eq!(app.state.model.active_profile, "5060ti-qwen9b-kvu-fanout4");
+        assert_eq!(app.state.server.ctx_size, 73_728);
+
+        let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('p'))));
+        app.dispatch(action.expect("profile cycle action"));
+        assert_eq!(app.state.model.active_profile, "5060ti-qwen9b-kvu-fanout6");
+
+        let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('p'))));
+        app.dispatch(action.expect("profile cycle action"));
+        assert_eq!(app.state.model.active_profile, "5060ti-qwen9b-kvu-fanout8");
+
+        let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('p'))));
+        app.dispatch(action.expect("profile cycle action"));
+        assert_eq!(app.state.model.active_profile, "5070ti-qwen9b-deep");
+    }
+
+    #[test]
     fn profile_key_warns_when_switching_while_server_is_running() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let mut app = App::default();
@@ -1884,6 +2392,95 @@ mod tests {
         assert_eq!(
             app.status_message,
             "Profile orion-qwen-q8-balanced; restart server to apply"
+        );
+    }
+
+    #[test]
+    fn cuda_legacy_arch_detection_matches_pascal_and_maxwell() {
+        assert!(cuda_backend_targets_legacy_archs(&BuildBackend::Cuda {
+            archs: vec!["sm_52", "sm_61"],
+        }));
+        assert!(!cuda_backend_targets_legacy_archs(&BuildBackend::Cuda {
+            archs: vec!["sm_86"],
+        }));
+        assert!(!cuda_backend_targets_legacy_archs(&BuildBackend::Cuda {
+            archs: vec!["sm_120a"],
+        }));
+        assert!(!cuda_backend_targets_legacy_archs(&BuildBackend::Cuda {
+            archs: Vec::new(),
+        }));
+    }
+
+    #[test]
+    fn cuda13_dropped_arch_detection_matches_pascal_not_turing() {
+        let pascal = BuildBackend::Cuda {
+            archs: vec!["sm_61"],
+        };
+        let turing = BuildBackend::Cuda {
+            archs: vec!["sm_75"],
+        };
+        let ampere = BuildBackend::Cuda {
+            archs: vec!["sm_86"],
+        };
+
+        assert!(cuda_backend_targets_archs_dropped_by_cuda13(&pascal));
+        assert!(!cuda_backend_targets_archs_dropped_by_cuda13(&turing));
+        assert!(!cuda_backend_targets_archs_dropped_by_cuda13(&ampere));
+        assert!(cuda_backend_dropped_by_toolkit_version(
+            &pascal,
+            "Cuda compilation tools, release 13.1, V13.1.48"
+        ));
+        assert!(!cuda_backend_dropped_by_toolkit_version(
+            &pascal,
+            "Cuda compilation tools, release 12.4, V12.4.131"
+        ));
+    }
+
+    #[test]
+    fn cuda_legacy_compiler_selection_rejects_cuda_13() {
+        assert!(cuda_major_works_for_legacy_archs(
+            "Cuda compilation tools, release 11.8, V11.8.89"
+        ));
+        assert!(cuda_major_works_for_legacy_archs(
+            "Cuda compilation tools, release 12.4, V12.4.131"
+        ));
+        assert!(!cuda_major_works_for_legacy_archs(
+            "Cuda compilation tools, release 13.1, V13.1.48"
+        ));
+    }
+
+    #[test]
+    fn cuda_glibc_compat_shim_matches_cuda_13() {
+        assert!(cuda_glibc_compat_shim_needed_for_version(
+            "Cuda compilation tools, release 13.1, V13.1.48"
+        ));
+        assert!(!cuda_glibc_compat_shim_needed_for_version(
+            "Cuda compilation tools, release 12.4, V12.4.131"
+        ));
+    }
+
+    #[test]
+    fn cuda_host_compiler_policy_matches_cuda_versions() {
+        assert_eq!(
+            cuda_host_compiler_majors_for_versions(
+                "Cuda compilation tools, release 13.1, V13.1.48",
+                "15.2.0\n"
+            ),
+            Some(vec![14, 13, 12, 11])
+        );
+        assert_eq!(
+            cuda_host_compiler_majors_for_versions(
+                "Cuda compilation tools, release 11.8, V11.8.89",
+                "13.3.0\n"
+            ),
+            Some(vec![11, 10, 9])
+        );
+        assert_eq!(
+            cuda_host_compiler_majors_for_versions(
+                "Cuda compilation tools, release 12.4, V12.4.131",
+                "15.2.0\n"
+            ),
+            None
         );
     }
 
@@ -2017,6 +2614,7 @@ mod tests {
         app.handle_event(AppEvent::ServerCapabilities(Ok(LlamaBinaryCapabilities {
             version: Some("test".to_string()),
             flash_attn: false,
+            flash_attn_requires_value: false,
             mlock: true,
             api_key: false,
             ubatch_size: true,
@@ -2091,6 +2689,7 @@ mod tests {
                 arch: Some("sm_86"),
             }],
             gpu_probe_error: None,
+            nvidia_devices: lmml_detect::NvidiaDeviceNodes::default(),
             sccache: None,
             metal: lmml_detect::MetalSupport {
                 available: false,

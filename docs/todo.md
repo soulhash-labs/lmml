@@ -534,6 +534,9 @@ Current workstation override:
 - [ ] Add doctor/profile validation for Qwen multimodal mode: if a Qwen profile
   enables image/video inputs, require the configured `mmproj` file to exist and
   show the exact llama.cpp projector argument that will be used
+- [ ] Add installer/source-build regression coverage for CUDA 11.x + GCC 13+
+  Ubuntu hosts: preflight should recommend `g++-11`, and CUDA builds should emit
+  `-DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-11` when that compiler exists
 - [x] Make `lmml runtime print-config opencode` print ready-to-paste OpenCode
   JSON
 - [ ] Keep `lmml doctor` read-only for OpenCode integration; it may detect

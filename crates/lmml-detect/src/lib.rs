@@ -8,6 +8,7 @@
 use std::collections::BTreeSet;
 use std::ffi::CString;
 use std::future::Future;
+use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -115,6 +116,8 @@ pub struct SystemProfile {
     pub gpus: Vec<GpuInfo>,
     /// Error returned by `nvidia-smi` when GPU enumeration failed.
     pub gpu_probe_error: Option<String>,
+    /// NVIDIA device-node availability for the current process environment.
+    pub nvidia_devices: NvidiaDeviceNodes,
     /// `sccache` executable path, if available.
     pub sccache: Option<PathBuf>,
     /// Metal support on macOS.
@@ -146,6 +149,7 @@ impl SystemProfile {
             },
             CudaCompatibility::Compatible { .. }
             | CudaCompatibility::ToolkitTooOld { .. }
+            | CudaCompatibility::ToolkitTooNew { .. }
             | CudaCompatibility::NoGpu
             | CudaCompatibility::NvccMissing => {
                 if self.metal.available {
@@ -221,17 +225,48 @@ impl SystemProfile {
                 });
             }
         }
-        if let CudaCompatibility::ToolkitTooOld {
-            gpu_arch,
-            minimum_toolkit,
-            found_toolkit,
-        } = &self.cuda
-        {
-            warnings.push(DetectionWarning {
+        match &self.cuda {
+            CudaCompatibility::ToolkitTooOld {
+                gpu_arch,
+                minimum_toolkit,
+                found_toolkit,
+            } => warnings.push(DetectionWarning {
                 message: format!(
                     "{gpu_arch} requires CUDA >= {minimum_toolkit}; found {found_toolkit}"
                 ),
+            }),
+            CudaCompatibility::ToolkitTooNew {
+                gpu_arch,
+                maximum_toolkit,
+                found_toolkit,
+            } => warnings.push(DetectionWarning {
+                message: format!(
+                    "{gpu_arch} is not supported by CUDA {found_toolkit}; use CUDA {maximum_toolkit}"
+                ),
+            }),
+            CudaCompatibility::Compatible { .. }
+            | CudaCompatibility::NoGpu
+            | CudaCompatibility::NvccMissing => {}
+        }
+        if self.gpus.iter().any(|gpu| gpu.arch.is_none()) {
+            let unknown = self
+                .gpus
+                .iter()
+                .filter(|gpu| gpu.arch.is_none())
+                .map(|gpu| format!("{} compute {}", gpu.name, gpu.compute_cap))
+                .collect::<Vec<_>>()
+                .join(", ");
+            warnings.push(DetectionWarning {
+                message: format!("unknown CUDA compute capability: {unknown}"),
             });
+        }
+        if !self.gpus.is_empty() {
+            warnings.extend(
+                self.nvidia_devices
+                    .warnings()
+                    .into_iter()
+                    .map(|message| DetectionWarning { message }),
+            );
         }
         if self.sccache.is_none() {
             warnings.push(DetectionWarning {
@@ -253,6 +288,7 @@ where
     let git = detect_git(runner);
     let nvcc = detect_nvcc(runner);
     let gpus = detect_gpus(runner);
+    let nvidia_devices = detect_nvidia_device_nodes();
     let sccache = detect_sccache(runner);
     let metal = detect_metal(runner);
     let vulkan = detect_vulkan(runner);
@@ -260,8 +296,33 @@ where
     let memory = detect_memory();
     let disk = detect_disk(disk_path);
 
-    let (compiler, cmake, git, nvcc, gpus, sccache, metal, vulkan, cpu, memory, disk) =
-        tokio::join!(compiler, cmake, git, nvcc, gpus, sccache, metal, vulkan, cpu, memory, disk);
+    let (
+        compiler,
+        cmake,
+        git,
+        nvcc,
+        gpus,
+        nvidia_devices,
+        sccache,
+        metal,
+        vulkan,
+        cpu,
+        memory,
+        disk,
+    ) = tokio::join!(
+        compiler,
+        cmake,
+        git,
+        nvcc,
+        gpus,
+        nvidia_devices,
+        sccache,
+        metal,
+        vulkan,
+        cpu,
+        memory,
+        disk
+    );
 
     let gpu_probe_error = gpus.error;
     let gpus = gpus.devices;
@@ -274,6 +335,7 @@ where
         cuda,
         gpus,
         gpu_probe_error,
+        nvidia_devices,
         sccache,
         metal,
         vulkan,
@@ -364,6 +426,42 @@ pub struct GpuInfo {
     pub arch: Option<&'static str>,
 }
 
+/// NVIDIA character device nodes visible to the lmml process.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NvidiaDeviceNodes {
+    /// Whether `/dev/nvidiactl` exists and is a character device.
+    pub control: bool,
+    /// Whether `/dev/nvidia-uvm` exists and is a character device.
+    pub uvm: bool,
+    /// Number of `/dev/nvidiaN` GPU character devices visible.
+    pub gpu_count: usize,
+    /// Filesystem errors encountered while checking `/dev`.
+    pub errors: Vec<String>,
+}
+
+impl NvidiaDeviceNodes {
+    /// Return true when the minimal CUDA runtime device nodes are visible.
+    pub fn usable_for_cuda(&self) -> bool {
+        self.control && self.uvm && self.gpu_count > 0 && self.errors.is_empty()
+    }
+
+    /// Human-readable warnings for missing or inaccessible NVIDIA device nodes.
+    pub fn warnings(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        if !self.control {
+            warnings.push("/dev/nvidiactl is not visible to lmml".to_string());
+        }
+        if !self.uvm {
+            warnings.push("/dev/nvidia-uvm is not visible to lmml".to_string());
+        }
+        if self.gpu_count == 0 {
+            warnings.push("no /dev/nvidiaN GPU device nodes are visible to lmml".to_string());
+        }
+        warnings.extend(self.errors.iter().cloned());
+        warnings
+    }
+}
+
 /// Compatibility between detected CUDA toolkit and detected GPUs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CudaCompatibility {
@@ -378,6 +476,15 @@ pub enum CudaCompatibility {
         gpu_arch: &'static str,
         /// Minimum CUDA toolkit version for that architecture.
         minimum_toolkit: &'static str,
+        /// Detected CUDA toolkit version.
+        found_toolkit: String,
+    },
+    /// nvcc is too new and no longer supports one or more detected GPUs.
+    ToolkitTooNew {
+        /// GPU architecture no longer supported by this toolkit.
+        gpu_arch: &'static str,
+        /// Last known CUDA toolkit major version that supports this architecture.
+        maximum_toolkit: &'static str,
         /// Detected CUDA toolkit version.
         found_toolkit: String,
     },
@@ -538,6 +645,12 @@ pub fn compute_cap_to_arch(cap: &str) -> Option<&'static str> {
         "9.0a" => Some("sm_90a"),
         "10.0" => Some("sm_100"),
         "10.0a" => Some("sm_100a"),
+        "10.1" => Some("sm_101"),
+        "10.1a" => Some("sm_101a"),
+        "10.2" => Some("sm_102"),
+        "10.2a" => Some("sm_102a"),
+        "12.0" => Some("sm_120"),
+        "12.0a" => Some("sm_120a"),
         _ => None,
     }
 }
@@ -570,6 +683,15 @@ pub fn cuda_compatibility(
                 return CudaCompatibility::ToolkitTooOld {
                     gpu_arch: arch,
                     minimum_toolkit: minimum,
+                    found_toolkit: version.raw.clone(),
+                };
+            }
+        }
+        if let Some((maximum, major)) = maximum_toolkit_for_arch(arch) {
+            if version.major > major {
+                return CudaCompatibility::ToolkitTooNew {
+                    gpu_arch: arch,
+                    maximum_toolkit: maximum,
                     found_toolkit: version.raw.clone(),
                 };
             }
@@ -716,6 +838,56 @@ where
         devices: parse_gpu_csv(&output.stdout),
         error: None,
     }
+}
+
+async fn detect_nvidia_device_nodes() -> NvidiaDeviceNodes {
+    detect_nvidia_device_nodes_in(Path::new("/dev"))
+}
+
+fn detect_nvidia_device_nodes_in(dev: &Path) -> NvidiaDeviceNodes {
+    let mut nodes = NvidiaDeviceNodes {
+        control: is_char_device(&dev.join("nvidiactl")),
+        uvm: is_char_device(&dev.join("nvidia-uvm")),
+        gpu_count: 0,
+        errors: Vec::new(),
+    };
+
+    match std::fs::read_dir(dev) {
+        Ok(entries) => {
+            for entry in entries {
+                match entry {
+                    Ok(entry) => {
+                        let name = entry.file_name();
+                        let Some(name) = name.to_str() else {
+                            continue;
+                        };
+                        let Some(suffix) = name.strip_prefix("nvidia") else {
+                            continue;
+                        };
+                        if suffix.chars().all(|ch| ch.is_ascii_digit())
+                            && is_char_device(&entry.path())
+                        {
+                            nodes.gpu_count += 1;
+                        }
+                    }
+                    Err(error) => nodes
+                        .errors
+                        .push(format!("failed to read NVIDIA device node: {error}")),
+                }
+            }
+        }
+        Err(error) => nodes
+            .errors
+            .push(format!("failed to read {}: {error}", dev.display())),
+    }
+
+    nodes
+}
+
+fn is_char_device(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|metadata| metadata.file_type().is_char_device())
+        .unwrap_or(false)
 }
 
 async fn detect_sccache<R>(runner: &R) -> Option<PathBuf>
@@ -948,7 +1120,17 @@ fn minimum_toolkit_for_arch(arch: &str) -> Option<(&'static str, u32, u32)> {
         "sm_80" | "sm_86" | "sm_87" => Some(("11.1", 11, 1)),
         "sm_89" => Some(("11.8", 11, 8)),
         "sm_90" | "sm_90a" => Some(("12.0", 12, 0)),
-        "sm_100" | "sm_100a" => Some(("12.4", 12, 4)),
+        "sm_100" | "sm_100a" | "sm_101" | "sm_101a" | "sm_102" | "sm_102a" => Some(("12.4", 12, 4)),
+        "sm_120" | "sm_120a" => Some(("13.0", 13, 0)),
+        _ => None,
+    }
+}
+
+fn maximum_toolkit_for_arch(arch: &str) -> Option<(&'static str, u32)> {
+    match arch {
+        "sm_37" | "sm_50" | "sm_52" | "sm_53" | "sm_60" | "sm_61" | "sm_62" | "sm_70" | "sm_72" => {
+            Some(("12.x", 12))
+        }
         _ => None,
     }
 }
@@ -1148,11 +1330,17 @@ mod tests {
             ("9.0a", "sm_90a"),
             ("10.0", "sm_100"),
             ("10.0a", "sm_100a"),
+            ("10.1", "sm_101"),
+            ("10.1a", "sm_101a"),
+            ("10.2", "sm_102"),
+            ("10.2a", "sm_102a"),
+            ("12.0", "sm_120"),
+            ("12.0a", "sm_120a"),
         ];
         for (cap, arch) in cases {
             assert_eq!(compute_cap_to_arch(cap), Some(arch));
         }
-        assert_eq!(compute_cap_to_arch("11.0"), None);
+        assert_eq!(compute_cap_to_arch("13.0"), None);
     }
 
     #[test]
@@ -1165,6 +1353,7 @@ mod tests {
     fn cuda_compatibility_handles_all_states() {
         let old = CudaVersion::new(11, 0);
         let current = CudaVersion::new(12, 4);
+        let cuda13 = CudaVersion::new(13, 0);
 
         assert_eq!(
             cuda_compatibility(Some(&old), &[gpu("RTX 4090", 24, "8.9")]),
@@ -1178,6 +1367,28 @@ mod tests {
             cuda_compatibility(Some(&current), &[gpu("Blackwell", 32, "10.0a")]),
             CudaCompatibility::Compatible {
                 archs: vec!["sm_100a"],
+            }
+        );
+        assert_eq!(
+            cuda_compatibility(Some(&cuda13), &[gpu("RTX 50", 16, "12.0")]),
+            CudaCompatibility::Compatible {
+                archs: vec!["sm_120"],
+            }
+        );
+        assert_eq!(
+            cuda_compatibility(Some(&cuda13), &[gpu("GTX 1080 Ti", 11, "6.1")]),
+            CudaCompatibility::ToolkitTooNew {
+                gpu_arch: "sm_61",
+                maximum_toolkit: "12.x",
+                found_toolkit: "13.0".to_string(),
+            }
+        );
+        assert_eq!(
+            cuda_compatibility(Some(&current), &[gpu("RTX 50", 16, "12.0")]),
+            CudaCompatibility::ToolkitTooOld {
+                gpu_arch: "sm_120",
+                minimum_toolkit: "13.0",
+                found_toolkit: "12.4".to_string(),
             }
         );
         assert_eq!(
@@ -1203,8 +1414,15 @@ mod tests {
             }
         );
 
-        profile.cuda = CudaCompatibility::NvccMissing;
+        profile.cuda = CudaCompatibility::ToolkitTooNew {
+            gpu_arch: "sm_61",
+            maximum_toolkit: "12.x",
+            found_toolkit: "13.0".to_string(),
+        };
         profile.metal.available = true;
+        assert_eq!(profile.recommended_backend(), BuildBackend::Metal);
+
+        profile.cuda = CudaCompatibility::NvccMissing;
         assert_eq!(profile.recommended_backend(), BuildBackend::Metal);
 
         profile.metal.available = false;
@@ -1446,6 +1664,12 @@ flags\t\t: fpu sse4_1 sse4_2 avx avx2 avx512f
             cuda: CudaCompatibility::NvccMissing,
             gpus: Vec::new(),
             gpu_probe_error: None,
+            nvidia_devices: NvidiaDeviceNodes {
+                control: false,
+                uvm: false,
+                gpu_count: 0,
+                errors: Vec::new(),
+            },
             sccache: None,
             metal: MetalSupport {
                 available: false,
@@ -1474,6 +1698,22 @@ flags\t\t: fpu sse4_1 sse4_2 avx avx2 avx512f
                 path: PathBuf::from("/tmp"),
             },
         }
+    }
+
+    #[test]
+    fn nvidia_device_node_warnings_report_missing_runtime_nodes() {
+        let nodes = NvidiaDeviceNodes {
+            control: true,
+            uvm: false,
+            gpu_count: 1,
+            errors: Vec::new(),
+        };
+
+        assert_eq!(
+            nodes.warnings(),
+            vec!["/dev/nvidia-uvm is not visible to lmml".to_string()]
+        );
+        assert!(!nodes.usable_for_cuda());
     }
 
     fn gpu(name: &str, memory_total_mb: u64, compute_cap: &str) -> GpuInfo {

@@ -390,6 +390,7 @@ mod tests {
         app.server_caps = Some(LlamaBinaryCapabilities {
             version: Some("llama-server test".to_string()),
             flash_attn: false,
+            flash_attn_requires_value: false,
             mlock: false,
             api_key: false,
             ubatch_size: true,
@@ -484,6 +485,7 @@ mod tests {
                 arch: Some("sm_86"),
             }],
             gpu_probe_error: None,
+            nvidia_devices: lmml_detect::NvidiaDeviceNodes::default(),
             sccache: Some(PathBuf::from("/usr/bin/sccache")),
             metal: MetalSupport {
                 available: false,
@@ -526,6 +528,7 @@ mod tests {
             cuda: CudaCompatibility::NvccMissing,
             gpus: Vec::new(),
             gpu_probe_error: None,
+            nvidia_devices: lmml_detect::NvidiaDeviceNodes::default(),
             sccache: None,
             metal: MetalSupport {
                 available: false,

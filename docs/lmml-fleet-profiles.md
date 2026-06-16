@@ -237,6 +237,54 @@ thinking/default:     temperature=0.6 top_p=0.95 top_k=20 min_p=0
 non-thinking/fast:    temperature=0.7 top_p=0.8  top_k=20 min_p=0
 ```
 
+### Profile: opencode-m6000-fanout1 (single-slot max context)
+
+Use this when the M6000 should behave like a one-agent long-context engine for
+Qwen3.5 9B instead of a swarm worker. It maximizes per-request live context and
+keeps all subagents serialized or externally summarized.
+
+```toml
+[profiles.opencode-m6000-fanout1]
+copied_from          = "preset-24gb-workstation"
+host                 = "0.0.0.0"
+port                 = 1200
+model                = "~/.local/share/lmml/models/Qwen3.5-9B-Q8_0.gguf"
+mmproj               = "~/.local/share/lmml/models/Qwen3.5-9B-mmproj.gguf" # required for image/video; proposed field
+ctx_size             = 262144
+compaction_reserved  = 65536
+n_gpu_layers         = -1
+batch_size           = 512
+ubatch_size          = 128
+threads              = 8
+flash_attn           = "false"  # Maxwell M6000: do not force FA
+continuous_batch     = true
+parallel_slots       = 1
+split_mode           = "auto"
+kv_cache_type_k      = "q8_0"
+kv_cache_type_v      = "q8_0"
+cache_ram_mb         = 4096
+fit_mode             = "auto"
+prompt_cache         = "disk"
+prompt_cache_path    = "~/.local/share/lmml/cache/m6000-fanout1.kvcache"
+tuned_for_vram_mb    = 24576
+temperature          = 0.6
+top_p                = 0.95
+top_k                = 20
+min_p                = 0.0
+mtp                  = "off"
+```
+
+Slot math: `262144 / 1 = 262144` tokens per slot.
+
+Operational envelope:
+
+```text
+Green zone:    0 – 120k tokens
+Yellow zone:   120k – 170k tokens
+Red zone:      170k – 196k tokens
+Hard cap:      ~196k tokens before compaction/reject
+```
+
 ### Profile: opencode-m6000-fanout (recommended, balanced)
 
 ```toml
@@ -489,6 +537,7 @@ export LMM_PARALLEL_SUBAGENTS=2
 | Machine | Status | Model | Profile | ctx_size | parallel | Per-slot ctx | VRAM | KV | Role |
 |---|---|---|---|---:|---:|---:|---|---|---|
 | Orion (1080 Ti 11GB) | Validated | Qwen3.5 4B Q6_K | opencode-orion-deep | 262144 | 1 | 262144 | 8.5/11 GB | q8_0 | Deep resident agent |
+| Quadro M6000 24GB | Proposed | **Qwen3.5 9B Q8_0** | opencode-m6000-fanout1 | 262144 | 1 | 262144 | needs test | q8_0 | Single long-context 9B agent |
 | Quadro M6000 24GB | Proposed | **Qwen3.5 9B Q8_0** | opencode-m6000-fanout | 262144 | 4 | 65536 | needs test | q8_0 | Subagent swarm |
 | Quadro M6000 24GB | Proposed | **Qwen3.5 9B Q8_0** | opencode-m6000-aggressive | 262144 | 6 | 43690 | needs test | q8_0 | Many small agents |
 | RTX 5070 Ti 16GB | Proposed | Qwen3.5 4B Q6_K | opencode-5070ti-fanout | 131072 | 4 | 32768 | needs test | q8_0 | Fast tactical agents |
@@ -505,6 +554,7 @@ pile-up or KV overflow under concurrent load.
 | Machine | Profile | Soft cap | Hard cap | Max parallel |
 |---|---|---|---|---|
 | Orion | deep | 32768 (per dispatch) | serialized | 1 |
+| Quadro M6000 | fanout1 | 120000 | 196608 | 1 |
 | Quadro M6000 | fanout | 32768 | 49152 | 4 |
 | Quadro M6000 | aggressive | 20480 | 32768 | 6 |
 | RTX 5070 Ti | fanout | 16384 | 24576 | 4 |

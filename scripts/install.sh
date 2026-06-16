@@ -48,6 +48,8 @@ install_hint() {
         compiler) echo "xcode-select --install" ;;
         cmake) echo "brew install cmake" ;;
         git) echo "brew install git" ;;
+        sccache) echo "brew install sccache" ;;
+        gxx11) echo "CUDA 11.x workaround is Linux-only; upgrade CUDA or use a supported GCC toolchain" ;;
       esac
       ;;
     *)
@@ -55,6 +57,8 @@ install_hint() {
         compiler) echo "sudo apt install build-essential" ;;
         cmake) echo "sudo apt install cmake" ;;
         git) echo "sudo apt install git" ;;
+        sccache) echo "sudo apt install sccache" ;;
+        gxx11) echo "sudo apt install g++-11" ;;
       esac
       ;;
   esac
@@ -80,6 +84,14 @@ version_ge() {
 
 first_version() {
   sed -n 's/[^0-9]*\([0-9][0-9.]*\).*/\1/p' | head -n 1
+}
+
+major_version() {
+  printf '%s\n' "$1" | sed -n 's/[^0-9]*\([0-9][0-9]*\).*/\1/p' | head -n 1
+}
+
+nvcc_release() {
+  nvcc --version 2>/dev/null | sed -n 's/.*release \([^,]*\).*/\1/p' | head -n 1
 }
 
 check_prereqs() {
@@ -124,7 +136,33 @@ check_prereqs() {
     missing=1
   fi
 
-  command -v nvcc >/dev/null 2>&1 || warn "CUDA not found; will build CPU-only"
+  if command -v sccache >/dev/null 2>&1; then
+    sccache_version=$(sccache --version | first_version)
+    echo "✓ sccache ${sccache_version:-found} — repeat llama.cpp builds will be faster"
+  else
+    warn "sccache not found; repeat llama.cpp builds will be slower"
+    echo "  → $(install_hint sccache)" >&2
+  fi
+
+  if command -v nvcc >/dev/null 2>&1; then
+    nvcc_version=$(nvcc_release)
+    gcc_major=""
+    if command -v g++ >/dev/null 2>&1; then
+      gcc_major=$(major_version "$(g++ -dumpfullversion -dumpversion)")
+    fi
+    nvcc_major=$(major_version "$nvcc_version")
+    if { [ "$nvcc_major" = "11" ] || [ "${nvcc_major:-0}" -ge 13 ]; } && [ "${gcc_major:-0}" -ge 13 ]; then
+      if command -v g++-11 >/dev/null 2>&1; then
+        echo "✓ g++-11 found — CUDA $nvcc_version host compiler workaround available"
+      else
+        warn "CUDA $nvcc_version with GCC ${gcc_major} can fail on CUDA/glibc math headers"
+        echo "  → $(install_hint gxx11)" >&2
+        echo "  → lmml will pass -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-11 when available" >&2
+      fi
+    fi
+  else
+    warn "CUDA not found; will build CPU-only"
+  fi
   command -v nvidia-smi >/dev/null 2>&1 || warn "GPU not detected; will build CPU-only"
 
   if [ "$missing" -ne 0 ]; then
@@ -358,8 +396,19 @@ if [ "$LMML_PROFILE_HINT" = "orion-qwen35-4b-q8" ]; then
   echo "  TUI runtime profiles for Qwen3.5-4B-Q8_0.gguf:"
   echo "    orion-qwen-q8-deep:                 ctx 262144, parallel 1, 0 subagents"
   echo "    orion-qwen-q8-balanced:             ctx 262144, parallel 2, 1 subagent max"
+  echo "    orion-qwen-q8-kvu-fanout4:          ctx 65536, parallel 4, q4 KV, kv-unified"
+  echo "    orion-qwen-q8-kvu-fanout6:          ctx 65536, parallel 6, q4 KV, kv-unified"
+  echo "    orion-qwen-q8-kvu-fanout8:          ctx 65536, parallel 8, q4 KV, kv-unified"
+  echo "    5060ti-qwen4b-fanout4:              ctx 131072, parallel 4, 3 subagents max"
+  echo "    5060ti-qwen4b-dual:                 ctx 262144, parallel 2, 1 subagent max"
+  echo "    5060ti-qwen4b-kvu-fanout4:          ctx 73728, parallel 4, q4 KV, kv-unified"
+  echo "    5060ti-qwen4b-kvu-fanout6:          ctx 73728, parallel 6, q4 KV, kv-unified"
+  echo "    5060ti-qwen4b-kvu-fanout8:          ctx 73728, parallel 8, q4 KV, kv-unified"
   echo "    5070ti-qwen4b-fanout4:              ctx 131072, parallel 4, 3 subagents max"
   echo "    5070ti-qwen4b-dual:                 ctx 262144, parallel 2, 1 subagent max"
+  echo "    5070ti-qwen4b-kvu-fanout4:          ctx 73728, parallel 4, q4 KV, kv-unified"
+  echo "    5070ti-qwen4b-kvu-fanout6:          ctx 73728, parallel 6, q4 KV, kv-unified"
+  echo "    5070ti-qwen4b-kvu-fanout8:          ctx 73728, parallel 8, q4 KV, kv-unified"
   echo "    TUI switch key:                     p on Models or Server tab"
   echo
   echo "  Notes:"
@@ -387,10 +436,26 @@ if [ "$LMML_PROFILE_HINT" = "quadro-m6000-qwen35-9b-q8" ]; then
   echo
   echo "  TUI runtime profiles for Qwen3.5-9B-Q8_0.gguf:"
   echo "    m6000-qwen9b-deep:                  ctx 262144, parallel 1, 0 subagents"
+  echo "    m6000-qwen9b-fanout1:               ctx 262144, parallel 2, 1 subagent max"
+  echo "    m6000-qwen9b-fanout2:               ctx 262144, parallel 2, 2 subagents max"
+  echo "    m6000-qwen9b-fanout3:               ctx 262144, parallel 3, 3 subagents max"
   echo "    m6000-qwen9b-fanout4:               ctx 262144, parallel 4, 3 subagents max"
   echo "    m6000-qwen9b-fanout6:               ctx 262144, parallel 6, 5 subagents after validation"
+  echo "    m6000-qwen9b-mtp-deep:              ctx 262144, parallel 1, MTP enabled, text-only"
+  echo "    m6000-qwen9b-mtp-vision:            ctx 262144, parallel 1, MTP + mmproj vision"
+  echo "    m6000-qwen9b-kvu-fanout4:           ctx 86016, parallel 4, q4 KV, kv-unified"
+  echo "    m6000-qwen9b-kvu-fanout6:           ctx 86016, parallel 6, q4 KV, kv-unified"
+  echo "    m6000-qwen9b-kvu-fanout8:           ctx 86016, parallel 8, q4 KV, kv-unified"
+  echo "    5060ti-qwen9b-deep:                 ctx 196608, parallel 1, 0 subagents"
+  echo "    5060ti-qwen9b-balanced2:            ctx 131072, parallel 2, 1 subagent max"
+  echo "    5060ti-qwen9b-kvu-fanout4:          ctx 73728, parallel 4, q4 KV, kv-unified"
+  echo "    5060ti-qwen9b-kvu-fanout6:          ctx 73728, parallel 6, q4 KV, kv-unified"
+  echo "    5060ti-qwen9b-kvu-fanout8:          ctx 73728, parallel 8, q4 KV, kv-unified"
   echo "    5070ti-qwen9b-deep:                 ctx 196608, parallel 1, 0 subagents"
   echo "    5070ti-qwen9b-balanced2:            ctx 131072, parallel 2, 1 subagent max"
+  echo "    5070ti-qwen9b-kvu-fanout4:          ctx 73728, parallel 4, q4 KV, kv-unified"
+  echo "    5070ti-qwen9b-kvu-fanout6:          ctx 73728, parallel 6, q4 KV, kv-unified"
+  echo "    5070ti-qwen9b-kvu-fanout8:          ctx 73728, parallel 8, q4 KV, kv-unified"
   echo "    TUI switch key:                     p on Models or Server tab"
   echo
   echo "  Fallback ladder if runtime memory pressure appears:"

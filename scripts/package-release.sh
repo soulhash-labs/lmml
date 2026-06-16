@@ -70,6 +70,10 @@ mkdir -p "$SOURCE_STAGE_DIR"
     --exclude='./target' \
     --exclude='./dist' \
     --exclude='./.planning' \
+    --exclude='*.swp' \
+    --exclude='.*.swp' \
+    --exclude='*.kate-swp' \
+    --exclude='.*.kate-swp' \
     -cf - .
 ) | (
   cd "$SOURCE_STAGE_DIR"

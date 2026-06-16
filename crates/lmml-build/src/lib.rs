@@ -30,6 +30,12 @@ pub struct BuildConfig {
     pub backend: BuildBackend,
     /// Optional sccache executable path.
     pub sccache: Option<PathBuf>,
+    /// Optional CUDA compiler executable used by CMake.
+    pub cuda_compiler: Option<PathBuf>,
+    /// Optional CUDA host C++ compiler used by nvcc.
+    pub cuda_host_compiler: Option<PathBuf>,
+    /// Enable a generated glibc compatibility shim for CUDA 13 C23 math conflicts.
+    pub cuda_glibc_compat_shim: bool,
     /// Extra CMake flags appended after generated flags.
     pub extra_cmake_flags: Vec<String>,
     /// Parallel build jobs. `0` means use available parallelism.
@@ -48,6 +54,9 @@ impl BuildConfig {
             git_ref: None,
             backend,
             sccache: None,
+            cuda_compiler: None,
+            cuda_host_compiler: None,
+            cuda_glibc_compat_shim: false,
             extra_cmake_flags: Vec::new(),
             jobs: 0,
             clean: false,
@@ -218,6 +227,9 @@ pub fn cmake_configure_args(config: &BuildConfig) -> Vec<String> {
     match &config.backend {
         BuildBackend::Cuda { archs } => {
             args.push("-DGGML_CUDA=ON".to_string());
+            if let Some(cuda_compiler) = &config.cuda_compiler {
+                args.push(format!("-DCMAKE_CUDA_COMPILER={}", cuda_compiler.display()));
+            }
             if !archs.is_empty() {
                 let cmake_archs = archs
                     .iter()
@@ -225,6 +237,18 @@ pub fn cmake_configure_args(config: &BuildConfig) -> Vec<String> {
                     .collect::<Vec<_>>()
                     .join(";");
                 args.push(format!("-DCMAKE_CUDA_ARCHITECTURES={cmake_archs}"));
+            }
+            if let Some(host_compiler) = &config.cuda_host_compiler {
+                args.push(format!(
+                    "-DCMAKE_CUDA_HOST_COMPILER={}",
+                    host_compiler.display()
+                ));
+            }
+            let cuda_flags = cuda_cmake_flags(config);
+            if !cuda_flags.is_empty() {
+                let cuda_flags = cuda_flags.join(" ");
+                args.push(format!("-DCMAKE_CUDA_FLAGS_INIT={cuda_flags}"));
+                args.push(format!("-DCMAKE_CUDA_FLAGS={cuda_flags}"));
             }
         }
         BuildBackend::Metal => args.push("-DGGML_METAL=ON".to_string()),
@@ -246,6 +270,47 @@ pub fn cmake_configure_args(config: &BuildConfig) -> Vec<String> {
 
 fn cuda_arch_for_cmake(arch: &str) -> String {
     arch.strip_prefix("sm_").unwrap_or(arch).to_string()
+}
+
+fn cuda_cmake_flags(config: &BuildConfig) -> Vec<String> {
+    let mut flags = Vec::new();
+    if let Some(host_compiler) = &config.cuda_host_compiler {
+        flags.push("--allow-unsupported-compiler".to_string());
+        flags.push(format!("-ccbin={}", host_compiler.display()));
+    }
+    if config.cuda_glibc_compat_shim {
+        flags.push("-U_GNU_SOURCE".to_string());
+        flags.push("-D_DEFAULT_SOURCE".to_string());
+        flags.push(format!(
+            "--pre-include={}",
+            cuda_glibc_compat_shim_path(config).display()
+        ));
+    }
+    flags
+}
+
+fn cuda_glibc_compat_shim_path(config: &BuildConfig) -> PathBuf {
+    config
+        .source_dir
+        .join("build")
+        .join("lmml-cuda13-glibc-compat.h")
+}
+
+fn cuda_configure_env(config: &BuildConfig) -> Vec<(String, String)> {
+    let mut env = Vec::new();
+    if let Some(cuda_compiler) = &config.cuda_compiler {
+        env.push((
+            "CUDACXX".to_string(),
+            cuda_compiler.to_string_lossy().into_owned(),
+        ));
+    }
+    if let Some(host_compiler) = &config.cuda_host_compiler {
+        env.push((
+            "CUDAHOSTCXX".to_string(),
+            host_compiler.to_string_lossy().into_owned(),
+        ));
+    }
+    env
 }
 
 /// Hash the exact CMake configure argv.
@@ -412,11 +477,28 @@ async fn run_build_inner(
     }
 
     send_event(tx, BuildEvent::CmakeConfiguring).await;
+    write_cuda_glibc_compat_shim(config).await?;
     let commit = current_commit(&config.source_dir).await?;
     let configure_args = cmake_configure_args(config);
+    send_event(
+        tx,
+        BuildEvent::Compiling {
+            line: format!("CMake configure args: {}", configure_args.join(" ")),
+        },
+    )
+    .await;
     let server = expected_server_binary(&config.source_dir);
     let fingerprint = build_fingerprint(commit, &configure_args, server.clone());
-    stream_command("cmake", &configure_args, tx, log_tail, &mut cancel_rx).await?;
+    let configure_env = cuda_configure_env(config);
+    stream_command_with_env(
+        "cmake",
+        &configure_args,
+        &configure_env,
+        tx,
+        log_tail,
+        &mut cancel_rx,
+    )
+    .await?;
 
     let build_dir = config.source_dir.join("build");
     let jobs = if config.jobs == 0 {
@@ -431,13 +513,22 @@ async fn run_build_inner(
         build_dir.to_string_lossy().into_owned(),
         "--config".to_string(),
         "Release".to_string(),
+        "--target".to_string(),
+        "llama-cli".to_string(),
+        "llama-server".to_string(),
+        "llama-finetune".to_string(),
+        "llama-export-lora".to_string(),
         "-j".to_string(),
         jobs.to_string(),
     ];
     stream_command("cmake", &build_args, tx, log_tail, &mut cancel_rx).await?;
 
     let cli = build_dir.join("bin").join(binary_name("llama-cli"));
+    let finetune = build_dir.join("bin").join(binary_name("llama-finetune"));
+    let export_lora = build_dir.join("bin").join(binary_name("llama-export-lora"));
     verify_binary(&cli).await?;
+    verify_binary(&finetune).await?;
+    verify_binary(&export_lora).await?;
     if !is_executable(&server) {
         return Err(BuildError::Verification(format!(
             "expected server binary missing or not executable: {}",
@@ -458,6 +549,35 @@ async fn run_build_inner(
         },
     )
     .await;
+    Ok(())
+}
+
+async fn write_cuda_glibc_compat_shim(config: &BuildConfig) -> Result<(), BuildError> {
+    if !config.cuda_glibc_compat_shim {
+        return Ok(());
+    }
+
+    let shim = cuda_glibc_compat_shim_path(config);
+    if let Some(parent) = shim.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(|error| {
+            BuildError::Filesystem(format!("failed to create {}: {error}", parent.display()))
+        })?;
+    }
+    tokio::fs::write(
+        &shim,
+        concat!(
+            "#pragma once\n",
+            "#include <features.h>\n",
+            "#include <math.h>\n",
+            "#ifndef __USE_GNU\n",
+            "#define __USE_GNU 1\n",
+            "#endif\n"
+        ),
+    )
+    .await
+    .map_err(|error| {
+        BuildError::Filesystem(format!("failed to write {}: {error}", shim.display()))
+    })?;
     Ok(())
 }
 
@@ -542,12 +662,24 @@ async fn stream_command(
     log_tail: &mut LogTail,
     cancel_rx: &mut watch::Receiver<bool>,
 ) -> Result<(), BuildError> {
+    stream_command_with_env(program, args, &[], tx, log_tail, cancel_rx).await
+}
+
+async fn stream_command_with_env(
+    program: &str,
+    args: &[String],
+    envs: &[(String, String)],
+    tx: &mpsc::Sender<BuildEvent>,
+    log_tail: &mut LogTail,
+    cancel_rx: &mut watch::Receiver<bool>,
+) -> Result<(), BuildError> {
     if *cancel_rx.borrow() {
         return Err(BuildError::Cancelled);
     }
     let mut command = tokio::process::Command::new(program);
     command
         .args(args)
+        .envs(envs.iter().map(|(key, value)| (key, value)))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     configure_process_group(&mut command);
@@ -794,6 +926,8 @@ mod tests {
             },
         );
         config.sccache = Some(PathBuf::from("/usr/bin/sccache"));
+        config.cuda_compiler = Some(PathBuf::from("/usr/local/cuda-12.4/bin/nvcc"));
+        config.cuda_host_compiler = Some(PathBuf::from("/usr/bin/g++-11"));
         config.extra_cmake_flags = vec!["-DGGML_NATIVE=ON".to_string()];
 
         assert_eq!(
@@ -806,10 +940,59 @@ mod tests {
                 "-DCMAKE_BUILD_TYPE=Release",
                 "-DLLAMA_BUILD_SERVER=ON",
                 "-DGGML_CUDA=ON",
+                "-DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.4/bin/nvcc",
                 "-DCMAKE_CUDA_ARCHITECTURES=75;86",
+                "-DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-11",
+                "-DCMAKE_CUDA_FLAGS_INIT=--allow-unsupported-compiler -ccbin=/usr/bin/g++-11",
+                "-DCMAKE_CUDA_FLAGS=--allow-unsupported-compiler -ccbin=/usr/bin/g++-11",
                 "-DCMAKE_C_COMPILER_LAUNCHER=/usr/bin/sccache",
                 "-DCMAKE_CXX_COMPILER_LAUNCHER=/usr/bin/sccache",
                 "-DGGML_NATIVE=ON",
+            ]
+        );
+    }
+
+    #[test]
+    fn cuda_glibc_compat_shim_adds_targeted_flags() {
+        let mut config = BuildConfig::new(
+            PathBuf::from("/tmp/llama.cpp"),
+            BuildBackend::Cuda {
+                archs: vec!["sm_120"],
+            },
+        );
+        config.cuda_glibc_compat_shim = true;
+
+        let args = cmake_configure_args(&config);
+
+        assert!(args.contains(&format!(
+            "-DCMAKE_CUDA_FLAGS_INIT=-U_GNU_SOURCE -D_DEFAULT_SOURCE --pre-include={}",
+            "/tmp/llama.cpp/build/lmml-cuda13-glibc-compat.h"
+        )));
+        assert!(args.contains(&format!(
+            "-DCMAKE_CUDA_FLAGS=-U_GNU_SOURCE -D_DEFAULT_SOURCE --pre-include={}",
+            "/tmp/llama.cpp/build/lmml-cuda13-glibc-compat.h"
+        )));
+    }
+
+    #[test]
+    fn cuda_configure_env_sets_cuda_tools() {
+        let mut config = BuildConfig::new(
+            PathBuf::from("/tmp/llama.cpp"),
+            BuildBackend::Cuda {
+                archs: vec!["sm_120"],
+            },
+        );
+        config.cuda_compiler = Some(PathBuf::from("/usr/local/cuda-12.4/bin/nvcc"));
+        config.cuda_host_compiler = Some(PathBuf::from("/usr/bin/g++-11"));
+
+        assert_eq!(
+            cuda_configure_env(&config),
+            vec![
+                (
+                    "CUDACXX".to_string(),
+                    "/usr/local/cuda-12.4/bin/nvcc".to_string()
+                ),
+                ("CUDAHOSTCXX".to_string(), "/usr/bin/g++-11".to_string())
             ]
         );
     }

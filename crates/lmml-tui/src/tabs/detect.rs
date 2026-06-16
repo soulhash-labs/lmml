@@ -188,6 +188,16 @@ fn cuda_line(cuda: &CudaCompatibility) -> Line<'static> {
             Badge::Warn,
             format!("{gpu_arch} requires CUDA >= {minimum_toolkit}; found {found_toolkit}"),
         ),
+        CudaCompatibility::ToolkitTooNew {
+            gpu_arch,
+            maximum_toolkit,
+            found_toolkit,
+        } => badge_line(
+            Badge::Warn,
+            format!(
+                "{gpu_arch} is not supported by CUDA {found_toolkit}; use CUDA {maximum_toolkit}"
+            ),
+        ),
         CudaCompatibility::NoGpu => {
             badge_line(Badge::Warn, "nvcc found, no CUDA GPUs detected".to_string())
         }
@@ -301,6 +311,7 @@ mod tests {
                 arch: Some("sm_86"),
             }],
             gpu_probe_error: None,
+            nvidia_devices: lmml_detect::NvidiaDeviceNodes::default(),
             sccache: None,
             metal: MetalSupport {
                 available: false,
@@ -353,6 +364,7 @@ mod tests {
             cuda: CudaCompatibility::NvccMissing,
             gpus: Vec::new(),
             gpu_probe_error: None,
+            nvidia_devices: lmml_detect::NvidiaDeviceNodes::default(),
             sccache: None,
             metal: MetalSupport {
                 available: false,
@@ -388,6 +400,17 @@ mod tests {
         assert!(text.contains("sudo apt install cmake"));
         assert!(text.contains("sudo apt install git"));
         assert!(text.contains("4 GB free disk"));
+    }
+
+    #[test]
+    fn cuda_toolkit_too_new_warning_is_rendered() {
+        let line = cuda_line(&CudaCompatibility::ToolkitTooNew {
+            gpu_arch: "sm_61",
+            maximum_toolkit: "12.x",
+            found_toolkit: CudaVersion::new(13, 1).raw,
+        });
+        assert!(flatten_lines(vec![line])
+            .contains("sm_61 is not supported by CUDA 13.1; use CUDA 12.x"));
     }
 
     #[test]

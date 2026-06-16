@@ -2,7 +2,7 @@
 
 use std::io::{self, stdout, Write};
 use std::panic;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
@@ -37,6 +37,33 @@ enum Command {
     Doctor,
     /// Run a short headless startup check for install smoke tests.
     Smoke,
+    /// Run llama-finetune with lmml path defaults.
+    Train {
+        /// Training data file. Translated to llama-finetune's --file flag.
+        #[arg(long)]
+        train_data: PathBuf,
+        /// Base model GGUF. Defaults to the selected lmml model.
+        #[arg(long, alias = "model-base")]
+        model: Option<PathBuf>,
+        /// Full fine-tuned GGUF output path passed to llama-finetune.
+        #[arg(long, short = 'o')]
+        output: Option<PathBuf>,
+        /// LoRA adapter output path for custom llama-finetune builds that advertise --lora-out.
+        #[arg(long)]
+        lora_out: Option<PathBuf>,
+        /// Optional checkpoint input for custom llama-finetune builds that advertise --checkpoint-in.
+        #[arg(long)]
+        checkpoint_in: Option<PathBuf>,
+        /// Optional checkpoint output for custom llama-finetune builds that advertise --checkpoint-out.
+        #[arg(long)]
+        checkpoint_out: Option<PathBuf>,
+        /// Optional merged GGUF output produced with llama-export-lora after LoRA training.
+        #[arg(long)]
+        merge_output: Option<PathBuf>,
+        /// Additional llama-finetune arguments after `--`.
+        #[arg(last = true)]
+        extra_args: Vec<String>,
+    },
     /// Manage long-running llama-server runtimes for coding harnesses.
     Runtime {
         #[command(subcommand)]
@@ -159,6 +186,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let code = run_smoke().await;
             std::process::exit(code);
         }
+        Some(Command::Train {
+            train_data,
+            model,
+            output,
+            lora_out,
+            checkpoint_in,
+            checkpoint_out,
+            merge_output,
+            extra_args,
+        }) => {
+            let code = run_train(TrainRequest {
+                train_data,
+                model,
+                output,
+                lora_out,
+                checkpoint_in,
+                checkpoint_out,
+                merge_output,
+                extra_args,
+            })
+            .await;
+            std::process::exit(code);
+        }
         Some(Command::Runtime { command }) => {
             let code = run_runtime(command).await;
             std::process::exit(code);
@@ -179,6 +229,223 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     drop(log_guard);
     result
+}
+
+struct TrainRequest {
+    train_data: PathBuf,
+    model: Option<PathBuf>,
+    output: Option<PathBuf>,
+    lora_out: Option<PathBuf>,
+    checkpoint_in: Option<PathBuf>,
+    checkpoint_out: Option<PathBuf>,
+    merge_output: Option<PathBuf>,
+    extra_args: Vec<String>,
+}
+
+async fn run_train(request: TrainRequest) -> i32 {
+    let state = match lmml_state::AppState::load_existing_or_default() {
+        Ok(state) => state,
+        Err(error) => {
+            eprintln!("state load failed: {error}");
+            return 1;
+        }
+    };
+    let model = request
+        .model
+        .unwrap_or_else(|| state.model.last_used.clone());
+    if model.as_os_str().is_empty() {
+        eprintln!("train failed: pass --model or select a model in lmml first");
+        return 2;
+    }
+
+    let binary = finetune_binary_path(&state.build.binary);
+    let capabilities = match detect_finetune_capabilities(&binary).await {
+        Ok(capabilities) => capabilities,
+        Err(error) => {
+            eprintln!("failed to inspect {}: {error}", binary.display());
+            return 1;
+        }
+    };
+    let argv = match build_train_argv(
+        TrainArgInputs {
+            model: &model,
+            train_data: &request.train_data,
+            output: request.output.as_deref(),
+            lora_out: request.lora_out.as_deref(),
+            checkpoint_in: request.checkpoint_in.as_deref(),
+            checkpoint_out: request.checkpoint_out.as_deref(),
+            extra_args: &request.extra_args,
+        },
+        &capabilities,
+    ) {
+        Ok(argv) => argv,
+        Err(error) => {
+            eprintln!("train failed: {error}");
+            return 2;
+        }
+    };
+    let status = match tokio::process::Command::new(&binary)
+        .args(&argv)
+        .status()
+        .await
+    {
+        Ok(status) => status,
+        Err(error) => {
+            eprintln!("failed to start {}: {error}", binary.display());
+            return 1;
+        }
+    };
+    if !status.success() {
+        return status.code().unwrap_or(1);
+    }
+
+    if let Some(merge_output) = request.merge_output {
+        let Some(lora) = request.lora_out.as_deref() else {
+            eprintln!("train failed: --merge-output requires --lora-out");
+            return 2;
+        };
+        let export_binary = export_lora_binary_path(&state.build.binary);
+        let export_argv = build_export_lora_argv(&model, lora, &merge_output);
+        let export_status = match tokio::process::Command::new(&export_binary)
+            .args(&export_argv)
+            .status()
+            .await
+        {
+            Ok(status) => status,
+            Err(error) => {
+                eprintln!("failed to start {}: {error}", export_binary.display());
+                return 1;
+            }
+        };
+        return export_status.code().unwrap_or(1);
+    }
+
+    0
+}
+
+fn finetune_binary_path(server_binary: &Path) -> PathBuf {
+    sibling_llama_binary_path(server_binary, "llama-finetune")
+}
+
+fn export_lora_binary_path(server_binary: &Path) -> PathBuf {
+    sibling_llama_binary_path(server_binary, "llama-export-lora")
+}
+
+fn sibling_llama_binary_path(server_binary: &Path, binary: &str) -> PathBuf {
+    server_binary
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join(binary_name(binary))
+}
+
+fn binary_name(base: &str) -> String {
+    if cfg!(windows) {
+        format!("{base}.exe")
+    } else {
+        base.to_string()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct FinetuneCapabilities {
+    model_base: bool,
+    train_data: bool,
+    lora_out: bool,
+    checkpoint_in: bool,
+    checkpoint_out: bool,
+}
+
+impl FinetuneCapabilities {
+    fn from_help(help: &str) -> Self {
+        Self {
+            model_base: help.contains("--model-base"),
+            train_data: help.contains("--train-data"),
+            lora_out: help.contains("--lora-out"),
+            checkpoint_in: help.contains("--checkpoint-in"),
+            checkpoint_out: help.contains("--checkpoint-out"),
+        }
+    }
+}
+
+async fn detect_finetune_capabilities(binary: &Path) -> io::Result<FinetuneCapabilities> {
+    let output = tokio::process::Command::new(binary)
+        .arg("--help")
+        .output()
+        .await?;
+    let mut help = String::from_utf8_lossy(&output.stdout).into_owned();
+    help.push_str(&String::from_utf8_lossy(&output.stderr));
+    Ok(FinetuneCapabilities::from_help(&help))
+}
+
+struct TrainArgInputs<'a> {
+    model: &'a Path,
+    train_data: &'a Path,
+    output: Option<&'a Path>,
+    lora_out: Option<&'a Path>,
+    checkpoint_in: Option<&'a Path>,
+    checkpoint_out: Option<&'a Path>,
+    extra_args: &'a [String],
+}
+
+fn build_train_argv(
+    inputs: TrainArgInputs<'_>,
+    capabilities: &FinetuneCapabilities,
+) -> Result<Vec<String>, String> {
+    if inputs.lora_out.is_some() && !capabilities.lora_out {
+        return Err("installed llama-finetune does not advertise --lora-out".to_string());
+    }
+    if inputs.checkpoint_in.is_some() && !capabilities.checkpoint_in {
+        return Err("installed llama-finetune does not advertise --checkpoint-in".to_string());
+    }
+    if inputs.checkpoint_out.is_some() && !capabilities.checkpoint_out {
+        return Err("installed llama-finetune does not advertise --checkpoint-out".to_string());
+    }
+
+    let model_flag = if capabilities.model_base {
+        "--model-base"
+    } else {
+        "--model"
+    };
+    let data_flag = if capabilities.train_data {
+        "--train-data"
+    } else {
+        "--file"
+    };
+    let mut argv = vec![
+        model_flag.to_string(),
+        inputs.model.to_string_lossy().into_owned(),
+        data_flag.to_string(),
+        inputs.train_data.to_string_lossy().into_owned(),
+    ];
+    if let Some(output) = inputs.output {
+        argv.push("--output".to_string());
+        argv.push(output.to_string_lossy().into_owned());
+    }
+    if let Some(lora_out) = inputs.lora_out {
+        argv.push("--lora-out".to_string());
+        argv.push(lora_out.to_string_lossy().into_owned());
+    }
+    if let Some(checkpoint_in) = inputs.checkpoint_in {
+        argv.push("--checkpoint-in".to_string());
+        argv.push(checkpoint_in.to_string_lossy().into_owned());
+    }
+    if let Some(checkpoint_out) = inputs.checkpoint_out {
+        argv.push("--checkpoint-out".to_string());
+        argv.push(checkpoint_out.to_string_lossy().into_owned());
+    }
+    argv.extend(inputs.extra_args.iter().cloned());
+    Ok(argv)
+}
+
+fn build_export_lora_argv(model: &Path, lora: &Path, output: &Path) -> Vec<String> {
+    vec![
+        "--model".to_string(),
+        model.to_string_lossy().into_owned(),
+        "--lora".to_string(),
+        lora.to_string_lossy().into_owned(),
+        "--output".to_string(),
+        output.to_string_lossy().into_owned(),
+    ]
 }
 
 async fn run_runtime(command: RuntimeCommand) -> i32 {
@@ -565,6 +832,16 @@ async fn run_doctor() -> i32 {
         }
     }
 
+    match &profile.sccache {
+        Some(path) => println!("  ✓  sccache active  ·  {}", path.display()),
+        None => {
+            soft_issues += 1;
+            println!("  ⚠  sccache not found");
+            println!("     → install sccache for faster repeat llama.cpp builds");
+            println!("     → sudo apt install sccache");
+        }
+    }
+
     match &profile.cuda {
         lmml_detect::CudaCompatibility::Compatible { archs } => {
             let gpu = profile
@@ -582,6 +859,16 @@ async fn run_doctor() -> i32 {
             soft_issues += 1;
             println!("  ⚠  CUDA toolkit {found_toolkit} too old for {gpu_arch}");
             println!("     → install CUDA >= {minimum_toolkit}");
+        }
+        lmml_detect::CudaCompatibility::ToolkitTooNew {
+            gpu_arch,
+            maximum_toolkit,
+            found_toolkit,
+        } => {
+            soft_issues += 1;
+            println!("  ⚠  CUDA toolkit {found_toolkit} no longer supports {gpu_arch}");
+            println!("     → install CUDA {maximum_toolkit} alongside CUDA 13");
+            println!("     → then run: LMML_CUDA_COMPILER=/usr/local/cuda-12.4/bin/nvcc lmml");
         }
         lmml_detect::CudaCompatibility::NoGpu => {
             soft_issues += 1;
@@ -615,10 +902,8 @@ async fn run_doctor() -> i32 {
         println!("  No issues found. Run `lmml` to launch the TUI.");
         0
     } else if hard_issues == 0 {
-        println!("  {soft_issues} GPU acceleration warning(s) found.");
-        println!(
-            "  lmml can run in CPU-only mode; fix the warning(s) above to enable GPU acceleration."
-        );
+        println!("  {soft_issues} soft preflight warning(s) found.");
+        println!("  lmml can run; fix the warning(s) above for better build/runtime behavior.");
         0
     } else {
         println!("  {hard_issues} hard prerequisite issue(s) found.");
@@ -722,4 +1007,133 @@ fn init_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
 fn restore_terminal() -> io::Result<()> {
     disable_raw_mode()?;
     execute!(stdout(), LeaveAlternateScreen)
+}
+
+#[cfg(test)]
+mod train_tests {
+    use super::*;
+
+    #[test]
+    fn upstream_finetune_maps_to_model_file_and_output_args() {
+        let argv = build_train_argv(
+            TrainArgInputs {
+                model: Path::new("/models/qwen.gguf"),
+                train_data: Path::new("/data/train.jsonl"),
+                output: Some(Path::new("/out/finetuned.gguf")),
+                lora_out: None,
+                checkpoint_in: None,
+                checkpoint_out: None,
+                extra_args: &["--epochs".to_string(), "3".to_string()],
+            },
+            &FinetuneCapabilities::default(),
+        )
+        .expect("upstream argv");
+
+        assert_eq!(
+            argv,
+            vec![
+                "--model",
+                "/models/qwen.gguf",
+                "--file",
+                "/data/train.jsonl",
+                "--output",
+                "/out/finetuned.gguf",
+                "--epochs",
+                "3",
+            ]
+        );
+    }
+
+    #[test]
+    fn custom_lora_flags_require_declared_capabilities() {
+        let error = build_train_argv(
+            TrainArgInputs {
+                model: Path::new("/models/qwen.gguf"),
+                train_data: Path::new("/data/train.jsonl"),
+                output: None,
+                lora_out: Some(Path::new("/out/adapter.bin")),
+                checkpoint_in: None,
+                checkpoint_out: None,
+                extra_args: &[],
+            },
+            &FinetuneCapabilities::default(),
+        )
+        .expect_err("missing lora-out capability");
+
+        assert_eq!(
+            error,
+            "installed llama-finetune does not advertise --lora-out"
+        );
+    }
+
+    #[test]
+    fn custom_finetune_capabilities_use_custom_flag_names() {
+        let capabilities = FinetuneCapabilities::from_help(
+            "--model-base --train-data --lora-out --checkpoint-in --checkpoint-out",
+        );
+        let argv = build_train_argv(
+            TrainArgInputs {
+                model: Path::new("/models/qwen.gguf"),
+                train_data: Path::new("/data/train.jsonl"),
+                output: None,
+                lora_out: Some(Path::new("/out/adapter.bin")),
+                checkpoint_in: Some(Path::new("/ckpt/in.bin")),
+                checkpoint_out: Some(Path::new("/ckpt/out.bin")),
+                extra_args: &["--epochs".to_string(), "3".to_string()],
+            },
+            &capabilities,
+        )
+        .expect("custom argv");
+
+        assert_eq!(
+            argv,
+            vec![
+                "--model-base",
+                "/models/qwen.gguf",
+                "--train-data",
+                "/data/train.jsonl",
+                "--lora-out",
+                "/out/adapter.bin",
+                "--checkpoint-in",
+                "/ckpt/in.bin",
+                "--checkpoint-out",
+                "/ckpt/out.bin",
+                "--epochs",
+                "3",
+            ]
+        );
+    }
+
+    #[test]
+    fn export_lora_maps_to_base_lora_and_output_args() {
+        let argv = build_export_lora_argv(
+            Path::new("/models/qwen-f16.gguf"),
+            Path::new("/out/adapter.gguf"),
+            Path::new("/out/qwen-finetuned.gguf"),
+        );
+
+        assert_eq!(
+            argv,
+            vec![
+                "--model",
+                "/models/qwen-f16.gguf",
+                "--lora",
+                "/out/adapter.gguf",
+                "--output",
+                "/out/qwen-finetuned.gguf",
+            ]
+        );
+    }
+
+    #[test]
+    fn training_binaries_live_next_to_server_binary() {
+        assert_eq!(
+            finetune_binary_path(Path::new("/lmml/llama.cpp/build/bin/llama-server")),
+            PathBuf::from("/lmml/llama.cpp/build/bin").join(binary_name("llama-finetune"))
+        );
+        assert_eq!(
+            export_lora_binary_path(Path::new("/lmml/llama.cpp/build/bin/llama-server")),
+            PathBuf::from("/lmml/llama.cpp/build/bin").join(binary_name("llama-export-lora"))
+        );
+    }
 }
