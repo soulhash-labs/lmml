@@ -38,8 +38,8 @@ pub const DEFAULT_LLAMA_BASE_URL: &str = "http://127.0.0.1:1200";
 /// Default inference proxy timeout in milliseconds.
 pub const DEFAULT_INFER_TIMEOUT_MS: u64 = 7_200_000;
 
-/// Maximum accepted LMML inference request body size.
-pub const MAX_INFER_BODY_BYTES: usize = 1024 * 1024;
+/// Maximum accepted LMML node proxy request body size.
+pub const MAX_PROXY_BODY_BYTES: usize = 1024 * 1024;
 
 const HEALTH_CHECK_TIMEOUT_MS: u64 = 500;
 
@@ -208,8 +208,8 @@ impl NodeSnapshot {
             max_context_tokens: models.iter().filter_map(|model| model.context_length).max(),
             models,
             supports_infer: true,
-            supports_chat_completions: false,
-            supports_embeddings: false,
+            supports_chat_completions: true,
+            supports_embeddings: true,
             supports_server_control: false,
             auth_required: api_key(&self.config).is_some(),
             llama_cpp_commit: None,
@@ -274,6 +274,8 @@ pub fn router(state: NodeAppState) -> Router {
         .route("/v1/load", get(load))
         .route("/v1/models", get(models))
         .route("/v1/infer", post(infer))
+        .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/embeddings", post(embeddings))
         .with_state(state)
 }
 
@@ -311,27 +313,31 @@ async fn infer(
     State(state): State<NodeAppState>,
     request: AxumRequest<axum::body::Body>,
 ) -> Result<Json<InferResponse>, ApiFailure> {
-    authorize(&state.snapshot.config, request.headers())?;
-    let body = axum::body::to_bytes(request.into_body(), MAX_INFER_BODY_BYTES)
-        .await
-        .map_err(|error| {
-            ApiFailure::new(
-                StatusCode::BAD_REQUEST,
-                "invalid_body",
-                format!("failed to read request body: {error}"),
-                None,
-            )
-        })?;
-    let request = serde_json::from_slice::<InferRequest>(&body).map_err(|error| {
+    let body = read_authorized_body(&state.snapshot.config, request).await?;
+    let request = serde_json::from_slice::<InferRequest>(&body.bytes).map_err(|error| {
         ApiFailure::new(
             StatusCode::BAD_REQUEST,
             "invalid_json",
             format!("invalid inference request JSON: {error}"),
-            None,
+            body.request_id,
         )
     })?;
     let response = proxy_infer(&state, request).await?;
     Ok(Json(response))
+}
+
+async fn chat_completions(
+    State(state): State<NodeAppState>,
+    request: AxumRequest<axum::body::Body>,
+) -> Result<Response, ApiFailure> {
+    proxy_json_passthrough(&state, request, "/v1/chat/completions").await
+}
+
+async fn embeddings(
+    State(state): State<NodeAppState>,
+    request: AxumRequest<axum::body::Body>,
+) -> Result<Response, ApiFailure> {
+    proxy_json_passthrough(&state, request, "/v1/embeddings").await
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -340,6 +346,11 @@ struct ApiFailure {
     code: &'static str,
     message: String,
     request_id: Option<String>,
+}
+
+struct AuthorizedBody {
+    request_id: Option<String>,
+    bytes: Vec<u8>,
 }
 
 impl ApiFailure {
@@ -390,6 +401,123 @@ fn authorize(config: &NodeConfig, headers: &HeaderMap) -> Result<(), ApiFailure>
         "missing or invalid bearer token",
         None,
     ))
+}
+
+async fn read_authorized_body(
+    config: &NodeConfig,
+    request: AxumRequest<axum::body::Body>,
+) -> Result<AuthorizedBody, ApiFailure> {
+    let request_id = request_id_from_headers(request.headers());
+    authorize(config, request.headers())?;
+    let bytes = axum::body::to_bytes(request.into_body(), MAX_PROXY_BODY_BYTES)
+        .await
+        .map_err(|error| {
+            ApiFailure::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_body",
+                format!("failed to read request body: {error}"),
+                request_id.clone(),
+            )
+        })?;
+    Ok(AuthorizedBody {
+        request_id,
+        bytes: bytes.to_vec(),
+    })
+}
+
+async fn proxy_json_passthrough(
+    state: &NodeAppState,
+    request: AxumRequest<axum::body::Body>,
+    upstream_path: &str,
+) -> Result<Response, ApiFailure> {
+    let body = read_authorized_body(&state.snapshot.config, request).await?;
+    ensure_json_body(&body)?;
+    let url = upstream_url(&state.snapshot.config.llama_base_url, upstream_path);
+    let timeout = Duration::from_millis(state.snapshot.config.infer_timeout_ms);
+    let upstream_body = body.bytes.clone();
+    let upstream_request_id = body.request_id.clone();
+    let upstream = tokio::time::timeout(timeout, async {
+        let mut request = state
+            .client
+            .post(url)
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(upstream_body);
+        if let Some(request_id) = upstream_request_id.as_deref() {
+            request = request.header(HEADER_REQUEST_ID, request_id);
+        }
+        let response = request.send().await?;
+        let status = response.status().as_u16();
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let bytes = response.bytes().await?;
+        Ok::<_, reqwest::Error>((status, content_type, bytes.to_vec()))
+    })
+    .await
+    .map_err(|_| {
+        ApiFailure::new(
+            StatusCode::GATEWAY_TIMEOUT,
+            "upstream_timeout",
+            "llama-server compatibility request timed out",
+            body.request_id.clone(),
+        )
+    })?
+    .map_err(|error| {
+        ApiFailure::new(
+            StatusCode::BAD_GATEWAY,
+            "upstream_request_failed",
+            format!("failed to call llama-server: {error}"),
+            body.request_id.clone(),
+        )
+    })?;
+
+    let (status, content_type, bytes) = upstream;
+    if !(200..300).contains(&status) {
+        return Err(ApiFailure::new(
+            StatusCode::BAD_GATEWAY,
+            "upstream_error",
+            format!("llama-server returned HTTP {status}"),
+            body.request_id,
+        ));
+    }
+
+    let status = StatusCode::from_u16(status).map_err(|error| {
+        ApiFailure::new(
+            StatusCode::BAD_GATEWAY,
+            "upstream_invalid_status",
+            format!("llama-server returned invalid HTTP status: {error}"),
+            body.request_id.clone(),
+        )
+    })?;
+    let mut builder = Response::builder().status(status);
+    if let Some(content_type) = content_type {
+        builder = builder.header(axum::http::header::CONTENT_TYPE, content_type);
+    }
+    builder
+        .body(axum::body::Body::from(bytes))
+        .map_err(|error| {
+            ApiFailure::new(
+                StatusCode::BAD_GATEWAY,
+                "passthrough_response_failed",
+                format!("failed to build passthrough response: {error}"),
+                body.request_id,
+            )
+        })
+}
+
+fn ensure_json_body(body: &AuthorizedBody) -> Result<(), ApiFailure> {
+    serde_json::from_slice::<Value>(&body.bytes)
+        .map(|_| ())
+        .map_err(|error| {
+            ApiFailure::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_json",
+                format!("invalid compatibility request JSON: {error}"),
+                body.request_id.clone(),
+            )
+        })
 }
 
 async fn proxy_infer(
@@ -495,6 +623,15 @@ fn api_key(config: &NodeConfig) -> Option<&str> {
         .as_deref()
         .map(str::trim)
         .filter(|key| !key.is_empty())
+}
+
+fn request_id_from_headers(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(HEADER_REQUEST_ID)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn socket_addr_string(host: &str, port: u16) -> String {
@@ -903,6 +1040,16 @@ mod tests {
         assert_eq!(response.latency_ms, 7);
     }
 
+    #[test]
+    fn capabilities_advertise_compatibility_routes() {
+        let capabilities = test_snapshot(NodeConfig::default()).capabilities();
+
+        assert!(capabilities.supports_infer);
+        assert!(capabilities.supports_chat_completions);
+        assert!(capabilities.supports_embeddings);
+        assert!(!capabilities.supports_server_control);
+    }
+
     #[tokio::test]
     async fn health_is_public_but_capabilities_require_auth() {
         let snapshot = test_snapshot(NodeConfig {
@@ -1216,6 +1363,167 @@ mod tests {
         let error: ErrorResponse = serde_json::from_str(&body).expect("error json");
         assert_eq!(error.error.code, "upstream_timeout");
         assert!(error.error.request_id.is_some());
+    }
+
+    #[tokio::test]
+    async fn chat_completions_requires_auth_before_body_read() {
+        let app = router(NodeAppState::new(test_snapshot(NodeConfig {
+            api_key: Some("secret".to_string()),
+            ..NodeConfig::default()
+        })));
+        let response = app
+            .oneshot(raw_json_request("/v1/chat/completions", "{", None))
+            .await
+            .expect("chat response");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn embeddings_invalid_json_with_auth_returns_structured_error() {
+        let app = router(NodeAppState::new(test_snapshot(NodeConfig {
+            api_key: Some("secret".to_string()),
+            ..NodeConfig::default()
+        })));
+        let response = app
+            .oneshot(raw_json_request("/v1/embeddings", "{", Some("secret")))
+            .await
+            .expect("embeddings response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_text(response).await;
+        let error: ErrorResponse = serde_json::from_str(&body).expect("error json");
+        assert_eq!(error.error.code, "invalid_json");
+    }
+
+    #[tokio::test]
+    async fn chat_completions_preserves_upstream_success_status_and_body() {
+        let upstream = spawn_upstream(axum::Router::new().route(
+            "/v1/chat/completions",
+            post(|body: String| async move {
+                (
+                    StatusCode::ACCEPTED,
+                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                    body,
+                )
+            }),
+        ))
+        .await;
+        let app = router(NodeAppState::new(test_snapshot(NodeConfig {
+            api_key: Some("secret".to_string()),
+            llama_base_url: upstream,
+            ..NodeConfig::default()
+        })));
+        let request_body = r#"{"messages":[{"role":"user","content":"hello"}]}"#;
+        let response = app
+            .oneshot(raw_json_request(
+                "/v1/chat/completions",
+                request_body,
+                Some("secret"),
+            ))
+            .await
+            .expect("chat response");
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = response_text(response).await;
+        let echoed: Value = serde_json::from_str(&body).expect("echoed json");
+        assert_eq!(echoed["messages"][0]["content"], "hello");
+    }
+
+    #[tokio::test]
+    async fn embeddings_preserves_upstream_success_body() {
+        let upstream = spawn_upstream(axum::Router::new().route(
+            "/v1/embeddings",
+            post(|| async {
+                Json(json!({
+                    "object": "list",
+                    "data": [
+                        {
+                            "object": "embedding",
+                            "embedding": [0.1, 0.2],
+                            "index": 0
+                        }
+                    ]
+                }))
+            }),
+        ))
+        .await;
+        let app = router(NodeAppState::new(test_snapshot(NodeConfig {
+            api_key: Some("secret".to_string()),
+            llama_base_url: upstream,
+            ..NodeConfig::default()
+        })));
+        let response = app
+            .oneshot(raw_json_request(
+                "/v1/embeddings",
+                r#"{"input":["hello"]}"#,
+                Some("secret"),
+            ))
+            .await
+            .expect("embeddings response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_text(response).await;
+        let value: Value = serde_json::from_str(&body).expect("embedding json");
+        assert_eq!(value["data"][0]["embedding"][0], 0.1);
+    }
+
+    #[tokio::test]
+    async fn chat_completions_maps_upstream_error() {
+        let upstream = spawn_upstream(axum::Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { (StatusCode::INTERNAL_SERVER_ERROR, "boom") }),
+        ))
+        .await;
+        let app = router(NodeAppState::new(test_snapshot(NodeConfig {
+            api_key: Some("secret".to_string()),
+            llama_base_url: upstream,
+            ..NodeConfig::default()
+        })));
+        let response = app
+            .oneshot(raw_json_request(
+                "/v1/chat/completions",
+                r#"{"messages":[]}"#,
+                Some("secret"),
+            ))
+            .await
+            .expect("chat response");
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = response_text(response).await;
+        let error: ErrorResponse = serde_json::from_str(&body).expect("error json");
+        assert_eq!(error.error.code, "upstream_error");
+    }
+
+    #[tokio::test]
+    async fn embeddings_maps_upstream_timeout() {
+        let upstream = spawn_upstream(axum::Router::new().route(
+            "/v1/embeddings",
+            post(|| async {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                Json(json!({ "data": [] }))
+            }),
+        ))
+        .await;
+        let app = router(NodeAppState::new(test_snapshot(NodeConfig {
+            api_key: Some("secret".to_string()),
+            llama_base_url: upstream,
+            infer_timeout_ms: 1,
+            ..NodeConfig::default()
+        })));
+        let response = app
+            .oneshot(raw_json_request(
+                "/v1/embeddings",
+                r#"{"input":["hello"]}"#,
+                Some("secret"),
+            ))
+            .await
+            .expect("embeddings response");
+
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+        let body = response_text(response).await;
+        let error: ErrorResponse = serde_json::from_str(&body).expect("error json");
+        assert_eq!(error.error.code, "upstream_timeout");
     }
 
     #[tokio::test]
