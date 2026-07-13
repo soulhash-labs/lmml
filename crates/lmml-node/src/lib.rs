@@ -19,7 +19,8 @@ use axum::{Json, Router};
 use lmml_api::{
     AgentQDescriptor, ApiErrorBody, BackendKind, ErrorResponse, GpuDescriptor, HealthResponse,
     InferRequest, InferResponse, LoadResponse, ModelDescriptor, NodeCapabilities, NodeRole,
-    NodeStatus, PrivacyTier, API_VERSION, HEADER_REQUEST_ID,
+    NodeStatus, PrivacyTier, ServerAction, ServerControlRequest, ServerControlResponse,
+    API_VERSION, HEADER_REQUEST_ID,
 };
 use lmml_detect::{BuildBackend, GpuInfo, SystemProfile};
 use lmml_models::{ModelEntry, ModelRegistry};
@@ -62,6 +63,8 @@ pub struct NodeConfig {
     pub llama_base_url: String,
     /// Timeout for proxied inference requests in milliseconds.
     pub infer_timeout_ms: u64,
+    /// Enable explicit managed-server lifecycle control routes.
+    pub enable_server_control: bool,
     /// Optional bearer token required for protected node routes.
     pub api_key: Option<String>,
     /// Explicit development escape hatch for non-local unauthenticated binds.
@@ -77,6 +80,9 @@ pub struct NodeConfig {
 impl NodeConfig {
     /// Validate security-sensitive node settings before binding a socket.
     pub fn validate(&self) -> Result<(), NodeConfigError> {
+        if self.enable_server_control && api_key(self).is_none() {
+            return Err(NodeConfigError::ApiKeyRequiredForServerControl);
+        }
         if !is_local_bind(&self.host)
             && api_key(self).is_none()
             && !self.allow_unsafe_lan_without_auth
@@ -110,6 +116,7 @@ impl Default for NodeConfig {
             model_dirs: vec![default_model_dir()],
             llama_base_url: DEFAULT_LLAMA_BASE_URL.to_string(),
             infer_timeout_ms: DEFAULT_INFER_TIMEOUT_MS,
+            enable_server_control: false,
             api_key: None,
             allow_unsafe_lan_without_auth: false,
             tags: vec!["lmml".to_string()],
@@ -122,6 +129,9 @@ impl Default for NodeConfig {
 /// Security or address validation error for [`NodeConfig`].
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum NodeConfigError {
+    /// Server control requires bearer authentication even on localhost.
+    #[error("API key required when enabling lmml-node server control")]
+    ApiKeyRequiredForServerControl,
     /// LAN-visible node APIs must be authenticated unless explicitly unsafe.
     #[error("API key required when binding lmml-node to non-local host {host}")]
     ApiKeyRequiredForLanBind {
@@ -210,7 +220,7 @@ impl NodeSnapshot {
             supports_infer: true,
             supports_chat_completions: true,
             supports_embeddings: true,
-            supports_server_control: false,
+            supports_server_control: self.config.enable_server_control,
             auth_required: api_key(&self.config).is_some(),
             llama_cpp_commit: None,
             agentq: self.config.agentq.clone(),
@@ -276,6 +286,7 @@ pub fn router(state: NodeAppState) -> Router {
         .route("/v1/infer", post(infer))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/embeddings", post(embeddings))
+        .route("/v1/server/control", post(server_control))
         .with_state(state)
 }
 
@@ -338,6 +349,34 @@ async fn embeddings(
     request: AxumRequest<axum::body::Body>,
 ) -> Result<Response, ApiFailure> {
     proxy_json_passthrough(&state, request, "/v1/embeddings").await
+}
+
+async fn server_control(
+    State(state): State<NodeAppState>,
+    request: AxumRequest<axum::body::Body>,
+) -> Result<Json<ServerControlResponse>, ApiFailure> {
+    let request_id = request_id_from_headers(request.headers());
+    authorize(&state.snapshot.config, request.headers())?;
+    if !state.snapshot.config.enable_server_control {
+        return Err(ApiFailure::new(
+            StatusCode::NOT_FOUND,
+            "server_control_disabled",
+            "server control is disabled for this lmml-node",
+            request_id,
+        ));
+    }
+
+    let body = read_authorized_body(&state.snapshot.config, request).await?;
+    let request = serde_json::from_slice::<ServerControlRequest>(&body.bytes).map_err(|error| {
+        ApiFailure::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_server_control_request",
+            format!("invalid server control request JSON: {error}"),
+            body.request_id,
+        )
+    })?;
+    let response = handle_server_control(&state, request).await?;
+    Ok(Json(response))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -518,6 +557,36 @@ fn ensure_json_body(body: &AuthorizedBody) -> Result<(), ApiFailure> {
                 body.request_id.clone(),
             )
         })
+}
+
+async fn handle_server_control(
+    state: &NodeAppState,
+    request: ServerControlRequest,
+) -> Result<ServerControlResponse, ApiFailure> {
+    match request.action {
+        ServerAction::Status => {
+            let llama_healthy = upstream_llama_healthy(state).await;
+            Ok(ServerControlResponse {
+                node_id: state.snapshot.config.node_id.clone(),
+                status: if llama_healthy {
+                    NodeStatus::Ready
+                } else {
+                    NodeStatus::Degraded
+                },
+                message: if llama_healthy {
+                    "llama-server is reachable through the configured proxy URL".to_string()
+                } else {
+                    "llama-server is not reachable through the configured proxy URL".to_string()
+                },
+            })
+        }
+        ServerAction::Start | ServerAction::Stop | ServerAction::Restart => Err(ApiFailure::new(
+            StatusCode::NOT_IMPLEMENTED,
+            "server_manager_unavailable",
+            "server lifecycle actions require a managed lmml-server handle",
+            None,
+        )),
+    }
 }
 
 async fn proxy_infer(
@@ -961,6 +1030,19 @@ mod tests {
     }
 
     #[test]
+    fn server_control_requires_auth_even_on_localhost() {
+        let config = NodeConfig {
+            enable_server_control: true,
+            ..NodeConfig::default()
+        };
+
+        assert_eq!(
+            config.validate(),
+            Err(NodeConfigError::ApiKeyRequiredForServerControl)
+        );
+    }
+
+    #[test]
     fn constant_time_compare_checks_length_and_content() {
         assert!(constant_time_eq(b"secret", b"secret"));
         assert!(!constant_time_eq(b"secret", b"Secret"));
@@ -1048,6 +1130,18 @@ mod tests {
         assert!(capabilities.supports_chat_completions);
         assert!(capabilities.supports_embeddings);
         assert!(!capabilities.supports_server_control);
+    }
+
+    #[test]
+    fn capabilities_tie_server_control_to_config_flag() {
+        let capabilities = test_snapshot(NodeConfig {
+            enable_server_control: true,
+            api_key: Some("secret".to_string()),
+            ..NodeConfig::default()
+        })
+        .capabilities();
+
+        assert!(capabilities.supports_server_control);
     }
 
     #[tokio::test]
@@ -1524,6 +1618,114 @@ mod tests {
         let body = response_text(response).await;
         let error: ErrorResponse = serde_json::from_str(&body).expect("error json");
         assert_eq!(error.error.code, "upstream_timeout");
+    }
+
+    #[tokio::test]
+    async fn server_control_requires_auth_before_body_read() {
+        let app = router(NodeAppState::new(test_snapshot(NodeConfig {
+            api_key: Some("secret".to_string()),
+            enable_server_control: true,
+            ..NodeConfig::default()
+        })));
+        let response = app
+            .oneshot(raw_json_request("/v1/server/control", "{", None))
+            .await
+            .expect("server control response");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn server_control_disabled_by_default_before_body_parse() {
+        let app = router(NodeAppState::new(test_snapshot(NodeConfig {
+            api_key: Some("secret".to_string()),
+            ..NodeConfig::default()
+        })));
+        let response = app
+            .oneshot(raw_json_request("/v1/server/control", "{", Some("secret")))
+            .await
+            .expect("server control response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response_text(response).await;
+        let error: ErrorResponse = serde_json::from_str(&body).expect("error json");
+        assert_eq!(error.error.code, "server_control_disabled");
+    }
+
+    #[tokio::test]
+    async fn server_control_rejects_invalid_action() {
+        let app = router(NodeAppState::new(test_snapshot(NodeConfig {
+            api_key: Some("secret".to_string()),
+            enable_server_control: true,
+            ..NodeConfig::default()
+        })));
+        let response = app
+            .oneshot(raw_json_request(
+                "/v1/server/control",
+                r#"{"action":"explode"}"#,
+                Some("secret"),
+            ))
+            .await
+            .expect("server control response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_text(response).await;
+        let error: ErrorResponse = serde_json::from_str(&body).expect("error json");
+        assert_eq!(error.error.code, "invalid_server_control_request");
+    }
+
+    #[tokio::test]
+    async fn server_control_status_reports_upstream_health() {
+        let upstream = spawn_upstream(axum::Router::new().route(
+            "/v1/health",
+            get(|| async { Json(json!({ "status": "ok" })) }),
+        ))
+        .await;
+        let app = router(NodeAppState::new(test_snapshot(NodeConfig {
+            node_id: "node-a".to_string(),
+            api_key: Some("secret".to_string()),
+            enable_server_control: true,
+            llama_base_url: upstream,
+            ..NodeConfig::default()
+        })));
+        let response = app
+            .oneshot(raw_json_request(
+                "/v1/server/control",
+                r#"{"action":"status"}"#,
+                Some("secret"),
+            ))
+            .await
+            .expect("server control response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_text(response).await;
+        let control: ServerControlResponse =
+            serde_json::from_str(&body).expect("server control json");
+        assert_eq!(control.node_id, "node-a");
+        assert_eq!(control.status, NodeStatus::Ready);
+        assert!(control.message.contains("reachable"));
+    }
+
+    #[tokio::test]
+    async fn server_control_lifecycle_actions_report_unavailable_manager() {
+        let app = router(NodeAppState::new(test_snapshot(NodeConfig {
+            api_key: Some("secret".to_string()),
+            enable_server_control: true,
+            ..NodeConfig::default()
+        })));
+        let response = app
+            .oneshot(raw_json_request(
+                "/v1/server/control",
+                r#"{"action":"start"}"#,
+                Some("secret"),
+            ))
+            .await
+            .expect("server control response");
+
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        let body = response_text(response).await;
+        let error: ErrorResponse = serde_json::from_str(&body).expect("error json");
+        assert_eq!(error.error.code, "server_manager_unavailable");
     }
 
     #[tokio::test]

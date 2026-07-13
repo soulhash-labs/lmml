@@ -31,6 +31,8 @@ struct Args {
         default_value_t = lmml_node::DEFAULT_INFER_TIMEOUT_MS
     )]
     infer_timeout_ms: u64,
+    #[arg(long)]
+    enable_server_control: bool,
     #[arg(long, env = "LMML_NODE_API_KEY")]
     api_key: Option<String>,
     #[arg(long)]
@@ -49,6 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         public_url: args.public_url,
         llama_base_url: args.llama_base_url,
         infer_timeout_ms: args.infer_timeout_ms,
+        enable_server_control: args.enable_server_control,
         api_key: args.api_key,
         allow_unsafe_lan_without_auth: args.unsafe_allow_lan_without_auth,
         ..NodeConfig::default()
