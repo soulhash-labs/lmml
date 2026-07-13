@@ -1023,6 +1023,7 @@ dependencies = [
  "lmml-models",
  "lmml-state",
  "pretty_assertions",
+ "reqwest",
  "serde_json",
  "thiserror",
  "time",

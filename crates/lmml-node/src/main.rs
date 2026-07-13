@@ -5,7 +5,7 @@ use lmml_node::{router, NodeAppState, NodeConfig};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
-#[command(name = "lmml-node", about = "Serve read-only LMML node APIs")]
+#[command(name = "lmml-node", about = "Serve LMML node APIs")]
 struct Args {
     #[arg(long, default_value = "127.0.0.1")]
     host: String,
@@ -19,6 +19,18 @@ struct Args {
     public_url: Option<String>,
     #[arg(long = "model-dir")]
     model_dirs: Vec<PathBuf>,
+    #[arg(
+        long = "llama-url",
+        env = "LMML_NODE_LLAMA_URL",
+        default_value = lmml_node::DEFAULT_LLAMA_BASE_URL
+    )]
+    llama_base_url: String,
+    #[arg(
+        long = "infer-timeout-ms",
+        env = "LMML_NODE_INFER_TIMEOUT_MS",
+        default_value_t = lmml_node::DEFAULT_INFER_TIMEOUT_MS
+    )]
+    infer_timeout_ms: u64,
     #[arg(long, env = "LMML_NODE_API_KEY")]
     api_key: Option<String>,
     #[arg(long)]
@@ -35,6 +47,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         host: args.host,
         port: args.port,
         public_url: args.public_url,
+        llama_base_url: args.llama_base_url,
+        infer_timeout_ms: args.infer_timeout_ms,
         api_key: args.api_key,
         allow_unsafe_lan_without_auth: args.unsafe_allow_lan_without_auth,
         ..NodeConfig::default()
@@ -55,7 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let snapshot = lmml_node::NodeSnapshot::detect(config).await?;
     let addr = snapshot.config.socket_addr()?;
-    tracing::info!(addr = %addr, "starting lmml-node read-only API");
+    tracing::info!(addr = %addr, "starting lmml-node API");
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, router(NodeAppState::new(snapshot)))
         .with_graceful_shutdown(shutdown_signal())
@@ -68,10 +82,17 @@ async fn shutdown_signal() {
     {
         use tokio::signal::unix::{signal, SignalKind};
 
-        let mut terminate = signal(SignalKind::terminate()).expect("install SIGTERM handler");
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = terminate.recv() => {}
+        match signal(SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = terminate.recv() => {}
+                }
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "failed to install SIGTERM handler");
+                let _ignored = tokio::signal::ctrl_c().await;
+            }
         }
     }
 

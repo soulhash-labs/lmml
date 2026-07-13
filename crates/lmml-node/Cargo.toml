@@ -2,7 +2,7 @@
 name = "lmml-node"
 version = "0.1.0"
 edition = "2021"
-description = "Headless read-only LMML node HTTP API"
+description = "Headless LMML node HTTP API"
 
 [lib]
 name = "lmml_node"
@@ -19,10 +19,11 @@ lmml-api = { path = "../lmml-api" }
 lmml-detect = { path = "../lmml-detect" }
 lmml-models = { path = "../lmml-models" }
 lmml-state = { path = "../lmml-state" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde_json = "1"
 thiserror = "2"
 time = { version = "0.3", features = ["formatting"] }
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
