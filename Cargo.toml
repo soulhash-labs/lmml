@@ -1,5 +1,7 @@
 [workspace]
 members = [
+    "crates/lmml-api",
+    "crates/lmml-node",
     "crates/lmml-detect",
     "crates/lmml-compat",
     "crates/lmml-build",

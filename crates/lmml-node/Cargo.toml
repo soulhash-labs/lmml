@@ -1,0 +1,31 @@
+[package]
+name = "lmml-node"
+version = "0.1.0"
+edition = "2021"
+description = "Headless read-only LMML node HTTP API"
+
+[lib]
+name = "lmml_node"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lmml-node"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.8"
+clap = { version = "4", features = ["derive", "env"] }
+lmml-api = { path = "../lmml-api" }
+lmml-detect = { path = "../lmml-detect" }
+lmml-models = { path = "../lmml-models" }
+lmml-state = { path = "../lmml-state" }
+serde_json = "1"
+thiserror = "2"
+time = { version = "0.3", features = ["formatting"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+pretty_assertions = "1"
+tower = { version = "0.5", features = ["util"] }
