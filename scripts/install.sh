@@ -210,8 +210,8 @@ case "$INSTALL_MODE" in
 esac
 
 case "$LMML_PROFILE_HINT" in
-  ""|orion-qwen35-4b-q8|quadro-m6000-qwen35-9b-q8|qwen36-27b-q4|qwen36-35b-a3b-q4|gemma4-12b-mtp-q4km) ;;
-  *) fail "Unsupported LMML_PROFILE_HINT=$LMML_PROFILE_HINT" "Supported hints: orion-qwen35-4b-q8, quadro-m6000-qwen35-9b-q8, qwen36-27b-q4, qwen36-35b-a3b-q4, gemma4-12b-mtp-q4km." ;;
+  ""|orion-qwen35-4b-q8|quadro-m6000-qwen35-9b-q8|qwen36-27b-q4|qwen36-35b-a3b-q4|gemma4-12b-mtp-q4km|bc250-qwen35-9b-q4km-vulkan) ;;
+  *) fail "Unsupported LMML_PROFILE_HINT=$LMML_PROFILE_HINT" "Supported hints: orion-qwen35-4b-q8, quadro-m6000-qwen35-9b-q8, qwen36-27b-q4, qwen36-35b-a3b-q4, gemma4-12b-mtp-q4km, bc250-qwen35-9b-q4km-vulkan." ;;
 esac
 
 case "$LMML_CHECKSUM_VERIFY" in
@@ -509,4 +509,37 @@ if [ "$LMML_PROFILE_HINT" = "gemma4-12b-mtp-q4km" ]; then
   echo "  Put both GGUF files in ~/.local/share/lmml/models, select"
   echo "  Gemma4-12B-QAT-Q4_K_M.gguf in the TUI, then press p until"
   echo "  Profile shows gemma4-12b-mtp-q4km."
+fi
+
+if [ "$LMML_PROFILE_HINT" = "bc250-qwen35-9b-q4km-vulkan" ]; then
+  echo
+  echo "AMD BC-250 headless Vulkan + Qwen3.5 9B Q4_K_M profile hint:"
+  echo
+  echo "  Expected footprint:"
+  echo "    Ubuntu Server / Debian headless:     ~6-8GB"
+  echo "    llama.cpp source + built binaries:   ~1GB"
+  echo "    Qwen3.5 9B Q4_K_M GGUF:              ~5.5GB"
+  echo
+  echo "  Recommended source install path:"
+  echo "    LMML_GPU_MODE=vulkan INSTALL_MODE=source"
+  echo
+  echo "  Required runtime stack:"
+  echo "    backend:                             Vulkan / RADV, not CUDA"
+  echo "    Mesa:                                25.1+ recommended for BC-250"
+  echo "    model file:                          Qwen3.5-9B-Q4_K_M.gguf"
+  echo "    if your model is named differently:  rename or symlink it to Qwen3.5-9B-Q4_K_M.gguf"
+  echo
+  echo "  TUI runtime profile:"
+  echo "    bc250-qwen9b-q4km-vulkan:            host 0.0.0.0, port 8080"
+  echo "    ctx_size:                            4096"
+  echo "    gpu layers:                          99"
+  echo "    threads:                             6"
+  echo "    parallel:                            1"
+  echo
+  echo "  Equivalent llama-server shape:"
+  echo "    llama-server -m ~/.local/share/lmml/models/Qwen3.5-9B-Q4_K_M.gguf --host 0.0.0.0 --port 8080 -ngl 99 -fa -c 4096"
+  echo
+  echo "  Service guidance:"
+  echo "    See docs/lan-client-install.md for a systemd unit that starts lmml/llama-server on boot."
+  echo "    Exposing 0.0.0.0:8080 is for trusted LANs only; use firewall rules on shared networks."
 fi

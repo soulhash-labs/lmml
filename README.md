@@ -150,6 +150,29 @@ recommended extra_args: ["--parallel", "1", "--slot-save-path", "/home/angelo/.l
 recommended KV/cache args: ["-ctk", "q8_0", "-ctv", "q8_0", "--cache-ram", "4096"]
 ```
 
+For a headless AMD BC-250 Vulkan target running Qwen3.5 9B Q4_K_M, use source
+install so llama.cpp builds with Vulkan/RADV on that board:
+
+```sh
+curl -fsSL http://192.168.1.100:8000/preflight.sh | LMML_INSTALL_MODE=source LMML_GPU_MODE=vulkan bash
+curl -fsSL http://192.168.1.100:8000/install.sh | BASE_URL=http://192.168.1.100:8000 INSTALL_MODE=source LMML_GPU_MODE=vulkan LMML_PROFILE_HINT=bc250-qwen35-9b-q4km-vulkan sh
+```
+
+That hint documents the headless LAN profile:
+
+```text
+Ubuntu Server / Debian headless: ~6-8GB
+llama.cpp source + binaries: ~1GB
+Qwen3.5 9B Q4_K_M GGUF: ~5.5GB
+Profile: bc250-qwen9b-q4km-vulkan
+Host: 0.0.0.0
+Port: 8080
+Context: 4096
+GPU layers: 99
+Threads: 6
+Backend: Vulkan/RADV
+```
+
 ### After install
 
 ```sh
@@ -464,6 +487,16 @@ gemma4-12b-mtp-q4km:
   parallel: 1
   MTP: -md <models>/mtp-gemma-4-12B-it.gguf --spec-type draft-mtp
   sampling: temperature=0.6 top_k=64 top_p=0.9 min_p=0.05 repeat_penalty=1.1
+
+bc250-qwen9b-q4km-vulkan:
+  model: Qwen3.5-9B-Q4_K_M.gguf
+  backend: Vulkan/RADV
+  host: 0.0.0.0
+  port: 8080
+  ctx_size: 4096
+  gpu_layers: 99
+  parallel: 1
+  threads: 6
 ```
 
 Switching while the server is running changes the saved profile and visible

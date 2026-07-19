@@ -13,8 +13,9 @@ For local llama.cpp inference, the practical priority is:
 
 1. NVIDIA CUDA
 2. AMD ROCm/HIP, when the exact card and distro are supported
-3. Intel oneAPI/OpenVINO/XPU, or Intel Gaudi for datacenter accelerators
-4. Vulkan or CPU fallback for unsupported GPU stacks
+3. AMD Vulkan/RADV for unsupported or appliance-style AMD boards such as BC-250
+4. Intel oneAPI/OpenVINO/XPU, or Intel Gaudi for datacenter accelerators
+5. Vulkan or CPU fallback for unsupported GPU stacks
 
 VRAM remains the first sizing constraint for local AI. Ecosystem support is the
 second constraint.
@@ -46,9 +47,16 @@ second constraint.
 | Prosumer | Radeon RX 7900 XTX | 24GB GDDR6 | 24GB VRAM-per-dollar ROCm card |
 | Mid-range | Radeon RX 9070 XT | 16GB GDDR6 | current-gen 16GB ROCm option |
 | Mid-range | Radeon RX 9060 XT 16GB | 16GB GDDR6 | affordable 16GB RDNA 4 option |
+| Headless appliance | BC-250 / Cyan Skillfish | 16GB unified GDDR6 | Qwen 9B Q4 Vulkan LAN node |
 
 Note: the provided `RX 960 XT` name is treated as an alias for AMD's official
 `RX 9060 XT` product name.
+
+BC-250 is treated as a Vulkan/RADV target rather than a ROCm-first target. It is
+a PS5-derived RDNA 2 board with unified CPU/GPU GDDR6 memory, so practical LMML
+support is headless serving with conservative context first: Qwen3.5 9B Q4_K_M,
+`-ngl 99`, `-fa`, single slot, and 4096 context until the exact BIOS memory
+split, Mesa version, cooling, and power limits are validated.
 
 ## Intel
 
@@ -87,6 +95,10 @@ Note: the provided `RX 960 XT` name is treated as an alias for AMD's official
   <https://www.amd.com/en/products/graphics/desktops/radeon/9000-series/amd-radeon-rx-9070xt.html>
 - AMD Radeon RX 9060 XT:
   <https://www.amd.com/en/products/graphics/desktops/radeon/9000-series/amd-radeon-rx-9060xt.html>
+- AMD BC250 hardware specifications:
+  <https://elektricm.github.io/amd-bc250-docs/hardware/specifications/>
+- AMD BC250 Debian/PikaOS setup:
+  <https://elektricm.github.io/amd-bc250-docs/linux/debian/>
 - Intel Arc Pro B-Series:
   <https://www.intel.com/content/www/us/en/products/docs/discrete-gpus/arc/workstations/b-series/overview.html>
 - Intel Arc Pro B70:

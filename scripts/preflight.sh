@@ -100,10 +100,10 @@ case "$MODE" in
 esac
 
 case "$GPU_MODE" in
-  required|cpu-only) ;;
+  required|cpu-only|vulkan) ;;
   *)
     printf '%b✗ Unsupported LMML_GPU_MODE=%s%b\n' "$RED" "$GPU_MODE" "$NC" >&2
-    printf '  Use LMML_GPU_MODE=required or LMML_GPU_MODE=cpu-only.\n' >&2
+    printf '  Use LMML_GPU_MODE=required, LMML_GPU_MODE=vulkan, or LMML_GPU_MODE=cpu-only.\n' >&2
     exit 2
     ;;
 esac
@@ -209,6 +209,8 @@ fi
 section "GPU ACCELERATION"
 if [[ "$GPU_MODE" == "cpu-only" ]]; then
   warn "CPU-only mode selected; GPU acceleration checks are informational."
+elif [[ "$GPU_MODE" == "vulkan" ]]; then
+  printf 'Vulkan GPU acceleration selected for lmml preflight.\n'
 else
   printf 'GPU acceleration is primary and first-class for lmml preflight.\n'
 fi
@@ -218,14 +220,14 @@ if command -v nvidia-smi >/dev/null 2>&1; then
     ok "NVIDIA driver/GPU probe succeeded"
     printf '%s\n' "$NVIDIA_SMI_OUTPUT" | sed 's/^/    /'
   else
-    if [[ "$GPU_MODE" == "cpu-only" ]]; then
+    if [[ "$GPU_MODE" == "cpu-only" || "$GPU_MODE" == "vulkan" ]]; then
       warn "nvidia-smi failed: $NVIDIA_SMI_OUTPUT"
     else
       gpu_fail "nvidia-smi failed: $NVIDIA_SMI_OUTPUT"
     fi
   fi
 else
-  if [[ "$GPU_MODE" == "cpu-only" ]]; then
+  if [[ "$GPU_MODE" == "cpu-only" || "$GPU_MODE" == "vulkan" ]]; then
     warn "nvidia-smi not found"
   else
     gpu_fail "nvidia-smi not found"
@@ -250,7 +252,7 @@ if command -v nvcc >/dev/null 2>&1; then
     fi
   fi
 else
-  if [[ "$GPU_MODE" == "cpu-only" ]]; then
+  if [[ "$GPU_MODE" == "cpu-only" || "$GPU_MODE" == "vulkan" ]]; then
     warn "nvcc not found"
   else
     gpu_fail "nvcc not found"
@@ -261,12 +263,20 @@ if command -v vulkaninfo >/dev/null 2>&1; then
   if vulkaninfo --summary >/dev/null 2>&1; then
     ok "Vulkan runtime available"
   else
-    warn "vulkaninfo found but summary probe failed"
+    if [[ "$GPU_MODE" == "vulkan" ]]; then
+      gpu_fail "vulkaninfo found but summary probe failed"
+    else
+      warn "vulkaninfo found but summary probe failed"
+    fi
   fi
 elif command -v ldconfig >/dev/null 2>&1 && ldconfig -p 2>/dev/null | grep -q 'libvulkan'; then
   ok "libvulkan found"
 else
-  warn "Vulkan runtime not detected"
+  if [[ "$GPU_MODE" == "vulkan" ]]; then
+    gpu_fail "Vulkan runtime not detected"
+  else
+    warn "Vulkan runtime not detected"
+  fi
 fi
 
 if [[ "$OS" == "Darwin" ]]; then
@@ -298,12 +308,15 @@ fi
 
 if (( HARD_FAILURES > 0 || GPU_FAILURES > 0 )); then
   printf '\n%bPreflight failed:%b %d hard prerequisite failure(s), %d first-class GPU acceleration failure(s).\n' "$RED" "$NC" "$HARD_FAILURES" "$GPU_FAILURES"
+  printf '  For Vulkan-only nodes, re-run with LMML_GPU_MODE=vulkan.\n'
   printf '  For intentional CPU-only nodes, re-run with LMML_GPU_MODE=cpu-only.\n'
   exit 1
 fi
 
 if [[ "$GPU_MODE" == "cpu-only" ]]; then
   printf '\n%bPreflight passed.%b Hard prerequisites passed for an intentional CPU-only node.\n' "$GREEN" "$NC"
+elif [[ "$GPU_MODE" == "vulkan" ]]; then
+  printf '\n%bPreflight passed.%b Hard prerequisites and Vulkan acceleration checks passed.\n' "$GREEN" "$NC"
 else
   printf '\n%bPreflight passed.%b Hard prerequisites and first-class GPU acceleration checks passed.\n' "$GREEN" "$NC"
 fi

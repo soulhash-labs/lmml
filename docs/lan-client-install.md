@@ -82,6 +82,83 @@ After install, put both files in `~/.local/share/lmml/models`, select
 `Gemma4-12B-QAT-Q4_K_M.gguf` in the TUI, and press `p` until the profile is
 `gemma4-12b-mtp-q4km`.
 
+### AMD BC-250 Qwen3.5 9B Q4_K_M Vulkan
+
+BC-250 should use a source install so llama.cpp is built locally with the Vulkan
+backend:
+
+```sh
+curl -fsSL http://192.168.50.176:8000/preflight.sh | LMML_INSTALL_MODE=source LMML_GPU_MODE=vulkan bash
+curl -fsSL http://192.168.50.176:8000/install.sh | BASE_URL=http://192.168.50.176:8000 INSTALL_MODE=source LMML_GPU_MODE=vulkan LMML_PROFILE_HINT=bc250-qwen35-9b-q4km-vulkan sh
+```
+
+Expected footprint:
+
+```text
+Ubuntu Server / Debian headless: ~6-8GB
+llama.cpp source + compiled binaries: ~1GB
+Qwen3.5 9B Q4_K_M GGUF: ~5.5GB
+```
+
+Put the model in `~/.local/share/lmml/models/Qwen3.5-9B-Q4_K_M.gguf`. If the
+downloaded file is named `qwen-9b-q4_k_m.gguf`, rename it or create a symlink so
+the built-in profile matches.
+
+The built-in profile is:
+
+```text
+bc250-qwen9b-q4km-vulkan
+host: 0.0.0.0
+port: 8080
+ctx_size: 4096
+gpu layers: 99
+threads: 6
+parallel: 1
+```
+
+Equivalent raw llama.cpp command shape:
+
+```sh
+~/.local/share/lmml/llama.cpp/build/bin/llama-server \
+  -m ~/.local/share/lmml/models/Qwen3.5-9B-Q4_K_M.gguf \
+  --host 0.0.0.0 \
+  --port 8080 \
+  -ngl 99 \
+  -fa \
+  -c 4096
+```
+
+Optional systemd service for a dedicated headless BC-250 node:
+
+```ini
+[Unit]
+Description=LMML llama.cpp Vulkan Server for Qwen3.5 9B
+After=network.target
+
+[Service]
+Type=simple
+User=yourusername
+WorkingDirectory=/home/yourusername/.local/share/lmml/llama.cpp
+ExecStart=/home/yourusername/.local/share/lmml/llama.cpp/build/bin/llama-server -m /home/yourusername/.local/share/lmml/models/Qwen3.5-9B-Q4_K_M.gguf --host 0.0.0.0 --port 8080 -ngl 99 -fa -c 4096
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Install and start it:
+
+```sh
+sudo install -m 0644 llama-server.service /etc/systemd/system/llama-server.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now llama-server
+curl -fsS http://127.0.0.1:8080/health
+```
+
+Use `0.0.0.0:8080` only on a trusted LAN. Add firewall rules or keep the host on
+`127.0.0.1` when the network is shared or untrusted.
+
 ## Source Install
 
 Use source install when the client needs to build `llama.cpp` locally for its

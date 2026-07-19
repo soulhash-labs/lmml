@@ -44,6 +44,8 @@ pub enum GpuUseCase {
     ConsumerMidRange,
     /// Entry local-AI cards for 7B-class quantized models.
     ConsumerEntry,
+    /// Headless appliance or repurposed board used as a LAN inference node.
+    HeadlessAppliance,
     /// Integrated NPUs or iGPUs for very light local AI.
     Integrated,
 }
@@ -56,6 +58,7 @@ impl fmt::Display for GpuUseCase {
             GpuUseCase::ConsumerHighEnd => formatter.write_str("prosumer"),
             GpuUseCase::ConsumerMidRange => formatter.write_str("mid-range"),
             GpuUseCase::ConsumerEntry => formatter.write_str("entry"),
+            GpuUseCase::HeadlessAppliance => formatter.write_str("headless appliance"),
             GpuUseCase::Integrated => formatter.write_str("integrated"),
         }
     }
@@ -68,6 +71,8 @@ pub enum AiBackend {
     Cuda,
     /// AMD ROCm/HIP, when the host driver and platform support it.
     Rocm,
+    /// Vulkan backend, useful for non-ROCm AMD or broad GPU fallback.
+    Vulkan,
     /// Intel oneAPI/OpenVINO/XPU software stack.
     OneApiOpenVino,
     /// Intel Gaudi/Habana software stack.
@@ -81,6 +86,7 @@ impl fmt::Display for AiBackend {
         match self {
             AiBackend::Cuda => formatter.write_str("CUDA"),
             AiBackend::Rocm => formatter.write_str("ROCm/HIP"),
+            AiBackend::Vulkan => formatter.write_str("Vulkan"),
             AiBackend::OneApiOpenVino => formatter.write_str("oneAPI/OpenVINO"),
             AiBackend::Gaudi => formatter.write_str("Gaudi"),
             AiBackend::Npu => formatter.write_str("NPU"),
@@ -421,6 +427,26 @@ const KNOWN_GPUS: &[KnownGpu] = &[
         ],
     },
     KnownGpu {
+        canonical_name: "AMD BC-250 / Cyan Skillfish",
+        vendor: GpuVendor::Amd,
+        use_case: GpuUseCase::HeadlessAppliance,
+        memory_gb: Some(16),
+        memory_kind: "unified GDDR6",
+        backend: AiBackend::Vulkan,
+        local_ai_tier: "headless Qwen 9B Q4 Vulkan appliance",
+        aliases: &[
+            "amd bc 250",
+            "amd bc250",
+            "bc 250",
+            "bc250",
+            "asrock bc 250",
+            "asrock bc250",
+            "cyan skillfish",
+            "gfx1013",
+            "amd radeon graphics radv gfx1013",
+        ],
+    },
+    KnownGpu {
         canonical_name: "Intel Gaudi 3 AI Accelerator",
         vendor: GpuVendor::Intel,
         use_case: GpuUseCase::Datacenter,
@@ -505,6 +531,17 @@ mod tests {
     }
 
     #[test]
+    fn matches_bc250_as_vulkan_headless_appliance() {
+        let gpu = known_gpu("deviceName = AMD Radeon Graphics (RADV GFX1013)")
+            .expect("known BC-250 Vulkan device");
+
+        assert_eq!(gpu.canonical_name, "AMD BC-250 / Cyan Skillfish");
+        assert_eq!(gpu.backend, AiBackend::Vulkan);
+        assert_eq!(gpu.use_case, GpuUseCase::HeadlessAppliance);
+        assert_eq!(gpu.memory_gb, Some(16));
+    }
+
+    #[test]
     fn summarizes_workstation_and_datacenter_cards() {
         assert!(known_gpu("Intel Arc Pro B70")
             .expect("known B70")
@@ -562,6 +599,7 @@ mod tests {
                 available: true,
                 devices: vec![
                     "deviceName = Intel Arc B580 Graphics".to_string(),
+                    "deviceName = AMD Radeon Graphics (RADV GFX1013)".to_string(),
                     "deviceName = NVIDIA GeForce RTX 4090".to_string(),
                 ],
             },
@@ -596,6 +634,7 @@ mod tests {
             vec![
                 "NVIDIA GeForce RTX 4090",
                 "Intel Arc B580",
+                "AMD BC-250 / Cyan Skillfish",
                 "Intel Core Ultra NPU"
             ]
         );

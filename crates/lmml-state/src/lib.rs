@@ -494,11 +494,41 @@ fn builtin_model_profiles(slot_save_path: String) -> Vec<ModelRuntimeProfile> {
             server: qwen_kv_unified_server_config(73_728, 8, 64, 6_144, &slot_save_path),
         },
         ModelRuntimeProfile {
+            name: "bc250-qwen9b-q4km-vulkan".to_string(),
+            model: PathBuf::from("Qwen3.5-9B-Q4_K_M.gguf"),
+            server: bc250_qwen9b_vulkan_server_config(&slot_save_path),
+        },
+        ModelRuntimeProfile {
             name: "gemma4-12b-mtp-q4km".to_string(),
             model: PathBuf::from("Gemma4-12B-QAT-Q4_K_M.gguf"),
             server: gemma4_mtp_server_config(&slot_save_path),
         },
     ]
+}
+
+fn bc250_qwen9b_vulkan_server_config(slot_save_path: &str) -> ServerConfig {
+    ServerConfig {
+        port: 8080,
+        host: "0.0.0.0".to_string(),
+        ctx_size: 4096,
+        n_gpu_layers: 99,
+        batch_size: 512,
+        ubatch_size: 128,
+        threads: 6,
+        flash_attn: true,
+        mlock: false,
+        api_key: String::new(),
+        jinja: true,
+        chat_template: String::new(),
+        extra_args: vec![
+            "--parallel".to_string(),
+            "1".to_string(),
+            "--slot-save-path".to_string(),
+            slot_save_path.to_string(),
+            "--cache-ram".to_string(),
+            "1024".to_string(),
+        ],
+    }
 }
 
 fn gemma4_mtp_server_config(slot_save_path: &str) -> ServerConfig {
@@ -1234,7 +1264,7 @@ mod tests {
             model_state.runtime_profiles_for_path(Path::new("/models/Qwen3.5-4B-Q8_0.gguf"));
         assert_eq!(qwen_profiles.len(), 15);
         assert_eq!(model_state.active_profile, "orion-qwen-q8-deep");
-        assert_eq!(model_state.profiles.len(), 38);
+        assert_eq!(model_state.profiles.len(), 39);
     }
 
     #[test]
@@ -1493,6 +1523,37 @@ mod tests {
         );
         assert!(profile.server.extra_args[3].ends_with("lmml/llama-slots"));
         assert!(profile.server.extra_args[5].ends_with("lmml/models/mtp-gemma-4-12B-it.gguf"));
+    }
+
+    #[test]
+    fn bc250_qwen9b_vulkan_profile_is_available() {
+        let mut model_state = ModelState::default();
+        let model = Path::new("/models/Qwen3.5-9B-Q4_K_M.gguf");
+        model_state.ensure_builtin_profiles();
+
+        let profile = model_state
+            .runtime_profile_for_path(model)
+            .expect("BC-250 Qwen profile");
+
+        assert_eq!(profile.name, "bc250-qwen9b-q4km-vulkan");
+        assert_eq!(profile.server.host, "0.0.0.0");
+        assert_eq!(profile.server.port, 8080);
+        assert_eq!(profile.server.ctx_size, 4096);
+        assert_eq!(profile.server.n_gpu_layers, 99);
+        assert_eq!(profile.server.threads, 6);
+        assert!(profile.server.flash_attn);
+        assert_eq!(
+            profile.server.extra_args,
+            vec![
+                "--parallel",
+                "1",
+                "--slot-save-path",
+                profile.server.extra_args[3].as_str(),
+                "--cache-ram",
+                "1024",
+            ]
+        );
+        assert!(profile.server.extra_args[3].ends_with("lmml/llama-slots"));
     }
 
     #[test]
