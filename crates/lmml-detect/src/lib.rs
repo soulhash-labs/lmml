@@ -16,6 +16,8 @@ use sysinfo::System;
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 
+pub mod gpu_catalog;
+
 const MIN_DISK_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const CPP17_PROBE: &str = "#include <filesystem>\nint main() { return 0; }\n";
 

@@ -95,10 +95,9 @@ The long-run preset is:
 
 ## Non-Goals
 
-- Do not implement a native Anthropic Messages adapter in this phase. If a
-  Claude/Anthropic-oriented harness can use OpenAI-compatible chat completions,
-  it can consume these managed endpoints directly. Native `/v1/messages`
-  translation belongs in a separate integration plan.
+- Do not put Anthropic Messages compatibility inside the raw `llama-server`
+  process. `lmml-node` owns `/v1/messages` translation and proxies to the
+  OpenAI-compatible llama.cpp endpoint.
 - Do not use `llama-cli` as the harness runtime. Keep it for diagnostics and
   direct one-shot checks.
 
@@ -121,9 +120,15 @@ Anthropic-oriented clients may expose two useful modes:
 - native Messages mode: `POST /v1/messages`
 - OpenAI-compatible chat mode: `POST /v1/chat/completions`
 
-Phase 11 should use the OpenAI-compatible chat mode first. Do not add native
-Messages translation until there is a verified harness requirement and a
-separate adapter contract.
+For native Messages mode, run `lmml-node` as the adapter:
+
+```text
+Claude Code -> lmml-node /v1/messages -> llama-server /v1/chat/completions
+```
+
+The first shipped adapter covers text messages, tool schema conversion, tool
+call response mapping, Anthropic-shaped errors, and synthesized SSE events. It
+does not claim image/document block compatibility yet.
 
 ## Runtime Profile Schema
 

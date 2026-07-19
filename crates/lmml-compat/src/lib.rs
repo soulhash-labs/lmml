@@ -339,6 +339,34 @@ pub fn unsupported_warnings(
     if config.jinja && !caps.jinja {
         warnings.push(DetectionWarning::unsupported("--jinja"));
     }
+    if unsupported_extra_arg_present(
+        &config.extra_args,
+        caps,
+        &["-md", "--model-draft", "--spec-draft-model"],
+    ) {
+        warnings.push(DetectionWarning::unsupported("-md/--model-draft"));
+    }
+    if unsupported_extra_arg_present(&config.extra_args, caps, &["--spec-type"]) {
+        warnings.push(DetectionWarning::unsupported("--spec-type"));
+    }
+    if unsupported_extra_arg_present(&config.extra_args, caps, &["--temp", "--temperature"]) {
+        warnings.push(DetectionWarning::unsupported("--temp/--temperature"));
+    }
+    if unsupported_extra_arg_present(&config.extra_args, caps, &["--top-k"]) {
+        warnings.push(DetectionWarning::unsupported("--top-k"));
+    }
+    if unsupported_extra_arg_present(&config.extra_args, caps, &["--top-p"]) {
+        warnings.push(DetectionWarning::unsupported("--top-p"));
+    }
+    if unsupported_extra_arg_present(&config.extra_args, caps, &["--min-p"]) {
+        warnings.push(DetectionWarning::unsupported("--min-p"));
+    }
+    if unsupported_extra_arg_present(&config.extra_args, caps, &["--repeat-penalty"]) {
+        warnings.push(DetectionWarning::unsupported("--repeat-penalty"));
+    }
+    if unsupported_extra_arg_present(&config.extra_args, caps, &["--reasoning-format"]) {
+        warnings.push(DetectionWarning::unsupported("--reasoning-format"));
+    }
     warnings
 }
 
@@ -448,6 +476,16 @@ fn select_flag(caps: &LlamaBinaryCapabilities, candidates: &[FlagName]) -> Optio
         .iter()
         .map(|candidate| candidate.as_str())
         .find(|flag| caps.flags.iter().any(|available| available == flag))
+}
+
+fn unsupported_extra_arg_present(
+    extra_args: &[String],
+    caps: &LlamaBinaryCapabilities,
+    candidates: &[&str],
+) -> bool {
+    candidates.iter().any(|candidate| {
+        extra_args.iter().any(|arg| arg == candidate) && !caps.has_any(&[*candidate])
+    })
 }
 
 fn parse_help_flags(help: &str) -> Vec<String> {
@@ -773,6 +811,132 @@ mod tests {
                 DetectionWarning::unsupported("--jinja"),
             ]
         );
+    }
+
+    #[test]
+    fn reports_unsupported_mtp_and_sampling_extra_args() {
+        let caps = capabilities_from_flags(
+            Some("no-mtp".to_string()),
+            parse_help_flags("-m --port -c -ngl -b --flash-attn"),
+        );
+        let mut config = ServerConfig {
+            flash_attn: false,
+            mlock: false,
+            api_key: None,
+            chat_template: None,
+            jinja: false,
+            ubatch_size: 0,
+            ..full_config()
+        };
+        config.extra_args = vec![
+            "-md".to_string(),
+            "/models/mtp-gemma-4-12B-it.gguf".to_string(),
+            "--spec-type".to_string(),
+            "draft-mtp".to_string(),
+            "--temp".to_string(),
+            "0.6".to_string(),
+            "--top-k".to_string(),
+            "64".to_string(),
+            "--top-p".to_string(),
+            "0.9".to_string(),
+            "--min-p".to_string(),
+            "0.05".to_string(),
+            "--repeat-penalty".to_string(),
+            "1.1".to_string(),
+        ];
+
+        assert_eq!(
+            unsupported_warnings(&config, &caps),
+            vec![
+                DetectionWarning::unsupported("-md/--model-draft"),
+                DetectionWarning::unsupported("--spec-type"),
+                DetectionWarning::unsupported("--temp/--temperature"),
+                DetectionWarning::unsupported("--top-k"),
+                DetectionWarning::unsupported("--top-p"),
+                DetectionWarning::unsupported("--min-p"),
+                DetectionWarning::unsupported("--repeat-penalty"),
+            ]
+        );
+    }
+
+    #[test]
+    fn accepts_supported_mtp_and_sampling_extra_args() {
+        let caps = capabilities_from_flags(
+            Some("mtp".to_string()),
+            parse_help_flags(
+                "-m --port -c -ngl -b -md --model-draft --spec-type --temp --temperature --top-k --top-p --min-p --repeat-penalty",
+            ),
+        );
+        let mut config = ServerConfig {
+            flash_attn: false,
+            mlock: false,
+            api_key: None,
+            chat_template: None,
+            jinja: false,
+            ubatch_size: 0,
+            ..full_config()
+        };
+        config.extra_args = vec![
+            "-md".to_string(),
+            "/models/mtp-gemma-4-12B-it.gguf".to_string(),
+            "--spec-type".to_string(),
+            "draft-mtp".to_string(),
+            "--temp".to_string(),
+            "0.6".to_string(),
+            "--top-k".to_string(),
+            "64".to_string(),
+            "--top-p".to_string(),
+            "0.9".to_string(),
+            "--min-p".to_string(),
+            "0.05".to_string(),
+            "--repeat-penalty".to_string(),
+            "1.1".to_string(),
+        ];
+
+        assert_eq!(unsupported_warnings(&config, &caps), Vec::new());
+    }
+
+    #[test]
+    fn reports_unsupported_reasoning_format_extra_arg() {
+        let caps = capabilities_from_flags(
+            Some("no-reasoning-format".to_string()),
+            parse_help_flags("-m --port -c -ngl -b"),
+        );
+        let mut config = ServerConfig {
+            flash_attn: false,
+            mlock: false,
+            api_key: None,
+            chat_template: None,
+            jinja: false,
+            ubatch_size: 0,
+            ..full_config()
+        };
+        config.extra_args = vec!["--reasoning-format".to_string(), "none".to_string()];
+
+        assert_eq!(
+            unsupported_warnings(&config, &caps),
+            vec![DetectionWarning::unsupported("--reasoning-format")]
+        );
+    }
+
+    #[test]
+    fn accepts_supported_reasoning_format_extra_arg() {
+        let caps = capabilities_from_flags(
+            Some("reasoning-format".to_string()),
+            parse_help_flags("-m --port -c -ngl -b --reasoning-format"),
+        );
+        let mut config = ServerConfig {
+            flash_attn: false,
+            mlock: false,
+            api_key: None,
+            chat_template: None,
+            jinja: false,
+            ubatch_size: 0,
+            ..full_config()
+        };
+        config.extra_args = vec!["--reasoning-format".to_string(), "none".to_string()];
+
+        assert_eq!(unsupported_warnings(&config, &caps), Vec::new());
     }
 
     fn full_config() -> ServerConfig {

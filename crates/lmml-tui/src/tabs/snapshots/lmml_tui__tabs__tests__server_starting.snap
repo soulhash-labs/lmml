@@ -12,7 +12,7 @@ expression: render_app(&app)
 "│Status: Starting { elapsed: 500ms }             ││                                                          │"
 "│Profile: custom/global                          ││                                                          │"
 "│Model: No model selected                        ││                                                          │"
-"│Binary: $HOME/.local/share/lmml/bin/llama││                                                          │"
+"│Binary: $HOME/.local/share/lmml/llama.cpp││                                                          │"
 "│Host: 127.0.0.1                                 ││                                                          │"
 "│Port: 8080                                      ││                                                          │"
 "│Context: 4096                                   ││                                                          │"

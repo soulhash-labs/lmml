@@ -567,8 +567,9 @@ Current workstation override:
 - [ ] Generate/copy OpenCode-compatible config snippets
 - [ ] Use OpenAI-compatible chat completions as the Phase 11 harness API
   boundary
-- [ ] Keep native Anthropic `/v1/messages` translation out of this phase unless
-  a verified harness requires it and the adapter contract is specified
+- [x] Add native Anthropic `/v1/messages` translation in `lmml-node` for
+  Claude Code-style clients while keeping raw `llama-server` on OpenAI chat
+  completions
 - [ ] Make model changes use confirmed cold restart; restore the previous config
   if the new server fails health checks
 - [ ] Connect clean install behavior: runtime start must fail clearly when no

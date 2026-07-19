@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+UNIT_NAME=${LMML_LAN_UNIT:-lmml-dist-http}
+PORT=${LMML_LAN_PORT:-8000}
+BIND_ADDR=${LMML_LAN_BIND:-0.0.0.0}
+PYTHON_BIN=${LMML_LAN_PYTHON:-python3}
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo_dist=$(cd -- "$script_dir/.." && pwd)/dist
+if [[ -f "$repo_dist/install.sh" ]]; then
+  default_dist=$repo_dist
+else
+  default_dist=/home/angelo/repos/lmml/dist
+fi
+DIST_DIR=${LMML_LAN_DIST_DIR:-$default_dist}
+SERVICE_NAME=$UNIT_NAME.service
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") <start|stop|restart|status|toggle|url|logs>
+
+Controls the LMML LAN installer HTTP server.
+
+Environment overrides:
+  LMML_LAN_DIST_DIR   Release directory to serve. Default: $DIST_DIR
+  LMML_LAN_PORT       Port to serve. Default: $PORT
+  LMML_LAN_BIND       Bind address. Default: $BIND_ADDR
+  LMML_LAN_UNIT       systemd user unit name. Default: $UNIT_NAME
+EOF
+}
+
+notify() {
+  local message=$1
+  if command -v notify-send >/dev/null 2>&1; then
+    notify-send "LMML LAN Server" "$message" >/dev/null 2>&1 || true
+  fi
+}
+
+lan_ip() {
+  local route_ip
+  route_ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}')
+  if [[ -n "$route_ip" ]]; then
+    printf '%s\n' "$route_ip"
+    return
+  fi
+  hostname -I 2>/dev/null | awk '{print $1}'
+}
+
+server_url() {
+  local ip
+  ip=$(lan_ip)
+  if [[ -z "$ip" ]]; then
+    printf 'http://127.0.0.1:%s\n' "$PORT"
+  else
+    printf 'http://%s:%s\n' "$ip" "$PORT"
+  fi
+}
+
+require_dist() {
+  if [[ ! -d "$DIST_DIR" ]]; then
+    echo "Missing LMML dist directory: $DIST_DIR" >&2
+    exit 1
+  fi
+  if [[ ! -f "$DIST_DIR/install.sh" || ! -f "$DIST_DIR/latest" ]]; then
+    echo "LMML dist directory is incomplete: $DIST_DIR" >&2
+    echo "Expected install.sh and latest." >&2
+    exit 1
+  fi
+}
+
+is_active() {
+  systemctl --user is-active --quiet "$SERVICE_NAME"
+}
+
+port_is_busy() {
+  ss -ltn "sport = :$PORT" 2>/dev/null | grep -q LISTEN
+}
+
+start_server() {
+  require_dist
+  if is_active; then
+    local url
+    url=$(server_url)
+    echo "LMML LAN server is already running: $url"
+    notify "Already running: $url"
+    return
+  fi
+  if port_is_busy; then
+    echo "Port $PORT is already in use by another process." >&2
+    ss -ltnp "sport = :$PORT" >&2 || true
+    notify "Cannot start: port $PORT is already in use."
+    exit 1
+  fi
+
+  local python_path
+  python_path=$(command -v "$PYTHON_BIN")
+  systemd-run --user \
+    --unit="$UNIT_NAME" \
+    --collect \
+    --property=WorkingDirectory="$DIST_DIR" \
+    "$python_path" -m http.server "$PORT" --bind "$BIND_ADDR" >/dev/null
+
+  sleep 1
+  if ! is_active; then
+    echo "LMML LAN server failed to start." >&2
+    systemctl --user --no-pager --full status "$SERVICE_NAME" >&2 || true
+    notify "Failed to start."
+    exit 1
+  fi
+
+  local url
+  url=$(server_url)
+  echo "LMML LAN server started: $url"
+  echo "Install command:"
+  echo "curl -fsSL $url/install.sh | BASE_URL=$url sh"
+  notify "Started: $url"
+}
+
+stop_server() {
+  if ! is_active; then
+    echo "LMML LAN server is already stopped."
+    notify "Already stopped."
+    return
+  fi
+  systemctl --user stop "$SERVICE_NAME"
+  echo "LMML LAN server stopped."
+  notify "Stopped."
+}
+
+status_server() {
+  local url
+  url=$(server_url)
+  if is_active; then
+    echo "LMML LAN server: running"
+    echo "URL: $url"
+    echo "Install command:"
+    echo "curl -fsSL $url/install.sh | BASE_URL=$url sh"
+    notify "Running: $url"
+  else
+    echo "LMML LAN server: stopped"
+    notify "Stopped."
+  fi
+}
+
+case "${1:-}" in
+  start)
+    start_server
+    ;;
+  stop)
+    stop_server
+    ;;
+  restart)
+    stop_server
+    start_server
+    ;;
+  status)
+    status_server
+    ;;
+  toggle)
+    if is_active; then
+      stop_server
+    else
+      start_server
+    fi
+    ;;
+  url)
+    server_url
+    ;;
+  logs)
+    journalctl --user -u "$SERVICE_NAME" -n 80 --no-pager
+    ;;
+  -h|--help|help)
+    usage
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac

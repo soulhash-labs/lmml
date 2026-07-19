@@ -210,8 +210,8 @@ case "$INSTALL_MODE" in
 esac
 
 case "$LMML_PROFILE_HINT" in
-  ""|orion-qwen35-4b-q8|quadro-m6000-qwen35-9b-q8) ;;
-  *) fail "Unsupported LMML_PROFILE_HINT=$LMML_PROFILE_HINT" "Supported hints: orion-qwen35-4b-q8, quadro-m6000-qwen35-9b-q8." ;;
+  ""|orion-qwen35-4b-q8|quadro-m6000-qwen35-9b-q8|qwen36-27b-q4|qwen36-35b-a3b-q4|gemma4-12b-mtp-q4km) ;;
+  *) fail "Unsupported LMML_PROFILE_HINT=$LMML_PROFILE_HINT" "Supported hints: orion-qwen35-4b-q8, quadro-m6000-qwen35-9b-q8, qwen36-27b-q4, qwen36-35b-a3b-q4, gemma4-12b-mtp-q4km." ;;
 esac
 
 case "$LMML_CHECKSUM_VERIFY" in
@@ -461,4 +461,52 @@ if [ "$LMML_PROFILE_HINT" = "quadro-m6000-qwen35-9b-q8" ]; then
   echo "  Fallback ladder if runtime memory pressure appears:"
   echo "    ctx_size 196608, reserved 65536, parallel 1, practical 131072"
   echo "    ctx_size 131072, reserved 32768, parallel 1, practical 98304"
+fi
+
+if [ "$LMML_PROFILE_HINT" = "qwen36-27b-q4" ] || [ "$LMML_PROFILE_HINT" = "qwen36-35b-a3b-q4" ]; then
+  echo
+  echo "Qwen3.6 profile hint:"
+  echo
+  echo "  Official open Qwen3.6 local variants:"
+  echo "    Qwen3.6-27B:                       dense, 262144 context"
+  echo "    Qwen3.6-35B-A3B:                   MoE, 3B active, 262144 context"
+  echo
+  echo "  LMML support mode:"
+  echo "    model catalog:                     supported"
+  echo "    built-in runtime profile:          not yet field-validated"
+  echo "    recommended backend:               CUDA first, ROCm/Metal/Vulkan only after local validation"
+  echo "    recommended quant for local use:   Q4-class GGUF on 24GB minimum, 32GB+ preferred"
+  echo
+  echo "  Notes:"
+  echo "    Use embedded GGUF chat templates unless a Qwen3.6-specific template is validated."
+  echo "    Start with single-slot serving before enabling fanout or kv-unified concurrency."
+  echo "    See docs/llm-model-support.md after installing from source or the repo checkout."
+fi
+
+if [ "$LMML_PROFILE_HINT" = "gemma4-12b-mtp-q4km" ]; then
+  echo
+  echo "Gemma4 12B QAT Q4_K_M MTP profile hint:"
+  echo
+  echo "  Required model files:"
+  echo "    main GGUF:                          Gemma4-12B-QAT-Q4_K_M.gguf"
+  echo "    official QAT alternative:           gemma-4-12b-it-qat-q4_0.gguf"
+  echo "    MTP draft GGUF:                     mtp-gemma-4-12B-it.gguf"
+  echo
+  echo "  TUI runtime profile:"
+  echo "    gemma4-12b-mtp-q4km:                ctx 73728, parallel 1, MTP draft head"
+  echo
+  echo "  llama-server arguments emitted by profile:"
+  echo "    -ngl 99 -fa on"
+  echo "    -md <models>/mtp-gemma-4-12B-it.gguf --spec-type draft-mtp"
+  echo "    --temp 0.6 --top-k 64 --top-p 0.9 --min-p 0.05 --repeat-penalty 1.1"
+  echo
+  echo "  Gemma 4 implementation notes:"
+  echo "    roles:                              native system/user/assistant"
+  echo "    thinking toggle:                    <|think|> in the system prompt"
+  echo "    QAT guidance:                       prefer Google q4_0 GGUF where available"
+  echo "    MTP:                                matching drafter required for speculative decoding"
+  echo
+  echo "  Put both GGUF files in ~/.local/share/lmml/models, select"
+  echo "  Gemma4-12B-QAT-Q4_K_M.gguf in the TUI, then press p until"
+  echo "  Profile shows gemma4-12b-mtp-q4km."
 fi

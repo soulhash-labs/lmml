@@ -1,8 +1,9 @@
 # llama-server Integration Contract
 
 This document defines the target contract between lmml, `lmml-compat`,
-managed `llama-server` profiles, and OpenAI-compatible coding harnesses such as
-OpenCode, Claude Code in OpenAI-compatible mode, Continue, and custom clients.
+managed `llama-server` profiles, OpenAI-compatible coding harnesses such as
+OpenCode and Continue, and Anthropic Messages clients routed through
+`lmml-node`.
 
 Current status: planned Phase 11 contract. Some fields already exist in the v2
 state schema and `lmml-compat`; others are explicit implementation tasks.
@@ -13,6 +14,16 @@ tests are complete.
 
 lmml manages long-running `llama-server` processes. Coding harnesses talk to
 those processes over OpenAI-compatible HTTP, not `llama-cli`.
+
+Anthropic Messages clients use `lmml-node` as a compatibility adapter:
+
+```text
+Claude Code -> lmml-node /v1/messages -> llama-server /v1/chat/completions
+```
+
+`lmml-node` translates text messages, tool schemas, tool calls, non-streaming
+responses, synthesized SSE responses, and Anthropic-shaped errors. Raw
+`llama-server` remains OpenAI-compatible; it does not own `/v1/messages`.
 
 Default detached profile targets:
 
@@ -153,6 +164,20 @@ MTP: supported by model, disabled by default until profiled
 The runtime schema should add `temperature`, `top_p`, `top_k`, `min_p`,
 `mtp`, and `mmproj` fields. `mmproj` must be validated as an existing file
 before lmml advertises image/video support for a profile.
+
+Gemma4 12B QAT Q4_K_M profile metadata:
+
+```text
+main model: Gemma4-12B-QAT-Q4_K_M.gguf
+MTP draft model: mtp-gemma-4-12B-it.gguf
+validated llama.cpp mode: -md mtp-gemma-4-12B-it.gguf --spec-type draft-mtp
+sampling: temperature=0.6 top_k=64 top_p=0.9 min_p=0.05 repeat_penalty=1.1
+profile name: gemma4-12b-mtp-q4km
+```
+
+The Gemma4 profile requires both GGUF files under the configured lmml model
+directory. It keeps MTP enabled only for the dedicated Gemma4 profile instead
+of changing global defaults.
 
 For `ctx_size = 131072` single-agent coding, `compaction_reserved = 32768` is
 the validated operating point. `compaction_reserved = 65536` is appropriate for
@@ -382,6 +407,10 @@ installed build for:
 - `--api-key`
 - `--cache-prompt`, `--cache-reuse`, `--cache-ram`
 - `--slot-save-path`
+- `-md` / `--model-draft` / `--spec-draft-model`
+- `--spec-type`
+- `--temp` / `--temperature`
+- `--top-k`, `--top-p`, `--min-p`, `--repeat-penalty`
 
 Target emission rules:
 
@@ -406,6 +435,9 @@ Target emission rules:
 | `fit_target_mb` | `-fitt <MiB>` |
 | `fit_ctx` | `-fitc <tokens>` |
 | `prompt_cache` | `--cache-prompt` / `--no-cache-prompt` |
+| `draft_model` | `-md` / `--model-draft` |
+| `spec_type` | `--spec-type <type>` |
+| sampling extras | `--temp`, `--top-k`, `--top-p`, `--min-p`, `--repeat-penalty` |
 | `cache_reuse` | `--cache-reuse <tokens>` |
 | `cache_ram_mb` | `--cache-ram <MiB>` |
 | `slot_save_path` | `--slot-save-path <path>` |

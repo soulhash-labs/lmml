@@ -13,6 +13,8 @@ use serde::Deserialize;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
+pub mod catalog;
+
 /// A local GGUF model entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelEntry {

@@ -146,6 +146,18 @@ echo llama-cli stub
 exit 0
 CLI
 chmod +x "$BUILD/bin/llama-cli"
+cat > "$BUILD/bin/llama-finetune" <<'FINETUNE'
+#!/bin/sh
+echo llama-finetune stub
+exit 0
+FINETUNE
+chmod +x "$BUILD/bin/llama-finetune"
+cat > "$BUILD/bin/llama-export-lora" <<'EXPORT'
+#!/bin/sh
+echo llama-export-lora stub
+exit 0
+EXPORT
+chmod +x "$BUILD/bin/llama-export-lora"
 cat > "$BUILD/bin/llama-server" <<'SERVER'
 #!/bin/sh
 if [ "$1" = "--version" ]; then

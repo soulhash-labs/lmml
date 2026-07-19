@@ -3,3 +3,11 @@
 /.agents/
 /.codex/
 session-ses_*.md
+*.zip
+*.docx
+*.kate-swp
+*.swp
+*.bak
+*.old
+production Rust workspace CROWN11 agentq swarm.md
+wired LMML + AgentQ Rust pack.md

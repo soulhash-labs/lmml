@@ -561,7 +561,7 @@ impl App {
                     .cycle_runtime_profile_for_path(&path)
                     .cloned()
                 {
-                    self.state.server = profile.server;
+                    self.state.server = resolved_profile_server(&path, &profile);
                     self.status_message = if running {
                         format!("Profile {}; restart server to apply", profile.name)
                     } else {
@@ -1268,8 +1268,8 @@ impl App {
             .state
             .model
             .runtime_profile_for_path(&model.path)
-            .map(|profile| &profile.server)
-            .unwrap_or(&self.state.server);
+            .map(|profile| resolved_profile_server(&model.path, profile))
+            .unwrap_or_else(|| self.state.server.clone());
         let mut n_gpu_layers = server.n_gpu_layers;
         if n_gpu_layers == -1 {
             n_gpu_layers = self
@@ -1278,7 +1278,7 @@ impl App {
                 .map(|profile| model.recommended_ngl(&profile.gpus))
                 .unwrap_or(0);
         }
-        lmml_compat::ServerConfig {
+        let mut config = lmml_compat::ServerConfig {
             model: model.path.clone(),
             port: server.port,
             host: server.host.clone(),
@@ -1293,14 +1293,16 @@ impl App {
             chat_template: (!server.chat_template.is_empty()).then(|| server.chat_template.clone()),
             jinja: server.jinja,
             extra_args: server.extra_args.clone(),
-        }
+        };
+        apply_qwen_server_safeguards(model, &mut config);
+        config
     }
 
     fn select_model_path(&mut self, path: PathBuf) -> bool {
         self.state.model.last_used = path.clone();
         if let Some(profile) = self.state.model.runtime_profile_for_path(&path).cloned() {
-            self.state.model.active_profile = profile.name;
-            self.state.server = profile.server;
+            self.state.model.active_profile = profile.name.clone();
+            self.state.server = resolved_profile_server(&path, &profile);
             true
         } else {
             false
@@ -1358,6 +1360,96 @@ impl App {
         } else {
             Some((self.selected_model + 1).min(self.models.len() - 1))
         }
+    }
+}
+
+fn resolved_profile_server(
+    model_path: &Path,
+    profile: &lmml_state::ModelRuntimeProfile,
+) -> lmml_state::ServerConfig {
+    let mut server = profile.server.clone();
+    let Some(model_dir) = model_path.parent() else {
+        return server;
+    };
+
+    let sidecar_files = [
+        ("-md", "mtp-gemma-4-12B-it.gguf"),
+        ("--model-draft", "mtp-gemma-4-12B-it.gguf"),
+        ("--spec-draft-model", "mtp-gemma-4-12B-it.gguf"),
+        ("--mmproj", "mmproj-Qwen3.5-9B-BF16.gguf"),
+    ];
+    for index in 0..server.extra_args.len().saturating_sub(1) {
+        let Some((_, filename)) = sidecar_files
+            .iter()
+            .find(|(flag, _)| server.extra_args[index] == *flag)
+        else {
+            continue;
+        };
+        let value = Path::new(&server.extra_args[index + 1]);
+        if value.file_name().and_then(|name| name.to_str()) == Some(*filename) {
+            server.extra_args[index + 1] = model_dir.join(filename).to_string_lossy().into_owned();
+        }
+    }
+    server
+}
+
+fn apply_qwen_server_safeguards(model: &ModelEntry, config: &mut lmml_compat::ServerConfig) {
+    if !is_qwen35_or_qwen36_model(model) {
+        return;
+    }
+
+    push_missing_arg_pair(&mut config.extra_args, "--reasoning-format", "none");
+    if config.ctx_size > 32_768 {
+        push_missing_any_arg_pair(
+            &mut config.extra_args,
+            &["-ctk", "--cache-type-k"],
+            "-ctk",
+            "q8_0",
+        );
+        push_missing_any_arg_pair(
+            &mut config.extra_args,
+            &["-ctv", "--cache-type-v"],
+            "-ctv",
+            "q8_0",
+        );
+    }
+}
+
+fn is_qwen35_or_qwen36_model(model: &ModelEntry) -> bool {
+    let matched = lmml_models::catalog::match_known_model_name(&model.name).or_else(|| {
+        model
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(lmml_models::catalog::match_known_model_name)
+    });
+    matched.is_some_and(|variant| {
+        matches!(
+            variant.family,
+            lmml_models::catalog::LlmFamily::Qwen35 | lmml_models::catalog::LlmFamily::Qwen36
+        )
+    })
+}
+
+fn push_missing_arg_pair(extra_args: &mut Vec<String>, flag: &str, value: &str) {
+    if !extra_args.iter().any(|arg| arg == flag) {
+        extra_args.push(flag.to_string());
+        extra_args.push(value.to_string());
+    }
+}
+
+fn push_missing_any_arg_pair(
+    extra_args: &mut Vec<String>,
+    existing_flags: &[&str],
+    flag: &str,
+    value: &str,
+) {
+    if !existing_flags
+        .iter()
+        .any(|existing| extra_args.iter().any(|arg| arg == existing))
+    {
+        extra_args.push(flag.to_string());
+        extra_args.push(value.to_string());
     }
 }
 
@@ -2183,6 +2275,67 @@ mod tests {
     }
 
     #[test]
+    fn qwen36_custom_config_adds_reasoning_none_and_q8_kv() {
+        let mut app = App::default();
+        app.state.server.ctx_size = 131_072;
+        app.state.server.extra_args = vec!["--parallel".to_string(), "1".to_string()];
+        let model = model_entry("/models/Qwen3.6-35B-A3B-Q4_K_M.gguf");
+
+        let config = app.server_config(&model);
+
+        assert!(config
+            .extra_args
+            .windows(2)
+            .any(|window| window == ["--reasoning-format", "none"]));
+        assert!(config
+            .extra_args
+            .windows(2)
+            .any(|window| window == ["-ctk", "q8_0"]));
+        assert!(config
+            .extra_args
+            .windows(2)
+            .any(|window| window == ["-ctv", "q8_0"]));
+    }
+
+    #[test]
+    fn qwen_safeguards_preserve_existing_kv_cache_types() {
+        let mut app = App::default();
+        app.state.server.ctx_size = 131_072;
+        app.state.server.extra_args = vec![
+            "--parallel".to_string(),
+            "4".to_string(),
+            "-ctk".to_string(),
+            "q4_0".to_string(),
+            "-ctv".to_string(),
+            "q4_0".to_string(),
+        ];
+        let model = model_entry("/models/Qwen3.6-27B-Q4_K_M.gguf");
+
+        let config = app.server_config(&model);
+
+        assert!(config
+            .extra_args
+            .windows(2)
+            .any(|window| window == ["--reasoning-format", "none"]));
+        assert_eq!(
+            config
+                .extra_args
+                .iter()
+                .filter(|arg| *arg == "-ctk" || *arg == "--cache-type-k")
+                .count(),
+            1
+        );
+        assert!(config
+            .extra_args
+            .windows(2)
+            .any(|window| window == ["-ctk", "q4_0"]));
+        assert!(config
+            .extra_args
+            .windows(2)
+            .any(|window| window == ["-ctv", "q4_0"]));
+    }
+
+    #[test]
     fn selecting_model_applies_runtime_profile_to_visible_settings() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let mut app = App::default();
@@ -2370,6 +2523,57 @@ mod tests {
         let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('p'))));
         app.dispatch(action.expect("profile cycle action"));
         assert_eq!(app.state.model.active_profile, "5070ti-qwen9b-deep");
+    }
+
+    #[test]
+    fn gemma4_mtp_profile_is_available_from_tui_profile_switcher() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut app = App::default();
+        app.state_save_path = Some(tempdir.path().join("state.toml"));
+        app.active_tab = Tab::Models;
+        app.models = vec![model_entry("/custom/models/Gemma4-12B-QAT-Q4_K_M.gguf")];
+        app.selected_model = 0;
+
+        app.dispatch(Action::SelectModel(app.models[0].path.clone()));
+
+        assert_eq!(app.state.model.active_profile, "gemma4-12b-mtp-q4km");
+        assert_eq!(app.state.server.ctx_size, 73_728);
+        assert_eq!(app.state.server.n_gpu_layers, 99);
+        assert!(app.state.server.flash_attn);
+        assert_eq!(
+            &app.state.server.extra_args[4..8],
+            [
+                "-md",
+                app.state.server.extra_args[5].as_str(),
+                "--spec-type",
+                "draft-mtp"
+            ]
+        );
+        assert_eq!(
+            app.state.server.extra_args[5],
+            "/custom/models/mtp-gemma-4-12B-it.gguf"
+        );
+        assert_eq!(
+            &app.state.server.extra_args[8..],
+            [
+                "--temp",
+                "0.6",
+                "--top-k",
+                "64",
+                "--top-p",
+                "0.9",
+                "--min-p",
+                "0.05",
+                "--repeat-penalty",
+                "1.1"
+            ]
+        );
+
+        let launch_config = app.server_config(&app.models[0]);
+        assert_eq!(
+            launch_config.extra_args[5],
+            "/custom/models/mtp-gemma-4-12B-it.gguf"
+        );
     }
 
     #[test]

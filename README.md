@@ -1,7 +1,10 @@
 # lmml
 
-lmml is a Rust terminal UI for managing llama.cpp locally: detect hardware,
-build llama.cpp, manage GGUF models, and run the inference server.
+**Local Model Manager for llama.cpp.**
+
+lmml is a Rust terminal UI for local AI: detect hardware, build llama.cpp,
+manage GGUF models, and run an OpenAI-compatible inference server for humans,
+scripts, and coding agents.
 
 Current v0.1.0 release scope is the tested Linux x86_64 LAN install flow. Other
 target tarballs should be built and validated on matching builders before they
@@ -11,14 +14,30 @@ This is a local/LAN release scope, not a broad production-ready claim. GPU
 acceleration is the primary path; intentional CPU-only nodes are supported by
 explicit opt-in during preflight/install.
 
-## How To Use
+## ✨ What lmml Gives You
+
+- 🧭 Hardware-aware llama.cpp builds for NVIDIA CUDA, AMD ROCm/HIP, Intel,
+  Vulkan, Metal, and CPU fallback paths.
+- 🧠 Built-in model-family guidance for Qwen3.5, Qwen3.6, Gemma 4, and Hermes 4.
+- ⚡ Runtime profiles for validated local-agent setups, including Qwen fanout and
+  Gemma 4 MTP speculative decoding.
+- 🔌 OpenAI-compatible local serving for OpenCode, LAN agents, shell scripts, and
+  proxy/gateway integrations.
+- 🔐 Local-first defaults: `127.0.0.1` serving unless you intentionally expose a
+  LAN node.
+
+## 🚀 How To Use
 
 Start with [`docs/how-to-use.md`](docs/how-to-use.md). It covers the human TUI
 workflow, agent/harness integration, runtime profiles, LAN install, and common
 troubleshooting. For training-specific workflows, use
 [`docs/training-how-to-use.md`](docs/training-how-to-use.md).
+For the built-in NVIDIA/AMD/Intel local-AI GPU catalog, use
+[`docs/hardware-gpu-support.md`](docs/hardware-gpu-support.md).
+For the built-in Qwen3.5/Qwen3.6/Gemma 4/Hermes 4 model-family catalog, use
+[`docs/llm-model-support.md`](docs/llm-model-support.md).
 
-## Install
+## 📦 Install
 
 ### One-line install (Linux / macOS)
 
@@ -188,14 +207,81 @@ cargo build --release -p lmml-tui
 
 For the practical agent setup path, see [`docs/how-to-use.md`](docs/how-to-use.md).
 
-For coding harnesses such as OpenCode and Claude Code, lmml should manage
-long-running `llama-server` HTTP endpoints. `llama-cli` is reserved for one-shot
-diagnostics and smoke checks.
+For coding harnesses such as OpenCode, Claude Code, and Hermes-compatible
+clients, lmml should manage long-running `llama-server` HTTP endpoints.
+`llama-cli` is reserved for one-shot diagnostics and smoke checks.
 
 `lmml runtime configure opencode` is local-first by default: it adds the
 lmml-managed providers and routes OpenCode's top-level `model` and
 `small_model` to those local providers. Operators who want to keep cloud routing
 active can pass `--model-source existing --small-model-source existing`.
+
+### 🔌 Agent Client Wiring
+
+#### OpenCode
+
+OpenCode is the first-class local harness target today. Point its OpenAI-
+compatible provider at the lmml server:
+
+```text
+baseURL: http://127.0.0.1:1200/v1
+model: llamacpp/<your-gguf-model-name>
+```
+
+Use the helper when you want lmml to write the provider block:
+
+```sh
+lmml runtime configure opencode --base-url http://127.0.0.1:1200/v1
+```
+
+#### Claude Code
+
+Claude Code can use lmml through the `lmml-node` Anthropic Messages
+compatibility endpoint. Keep the TUI-managed `llama-server` on port `1200`, then
+start `lmml-node` as the API adapter on port `8101`:
+
+```sh
+LMML_NODE_API_KEY=local-dev-key lmml-node --llama-url http://127.0.0.1:1200
+```
+
+In the Claude Code shell:
+
+```sh
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8101
+export ANTHROPIC_AUTH_TOKEN=local-dev-key
+export ANTHROPIC_MODEL=Qwen3.5-4B-Q8_0.gguf
+export ANTHROPIC_SMALL_FAST_MODEL=Qwen3.5-4B-Q8_0.gguf
+claude
+```
+
+Direct adapter contract:
+
+```text
+Claude Code -> http://127.0.0.1:8101/v1/messages -> lmml-node -> http://127.0.0.1:1200/v1/chat/completions
+```
+
+The compatibility endpoint maps Anthropic text messages to OpenAI-compatible
+chat completions, translates Anthropic tool schemas into OpenAI function tools,
+maps OpenAI tool calls back to Anthropic `tool_use` blocks, and synthesizes
+Anthropic SSE events when `"stream": true`. Image and document content blocks
+are intentionally rejected until lmml has validated multimodal routing.
+
+#### Hermes
+
+Hermes has two meanings in this repo:
+
+- **Hermes 4 models:** lmml recognizes Hermes 4 14B, 4.3 36B, 70B, and 405B FP8
+  GGUF names and displays ChatML/reasoning guidance.
+- **Hermes-style clients/agents:** configure them like any OpenAI-compatible
+  client when they can target a local base URL:
+
+```text
+base URL: http://127.0.0.1:1200/v1
+model: <your Hermes or other GGUF filename>
+```
+
+Hermes runtime profiles should stay explicit and hardware-validated. The model
+catalog can recognize the family before LMML claims a tuned runtime profile.
 
 ### OpenCode With The TUI Server On Port 1200
 
@@ -369,6 +455,15 @@ m6000-qwen9b-fanout6:
   OpenCode/Sisyphus: 1 subagent max
   per-slot theoretical context: 65536
   practical per-agent target: 32000-48000
+
+gemma4-12b-mtp-q4km:
+  model: Gemma4-12B-QAT-Q4_K_M.gguf
+  required draft model: mtp-gemma-4-12B-it.gguf beside the main GGUF
+  ctx_size: 73728
+  gpu_layers: 99
+  parallel: 1
+  MTP: -md <models>/mtp-gemma-4-12B-it.gguf --spec-type draft-mtp
+  sampling: temperature=0.6 top_k=64 top_p=0.9 min_p=0.05 repeat_penalty=1.1
 ```
 
 Switching while the server is running changes the saved profile and visible

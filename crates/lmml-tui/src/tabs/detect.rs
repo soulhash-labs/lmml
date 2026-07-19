@@ -1,8 +1,8 @@
 //! Detect tab rendering.
 
 use lmml_detect::{
-    CmakeInfo, CompilerInfo, CudaCompatibility, GitInfo, GpuInfo, MissingPrerequisite,
-    VulkanSupport,
+    gpu_catalog, CmakeInfo, CompilerInfo, CudaCompatibility, GitInfo, GpuInfo, MissingPrerequisite,
+    SystemProfile, VulkanSupport,
 };
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -96,6 +96,17 @@ fn system_lines(app: &App) -> Vec<Line<'static>> {
         Badge::Ok,
         format!("recommended backend: {:?}", profile.recommended_backend()),
     ));
+    let catalog_lines = ai_catalog_lines(profile);
+    if !catalog_lines.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::styled(
+            "AI accelerator catalog",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+        lines.extend(catalog_lines);
+    }
 
     let missing = profile.missing_prerequisites();
     if !missing.is_empty() {
@@ -241,6 +252,13 @@ fn gpu_lines(gpus: &[GpuInfo]) -> Vec<Line<'static>> {
         .collect()
 }
 
+fn ai_catalog_lines(profile: &SystemProfile) -> Vec<Line<'static>> {
+    gpu_catalog::matches_from_system_profile(profile)
+        .into_iter()
+        .map(|matched| badge_line(Badge::Ok, matched.gpu.summary()))
+        .collect()
+}
+
 fn missing_line(missing: &MissingPrerequisite) -> Line<'static> {
     badge_line(
         Badge::Error,
@@ -345,6 +363,7 @@ mod tests {
         assert!(text.contains("[OK] compiler"));
         assert!(text.contains("CUDA compatible: sm_86"));
         assert!(text.contains("RTX 3090"));
+        assert!(text.contains("great-value 24GB prosumer card"));
         assert!(text.contains("[WARN] sccache not found"));
         assert!(text.contains(&format!(
             "{:?}",

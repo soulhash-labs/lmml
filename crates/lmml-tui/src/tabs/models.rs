@@ -120,7 +120,7 @@ fn selected_model_lines(app: &App) -> Vec<Line<'static>> {
         .map(|profile| profile.gpus.clone())
         .unwrap_or_default();
     let fit = model.vram_fit(&gpus);
-    vec![
+    let mut lines = vec![
         Line::from(format!("Name: {}", model.name)),
         Line::from(format!("Path: {}", model.path.display())),
         Line::from(format!(
@@ -150,7 +150,48 @@ fn selected_model_lines(app: &App) -> Vec<Line<'static>> {
         Line::from(format!("Alias: {}", model.aliased)),
         Line::from(format!("VRAM: {}", fit.label())),
         Line::from(format!("Recommended ngl: {}", model.recommended_ngl(&gpus))),
-    ]
+    ];
+
+    let catalog_match = lmml_models::catalog::match_known_model_name(&model.name).or_else(|| {
+        model
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(lmml_models::catalog::match_known_model_name)
+    });
+    if let Some(variant) = catalog_match {
+        lines.push(Line::from(""));
+        lines.push(Line::styled(
+            "Known model family",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+        lines.push(Line::from(format!("Family: {}", variant.family)));
+        lines.push(Line::from(format!("Variant: {}", variant.name)));
+        lines.push(Line::from(format!(
+            "Architecture: {}",
+            variant.architecture
+        )));
+        lines.push(Line::from(format!(
+            "Native context: {}",
+            variant.context_tokens
+        )));
+        lines.push(Line::from(format!(
+            "Modalities: {}",
+            variant.modalities_label()
+        )));
+        lines.push(Line::from(format!(
+            "Implementation: {}",
+            variant.implementation_note
+        )));
+        lines.push(Line::from(format!("Guidance: {}", variant.local_guidance)));
+        for note in variant.serving_notes {
+            lines.push(Line::from(format!("Note: {note}")));
+        }
+    }
+
+    lines
 }
 
 trait VramFitLabel {

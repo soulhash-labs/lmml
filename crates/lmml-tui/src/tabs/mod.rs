@@ -332,6 +332,11 @@ mod tests {
         app.detect_profile = Some(healthy_profile());
         insta::assert_snapshot!("models_vram_fit_badges", render_app(&app));
 
+        app.models = vec![model_entry("gemma-4-12b-it-qat-q4_0.gguf", 7_200_000_000)];
+        app.selected_model = 0;
+        insta::assert_snapshot!("models_known_family_details", render_app(&app));
+
+        app.models = vec![model_entry("mistral-7b-Q4_K_M.gguf", 4_100_000_000)];
         app.hf_search_open = true;
         app.hf_query = "mistral gguf".to_string();
         app.hf_results = vec![HfModelResult {
@@ -485,7 +490,12 @@ mod tests {
                 arch: Some("sm_86"),
             }],
             gpu_probe_error: None,
-            nvidia_devices: lmml_detect::NvidiaDeviceNodes::default(),
+            nvidia_devices: lmml_detect::NvidiaDeviceNodes {
+                control: true,
+                uvm: true,
+                gpu_count: 1,
+                errors: Vec::new(),
+            },
             sccache: Some(PathBuf::from("/usr/bin/sccache")),
             metal: MetalSupport {
                 available: false,

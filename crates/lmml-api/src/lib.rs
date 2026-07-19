@@ -190,6 +190,9 @@ pub struct NodeCapabilities {
     pub supports_infer: bool,
     /// True when `/v1/chat/completions` proxy compatibility is supported.
     pub supports_chat_completions: bool,
+    /// True when `/v1/messages` Anthropic Messages compatibility is supported.
+    #[serde(default)]
+    pub supports_anthropic_messages: bool,
     /// True when `/v1/embeddings` proxy compatibility is supported.
     pub supports_embeddings: bool,
     /// True when server lifecycle control is enabled.
@@ -486,6 +489,7 @@ mod tests {
             max_context_tokens: None,
             supports_infer: true,
             supports_chat_completions: false,
+            supports_anthropic_messages: true,
             supports_embeddings: false,
             supports_server_control: false,
             auth_required: true,
@@ -500,6 +504,7 @@ mod tests {
         assert_eq!(value["lmml_version"], "0.1.0");
         assert_eq!(value["llama_cpp_commit"], "abc123");
         assert_eq!(value["auth_required"], true);
+        assert_eq!(value["supports_anthropic_messages"], true);
     }
 
     #[test]

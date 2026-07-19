@@ -219,6 +219,7 @@ impl NodeSnapshot {
             models,
             supports_infer: true,
             supports_chat_completions: true,
+            supports_anthropic_messages: true,
             supports_embeddings: true,
             supports_server_control: self.config.enable_server_control,
             auth_required: api_key(&self.config).is_some(),
@@ -284,6 +285,7 @@ pub fn router(state: NodeAppState) -> Router {
         .route("/v1/load", get(load))
         .route("/v1/models", get(models))
         .route("/v1/infer", post(infer))
+        .route("/v1/messages", post(anthropic_messages))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/embeddings", post(embeddings))
         .route("/v1/server/control", post(server_control))
@@ -342,6 +344,16 @@ async fn chat_completions(
     request: AxumRequest<axum::body::Body>,
 ) -> Result<Response, ApiFailure> {
     proxy_json_passthrough(&state, request, "/v1/chat/completions").await
+}
+
+async fn anthropic_messages(
+    State(state): State<NodeAppState>,
+    request: AxumRequest<axum::body::Body>,
+) -> Response {
+    match anthropic_messages_inner(&state, request).await {
+        Ok(response) => response,
+        Err(error) => error.into_anthropic_response(),
+    }
 }
 
 async fn embeddings(
@@ -422,16 +434,37 @@ impl IntoResponse for ApiFailure {
     }
 }
 
+impl ApiFailure {
+    fn into_anthropic_response(self) -> Response {
+        let body = json!({
+            "type": "error",
+            "error": {
+                "type": anthropic_error_type(self.status),
+                "message": self.message,
+            }
+        });
+        let mut response = (self.status, Json(body)).into_response();
+        attach_request_id_headers(&mut response, self.request_id.as_deref());
+        response
+    }
+}
+
 fn authorize(config: &NodeConfig, headers: &HeaderMap) -> Result<(), ApiFailure> {
     let Some(expected) = api_key(config) else {
         return Ok(());
     };
-    let header = headers
+    let bearer = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default();
-    let actual = header.strip_prefix("Bearer ").unwrap_or_default();
-    if constant_time_eq(actual.as_bytes(), expected.as_bytes()) {
+    let bearer_token = bearer.strip_prefix("Bearer ").unwrap_or_default();
+    let api_key_header = headers
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if constant_time_eq(bearer_token.as_bytes(), expected.as_bytes())
+        || constant_time_eq(api_key_header.as_bytes(), expected.as_bytes())
+    {
         return Ok(());
     }
     Err(ApiFailure::new(
@@ -544,6 +577,622 @@ async fn proxy_json_passthrough(
                 body.request_id,
             )
         })
+}
+
+async fn anthropic_messages_inner(
+    state: &NodeAppState,
+    request: AxumRequest<axum::body::Body>,
+) -> Result<Response, ApiFailure> {
+    let body = read_authorized_body(&state.snapshot.config, request).await?;
+    let request = serde_json::from_slice::<Value>(&body.bytes).map_err(|error| {
+        ApiFailure::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_json",
+            format!("invalid Anthropic Messages request JSON: {error}"),
+            body.request_id.clone(),
+        )
+    })?;
+    let stream = request
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let upstream_request = build_anthropic_chat_request(&request, &body.request_id)?;
+    let upstream =
+        call_upstream_chat_json(state, &upstream_request, body.request_id.clone()).await?;
+    let message = map_upstream_chat_to_anthropic_message(&request, upstream, &body.request_id)?;
+    let mut response = if stream {
+        anthropic_sse_response(&message, &body.request_id)
+    } else {
+        (StatusCode::OK, Json(message)).into_response()
+    };
+    attach_request_id_headers(&mut response, body.request_id.as_deref());
+    Ok(response)
+}
+
+async fn call_upstream_chat_json(
+    state: &NodeAppState,
+    upstream_request: &Value,
+    request_id: Option<String>,
+) -> Result<Value, ApiFailure> {
+    let url = upstream_chat_completions_url(&state.snapshot.config.llama_base_url);
+    let timeout = Duration::from_millis(state.snapshot.config.infer_timeout_ms);
+    let upstream = tokio::time::timeout(timeout, async {
+        let mut request = state.client.post(url).json(upstream_request);
+        if let Some(request_id) = request_id.as_deref() {
+            request = request.header(HEADER_REQUEST_ID, request_id);
+        }
+        let response = request.send().await?;
+        let status = response.status().as_u16();
+        let body = response.text().await?;
+        Ok::<_, reqwest::Error>((status, body))
+    })
+    .await
+    .map_err(|_| {
+        ApiFailure::new(
+            StatusCode::GATEWAY_TIMEOUT,
+            "upstream_timeout",
+            "llama-server Anthropic Messages request timed out",
+            request_id.clone(),
+        )
+    })?
+    .map_err(|error| {
+        ApiFailure::new(
+            StatusCode::BAD_GATEWAY,
+            "upstream_request_failed",
+            format!("failed to call llama-server: {error}"),
+            request_id.clone(),
+        )
+    })?;
+
+    let (status, body) = upstream;
+    if !(200..300).contains(&status) {
+        return Err(ApiFailure::new(
+            StatusCode::BAD_GATEWAY,
+            "upstream_error",
+            format!("llama-server returned HTTP {status}"),
+            request_id,
+        ));
+    }
+
+    serde_json::from_str::<Value>(&body).map_err(|error| {
+        ApiFailure::new(
+            StatusCode::BAD_GATEWAY,
+            "upstream_invalid_json",
+            format!("llama-server returned invalid JSON: {error}"),
+            request_id,
+        )
+    })
+}
+
+fn build_anthropic_chat_request(
+    request: &Value,
+    request_id: &Option<String>,
+) -> Result<Value, ApiFailure> {
+    let object = request.as_object().ok_or_else(|| {
+        invalid_anthropic_request("request body must be a JSON object", request_id.clone())
+    })?;
+    let messages = object
+        .get("messages")
+        .and_then(Value::as_array)
+        .filter(|messages| !messages.is_empty())
+        .ok_or_else(|| {
+            invalid_anthropic_request("messages must be a non-empty array", request_id.clone())
+        })?;
+
+    let mut upstream_messages = Vec::new();
+    if let Some(system) = object.get("system") {
+        let system_text = anthropic_content_to_text(system, request_id)?;
+        if !system_text.trim().is_empty() {
+            upstream_messages.push(json!({
+                "role": "system",
+                "content": system_text,
+            }));
+        }
+    }
+    for message in messages {
+        append_anthropic_message(message, request_id, &mut upstream_messages)?;
+    }
+
+    let mut body = json!({
+        "messages": upstream_messages,
+        "stream": false,
+    });
+    let Some(upstream) = body.as_object_mut() else {
+        return Ok(body);
+    };
+
+    copy_json_field(object, upstream, "model");
+    copy_json_field(object, upstream, "max_tokens");
+    copy_json_field(object, upstream, "temperature");
+    copy_json_field(object, upstream, "top_p");
+    copy_json_field(object, upstream, "top_k");
+    if let Some(stop) = object.get("stop_sequences") {
+        upstream.insert("stop".to_string(), stop.clone());
+    }
+    if let Some(tools) = map_anthropic_tools(object.get("tools"), request_id)? {
+        upstream.insert("tools".to_string(), tools);
+    }
+    if let Some(tool_choice) = map_anthropic_tool_choice(object.get("tool_choice"), request_id)? {
+        upstream.insert("tool_choice".to_string(), tool_choice);
+    }
+
+    Ok(body)
+}
+
+fn append_anthropic_message(
+    message: &Value,
+    request_id: &Option<String>,
+    upstream_messages: &mut Vec<Value>,
+) -> Result<(), ApiFailure> {
+    let role = message.get("role").and_then(Value::as_str).ok_or_else(|| {
+        invalid_anthropic_request(
+            "each message must include a string role",
+            request_id.clone(),
+        )
+    })?;
+    if !matches!(role, "user" | "assistant" | "system") {
+        return Err(invalid_anthropic_request(
+            format!("unsupported Anthropic message role: {role}"),
+            request_id.clone(),
+        ));
+    }
+    let content = message.get("content").ok_or_else(|| {
+        invalid_anthropic_request("each message must include content", request_id.clone())
+    })?;
+    let text = anthropic_content_to_text(content, request_id)?;
+    if text.trim().is_empty() {
+        return Err(invalid_anthropic_request(
+            "message content must not be empty",
+            request_id.clone(),
+        ));
+    }
+    upstream_messages.push(json!({
+        "role": role,
+        "content": text,
+    }));
+    Ok(())
+}
+
+fn anthropic_content_to_text(
+    content: &Value,
+    request_id: &Option<String>,
+) -> Result<String, ApiFailure> {
+    if let Some(text) = content.as_str() {
+        return Ok(text.to_string());
+    }
+    let blocks = content.as_array().ok_or_else(|| {
+        invalid_anthropic_request("content must be a string or an array", request_id.clone())
+    })?;
+    let mut parts = Vec::new();
+    for block in blocks {
+        let block_type = block.get("type").and_then(Value::as_str).ok_or_else(|| {
+            invalid_anthropic_request("content blocks must include type", request_id.clone())
+        })?;
+        match block_type {
+            "text" => {
+                let text = block.get("text").and_then(Value::as_str).ok_or_else(|| {
+                    invalid_anthropic_request(
+                        "text content blocks must include text",
+                        request_id.clone(),
+                    )
+                })?;
+                if text.is_empty() {
+                    return Err(invalid_anthropic_request(
+                        "text content blocks must be non-empty",
+                        request_id.clone(),
+                    ));
+                }
+                parts.push(text.to_string());
+            }
+            "tool_result" => {
+                let tool_use_id = block
+                    .get("tool_use_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                let result = block
+                    .get("content")
+                    .map(|value| anthropic_content_to_text(value, request_id))
+                    .transpose()?
+                    .unwrap_or_default();
+                parts.push(format!(
+                    "<tool_result id=\"{tool_use_id}\">\n{result}\n</tool_result>"
+                ));
+            }
+            "tool_use" => {
+                let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
+                let input = block
+                    .get("input")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}))
+                    .to_string();
+                parts.push(format!("<tool_use name=\"{name}\">{input}</tool_use>"));
+            }
+            "thinking" => {
+                if let Some(text) = block.get("thinking").and_then(Value::as_str) {
+                    parts.push(format!("<think>{text}</think>"));
+                }
+            }
+            "redacted_thinking" => {}
+            "image" | "document" => {
+                return Err(invalid_anthropic_request(
+                    format!("unsupported Anthropic content block type for lmml-node: {block_type}"),
+                    request_id.clone(),
+                ));
+            }
+            other => {
+                return Err(invalid_anthropic_request(
+                    format!("unsupported Anthropic content block type: {other}"),
+                    request_id.clone(),
+                ));
+            }
+        }
+    }
+    Ok(parts.join("\n"))
+}
+
+fn map_anthropic_tools(
+    tools: Option<&Value>,
+    request_id: &Option<String>,
+) -> Result<Option<Value>, ApiFailure> {
+    let Some(tools) = tools else {
+        return Ok(None);
+    };
+    let tools = tools
+        .as_array()
+        .ok_or_else(|| invalid_anthropic_request("tools must be an array", request_id.clone()))?;
+    let mut mapped = Vec::with_capacity(tools.len());
+    for tool in tools {
+        let object = tool.as_object().ok_or_else(|| {
+            invalid_anthropic_request("each tool must be an object", request_id.clone())
+        })?;
+        let name = object.get("name").and_then(Value::as_str).ok_or_else(|| {
+            invalid_anthropic_request("each tool must include name", request_id.clone())
+        })?;
+        let description = object
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let parameters = object
+            .get("input_schema")
+            .cloned()
+            .unwrap_or_else(|| json!({ "type": "object", "properties": {} }));
+        mapped.push(json!({
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": description,
+                "parameters": parameters,
+            }
+        }));
+    }
+    Ok(Some(Value::Array(mapped)))
+}
+
+fn map_anthropic_tool_choice(
+    tool_choice: Option<&Value>,
+    request_id: &Option<String>,
+) -> Result<Option<Value>, ApiFailure> {
+    let Some(tool_choice) = tool_choice else {
+        return Ok(None);
+    };
+    if let Some(choice) = tool_choice.as_str() {
+        return match choice {
+            "auto" | "none" => Ok(Some(json!(choice))),
+            "any" => Ok(Some(json!("required"))),
+            other => Err(invalid_anthropic_request(
+                format!("unsupported tool_choice: {other}"),
+                request_id.clone(),
+            )),
+        };
+    }
+    let object = tool_choice.as_object().ok_or_else(|| {
+        invalid_anthropic_request("tool_choice must be a string or object", request_id.clone())
+    })?;
+    match object.get("type").and_then(Value::as_str) {
+        Some("auto") => Ok(Some(json!("auto"))),
+        Some("none") => Ok(Some(json!("none"))),
+        Some("any") => Ok(Some(json!("required"))),
+        Some("tool") => {
+            let name = object.get("name").and_then(Value::as_str).ok_or_else(|| {
+                invalid_anthropic_request("tool_choice tool type requires name", request_id.clone())
+            })?;
+            Ok(Some(json!({
+                "type": "function",
+                "function": { "name": name },
+            })))
+        }
+        Some(other) => Err(invalid_anthropic_request(
+            format!("unsupported tool_choice type: {other}"),
+            request_id.clone(),
+        )),
+        None => Err(invalid_anthropic_request(
+            "tool_choice object must include type",
+            request_id.clone(),
+        )),
+    }
+}
+
+fn map_upstream_chat_to_anthropic_message(
+    request: &Value,
+    upstream: Value,
+    request_id: &Option<String>,
+) -> Result<Value, ApiFailure> {
+    let choice = upstream
+        .pointer("/choices/0")
+        .ok_or_else(|| upstream_invalid_anthropic_response("missing choices[0]", request_id))?;
+    let upstream_message = choice.get("message").unwrap_or(choice);
+    let mut content_blocks = Vec::new();
+    if let Some(text) = upstream_message
+        .get("content")
+        .and_then(Value::as_str)
+        .or_else(|| choice.get("text").and_then(Value::as_str))
+        .filter(|text| !text.is_empty())
+    {
+        content_blocks.push(json!({
+            "type": "text",
+            "text": text,
+        }));
+    }
+    if let Some(tool_calls) = upstream_message.get("tool_calls").and_then(Value::as_array) {
+        for (index, tool_call) in tool_calls.iter().enumerate() {
+            let function = tool_call.get("function").unwrap_or(tool_call);
+            let name = function
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("tool");
+            let input = function
+                .get("arguments")
+                .map(parse_tool_arguments)
+                .unwrap_or_else(|| json!({}));
+            let id = tool_call
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("toolu_lmml_{index}"));
+            content_blocks.push(json!({
+                "type": "tool_use",
+                "id": id,
+                "name": name,
+                "input": input,
+            }));
+        }
+    }
+    if content_blocks.is_empty() {
+        return Err(upstream_invalid_anthropic_response(
+            "llama-server response did not include text or tool calls",
+            request_id,
+        ));
+    }
+
+    let finish_reason = choice
+        .get("finish_reason")
+        .and_then(Value::as_str)
+        .unwrap_or("stop");
+    let stop_reason = anthropic_stop_reason(
+        finish_reason,
+        content_blocks
+            .iter()
+            .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_use")),
+    );
+    let model = upstream
+        .get("model")
+        .and_then(Value::as_str)
+        .or_else(|| request.get("model").and_then(Value::as_str))
+        .unwrap_or("lmml-local");
+    let input_tokens = upstream
+        .pointer("/usage/prompt_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let output_tokens = upstream
+        .pointer("/usage/completion_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let message_id = upstream
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("msg_{}", normalized_request_id(request_id.as_deref())));
+
+    Ok(json!({
+        "id": message_id,
+        "type": "message",
+        "role": "assistant",
+        "content": content_blocks,
+        "model": model,
+        "stop_reason": stop_reason,
+        "stop_sequence": Value::Null,
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+        },
+    }))
+}
+
+fn anthropic_sse_response(message: &Value, request_id: &Option<String>) -> Response {
+    let mut output = String::new();
+    let mut start_message = message.clone();
+    if let Some(object) = start_message.as_object_mut() {
+        object.insert("content".to_string(), json!([]));
+        object.insert("stop_reason".to_string(), Value::Null);
+        object.insert("stop_sequence".to_string(), Value::Null);
+        if let Some(usage) = object.get_mut("usage").and_then(Value::as_object_mut) {
+            usage.insert("output_tokens".to_string(), json!(0));
+        }
+    }
+    push_sse_event(
+        &mut output,
+        "message_start",
+        json!({ "type": "message_start", "message": start_message }),
+    );
+    if let Some(blocks) = message.get("content").and_then(Value::as_array) {
+        for (index, block) in blocks.iter().enumerate() {
+            push_sse_event(
+                &mut output,
+                "content_block_start",
+                json!({
+                    "type": "content_block_start",
+                    "index": index,
+                    "content_block": anthropic_stream_start_block(block),
+                }),
+            );
+            push_sse_event(
+                &mut output,
+                "content_block_delta",
+                json!({
+                    "type": "content_block_delta",
+                    "index": index,
+                    "delta": anthropic_stream_delta(block),
+                }),
+            );
+            push_sse_event(
+                &mut output,
+                "content_block_stop",
+                json!({ "type": "content_block_stop", "index": index }),
+            );
+        }
+    }
+    push_sse_event(
+        &mut output,
+        "message_delta",
+        json!({
+            "type": "message_delta",
+            "delta": {
+                "stop_reason": message.get("stop_reason").cloned().unwrap_or_else(|| json!("end_turn")),
+                "stop_sequence": message.get("stop_sequence").cloned().unwrap_or(Value::Null),
+            },
+            "usage": {
+                "output_tokens": message
+                    .pointer("/usage/output_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+            },
+        }),
+    );
+    push_sse_event(
+        &mut output,
+        "message_stop",
+        json!({ "type": "message_stop" }),
+    );
+
+    let mut response = (StatusCode::OK, output).into_response();
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/event-stream"),
+    );
+    attach_request_id_headers(&mut response, request_id.as_deref());
+    response
+}
+
+fn anthropic_stream_start_block(block: &Value) -> Value {
+    match block.get("type").and_then(Value::as_str) {
+        Some("tool_use") => json!({
+            "type": "tool_use",
+            "id": block.get("id").cloned().unwrap_or_else(|| json!("toolu_lmml")),
+            "name": block.get("name").cloned().unwrap_or_else(|| json!("tool")),
+            "input": {},
+        }),
+        Some("text") => json!({ "type": "text", "text": "" }),
+        _ => block.clone(),
+    }
+}
+
+fn anthropic_stream_delta(block: &Value) -> Value {
+    match block.get("type").and_then(Value::as_str) {
+        Some("tool_use") => json!({
+            "type": "input_json_delta",
+            "partial_json": block.get("input").cloned().unwrap_or_else(|| json!({})).to_string(),
+        }),
+        Some("text") => json!({
+            "type": "text_delta",
+            "text": block.get("text").and_then(Value::as_str).unwrap_or_default(),
+        }),
+        _ => json!({ "type": "text_delta", "text": "" }),
+    }
+}
+
+fn push_sse_event(output: &mut String, event: &str, data: Value) {
+    output.push_str("event: ");
+    output.push_str(event);
+    output.push('\n');
+    output.push_str("data: ");
+    output.push_str(&data.to_string());
+    output.push_str("\n\n");
+}
+
+fn parse_tool_arguments(value: &Value) -> Value {
+    if let Some(arguments) = value.as_str() {
+        serde_json::from_str(arguments).unwrap_or_else(|_| json!({ "raw": arguments }))
+    } else {
+        value.clone()
+    }
+}
+
+fn anthropic_stop_reason(finish_reason: &str, has_tool_use: bool) -> &'static str {
+    if has_tool_use {
+        return "tool_use";
+    }
+    match finish_reason {
+        "length" => "max_tokens",
+        "tool_calls" | "function_call" => "tool_use",
+        "content_filter" => "refusal",
+        "stop" | "eos" | "stopped" => "end_turn",
+        _ => "end_turn",
+    }
+}
+
+fn copy_json_field(
+    from: &serde_json::Map<String, Value>,
+    to: &mut serde_json::Map<String, Value>,
+    field: &str,
+) {
+    if let Some(value) = from.get(field) {
+        to.insert(field.to_string(), value.clone());
+    }
+}
+
+fn invalid_anthropic_request(message: impl Into<String>, request_id: Option<String>) -> ApiFailure {
+    ApiFailure::new(
+        StatusCode::BAD_REQUEST,
+        "invalid_anthropic_request",
+        message,
+        request_id,
+    )
+}
+
+fn upstream_invalid_anthropic_response(
+    message: impl Into<String>,
+    request_id: &Option<String>,
+) -> ApiFailure {
+    ApiFailure::new(
+        StatusCode::BAD_GATEWAY,
+        "upstream_invalid_response",
+        message,
+        request_id.clone(),
+    )
+}
+
+fn anthropic_error_type(status: StatusCode) -> &'static str {
+    match status {
+        StatusCode::UNAUTHORIZED => "authentication_error",
+        StatusCode::FORBIDDEN => "permission_error",
+        StatusCode::NOT_FOUND => "not_found_error",
+        StatusCode::TOO_MANY_REQUESTS => "rate_limit_error",
+        StatusCode::BAD_GATEWAY | StatusCode::GATEWAY_TIMEOUT => "api_error",
+        _ => "invalid_request_error",
+    }
+}
+
+fn attach_request_id_headers(response: &mut Response, request_id: Option<&str>) {
+    let Some(request_id) = request_id else {
+        return;
+    };
+    let Ok(value) = axum::http::HeaderValue::from_str(request_id) else {
+        return;
+    };
+    response
+        .headers_mut()
+        .insert(HEADER_REQUEST_ID, value.clone());
+    response.headers_mut().insert("request-id", value);
 }
 
 fn ensure_json_body(body: &AuthorizedBody) -> Result<(), ApiFailure> {
@@ -1128,6 +1777,7 @@ mod tests {
 
         assert!(capabilities.supports_infer);
         assert!(capabilities.supports_chat_completions);
+        assert!(capabilities.supports_anthropic_messages);
         assert!(capabilities.supports_embeddings);
         assert!(!capabilities.supports_server_control);
     }
@@ -1471,6 +2121,354 @@ mod tests {
             .expect("chat response");
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn anthropic_messages_requires_auth_before_body_read() {
+        let app = router(NodeAppState::new(test_snapshot(NodeConfig {
+            api_key: Some("secret".to_string()),
+            ..NodeConfig::default()
+        })));
+        let response = app
+            .oneshot(raw_json_request("/v1/messages", "{", None))
+            .await
+            .expect("messages response");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = response_text(response).await;
+        let error: Value = serde_json::from_str(&body).expect("anthropic error json");
+        assert_eq!(error["type"], "error");
+        assert_eq!(error["error"]["type"], "authentication_error");
+    }
+
+    #[tokio::test]
+    async fn anthropic_messages_accepts_x_api_key_auth() {
+        let upstream = spawn_upstream(axum::Router::new().route(
+            "/v1/chat/completions",
+            post(|| async {
+                Json(json!({
+                    "choices": [
+                        {
+                            "message": { "role": "assistant", "content": "ok" },
+                            "finish_reason": "stop"
+                        }
+                    ]
+                }))
+            }),
+        ))
+        .await;
+        let app = router(NodeAppState::new(test_snapshot(NodeConfig {
+            api_key: Some("secret".to_string()),
+            llama_base_url: upstream,
+            ..NodeConfig::default()
+        })));
+        let response = app
+            .oneshot(raw_json_request_with_x_api_key(
+                "/v1/messages",
+                r#"{"model":"local","max_tokens":16,"messages":[{"role":"user","content":"hello"}]}"#,
+                "secret",
+            ))
+            .await
+            .expect("messages response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn anthropic_messages_invalid_json_with_auth_returns_anthropic_error() {
+        let app = router(NodeAppState::new(test_snapshot(NodeConfig {
+            api_key: Some("secret".to_string()),
+            ..NodeConfig::default()
+        })));
+        let response = app
+            .oneshot(raw_json_request("/v1/messages", "{", Some("secret")))
+            .await
+            .expect("messages response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_text(response).await;
+        let error: Value = serde_json::from_str(&body).expect("anthropic error json");
+        assert_eq!(error["type"], "error");
+        assert_eq!(error["error"]["type"], "invalid_request_error");
+    }
+
+    #[tokio::test]
+    async fn anthropic_messages_maps_request_to_upstream_chat() {
+        let captured = Arc::new(std::sync::Mutex::new(None::<Value>));
+        let captured_for_route = Arc::clone(&captured);
+        let upstream = spawn_upstream(axum::Router::new().route(
+            "/v1/chat/completions",
+            post(move |body: String| {
+                let captured_for_request = Arc::clone(&captured_for_route);
+                async move {
+                    let value: Value = serde_json::from_str(&body).expect("upstream request json");
+                    *captured_for_request.lock().expect("captured lock") = Some(value);
+                    Json(json!({
+                        "model": "local-model",
+                        "choices": [
+                            {
+                                "message": { "role": "assistant", "content": "mapped" },
+                                "finish_reason": "stop"
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 12,
+                            "completion_tokens": 3
+                        }
+                    }))
+                }
+            }),
+        ))
+        .await;
+        let app = router(NodeAppState::new(test_snapshot(NodeConfig {
+            api_key: Some("secret".to_string()),
+            llama_base_url: upstream,
+            ..NodeConfig::default()
+        })));
+        let request = json!({
+            "model": "local-model",
+            "system": "You are local.",
+            "max_tokens": 64,
+            "temperature": 0.2,
+            "top_p": 0.9,
+            "top_k": 20,
+            "stop_sequences": ["STOP"],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{ "type": "text", "text": "hello" }]
+                }
+            ],
+            "tools": [
+                {
+                    "name": "read_file",
+                    "description": "Read a file",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "string" }
+                        }
+                    }
+                }
+            ],
+            "tool_choice": { "type": "tool", "name": "read_file" }
+        });
+        let response = app
+            .oneshot(raw_json_request(
+                "/v1/messages",
+                &request.to_string(),
+                Some("secret"),
+            ))
+            .await
+            .expect("messages response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let upstream_request = captured
+            .lock()
+            .expect("captured lock")
+            .clone()
+            .expect("captured request");
+        assert_eq!(upstream_request["model"], "local-model");
+        assert_eq!(upstream_request["messages"][0]["role"], "system");
+        assert_eq!(upstream_request["messages"][0]["content"], "You are local.");
+        assert_eq!(upstream_request["messages"][1]["role"], "user");
+        assert_eq!(upstream_request["messages"][1]["content"], "hello");
+        assert_eq!(upstream_request["max_tokens"], 64);
+        assert_eq!(upstream_request["stop"][0], "STOP");
+        assert_eq!(upstream_request["stream"], false);
+        assert_eq!(upstream_request["tools"][0]["type"], "function");
+        assert_eq!(
+            upstream_request["tools"][0]["function"]["name"],
+            "read_file"
+        );
+        assert_eq!(
+            upstream_request["tool_choice"]["function"]["name"],
+            "read_file"
+        );
+    }
+
+    #[tokio::test]
+    async fn anthropic_messages_maps_text_response() {
+        let upstream = spawn_upstream(axum::Router::new().route(
+            "/v1/chat/completions",
+            post(|| async {
+                Json(json!({
+                    "id": "chatcmpl-1",
+                    "model": "local-model",
+                    "choices": [
+                        {
+                            "message": { "role": "assistant", "content": "hello from lmml" },
+                            "finish_reason": "stop"
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 4
+                    }
+                }))
+            }),
+        ))
+        .await;
+        let app = router(NodeAppState::new(test_snapshot(NodeConfig {
+            api_key: Some("secret".to_string()),
+            llama_base_url: upstream,
+            ..NodeConfig::default()
+        })));
+        let response = app
+            .oneshot(raw_json_request(
+                "/v1/messages",
+                r#"{"model":"local-model","max_tokens":16,"messages":[{"role":"user","content":"hello"}]}"#,
+                Some("secret"),
+            ))
+            .await
+            .expect("messages response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(HEADER_REQUEST_ID),
+            None,
+            "no request id header is attached when caller omitted one"
+        );
+        let body = response_text(response).await;
+        let message: Value = serde_json::from_str(&body).expect("message json");
+        assert_eq!(message["type"], "message");
+        assert_eq!(message["role"], "assistant");
+        assert_eq!(message["content"][0]["type"], "text");
+        assert_eq!(message["content"][0]["text"], "hello from lmml");
+        assert_eq!(message["model"], "local-model");
+        assert_eq!(message["stop_reason"], "end_turn");
+        assert_eq!(message["usage"]["input_tokens"], 10);
+        assert_eq!(message["usage"]["output_tokens"], 4);
+    }
+
+    #[tokio::test]
+    async fn anthropic_messages_maps_tool_call_response() {
+        let upstream = spawn_upstream(axum::Router::new().route(
+            "/v1/chat/completions",
+            post(|| async {
+                Json(json!({
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "call_1",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "read_file",
+                                            "arguments": "{\"path\":\"README.md\"}"
+                                        }
+                                    }
+                                ]
+                            },
+                            "finish_reason": "tool_calls"
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 8,
+                        "completion_tokens": 6
+                    }
+                }))
+            }),
+        ))
+        .await;
+        let app = router(NodeAppState::new(test_snapshot(NodeConfig {
+            llama_base_url: upstream,
+            ..NodeConfig::default()
+        })));
+        let response = app
+            .oneshot(raw_json_request(
+                "/v1/messages",
+                r#"{"model":"local-model","max_tokens":16,"messages":[{"role":"user","content":"read"}]}"#,
+                None,
+            ))
+            .await
+            .expect("messages response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_text(response).await;
+        let message: Value = serde_json::from_str(&body).expect("message json");
+        assert_eq!(message["stop_reason"], "tool_use");
+        assert_eq!(message["content"][0]["type"], "tool_use");
+        assert_eq!(message["content"][0]["id"], "call_1");
+        assert_eq!(message["content"][0]["name"], "read_file");
+        assert_eq!(message["content"][0]["input"]["path"], "README.md");
+    }
+
+    #[tokio::test]
+    async fn anthropic_messages_streams_sse_compatibility_events() {
+        let upstream = spawn_upstream(axum::Router::new().route(
+            "/v1/chat/completions",
+            post(|| async {
+                Json(json!({
+                    "choices": [
+                        {
+                            "message": { "role": "assistant", "content": "streamed" },
+                            "finish_reason": "stop"
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 5,
+                        "completion_tokens": 2
+                    }
+                }))
+            }),
+        ))
+        .await;
+        let app = router(NodeAppState::new(test_snapshot(NodeConfig {
+            llama_base_url: upstream,
+            ..NodeConfig::default()
+        })));
+        let response = app
+            .oneshot(raw_json_request(
+                "/v1/messages",
+                r#"{"model":"local-model","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"hello"}]}"#,
+                None,
+            ))
+            .await
+            .expect("messages response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/event-stream")
+        );
+        let body = response_text(response).await;
+        assert!(body.contains("event: message_start"));
+        assert!(body.contains("event: content_block_delta"));
+        assert!(body.contains("\"text\":\"streamed\""));
+        assert!(body.contains("event: message_stop"));
+    }
+
+    #[tokio::test]
+    async fn anthropic_messages_maps_upstream_error_to_anthropic_error() {
+        let upstream = spawn_upstream(axum::Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { (StatusCode::INTERNAL_SERVER_ERROR, "boom") }),
+        ))
+        .await;
+        let app = router(NodeAppState::new(test_snapshot(NodeConfig {
+            llama_base_url: upstream,
+            ..NodeConfig::default()
+        })));
+        let response = app
+            .oneshot(raw_json_request(
+                "/v1/messages",
+                r#"{"model":"local-model","max_tokens":16,"messages":[{"role":"user","content":"hello"}]}"#,
+                None,
+            ))
+            .await
+            .expect("messages response");
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = response_text(response).await;
+        let error: Value = serde_json::from_str(&body).expect("anthropic error json");
+        assert_eq!(error["type"], "error");
+        assert_eq!(error["error"]["type"], "api_error");
     }
 
     #[tokio::test]
@@ -1873,6 +2871,16 @@ mod tests {
             );
         }
         builder.body(Body::from(body.to_string())).expect("request")
+    }
+
+    fn raw_json_request_with_x_api_key(uri: &str, body: &str, api_key: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .header("x-api-key", api_key)
+            .body(Body::from(body.to_string()))
+            .expect("request")
     }
 
     async fn spawn_upstream(router: axum::Router) -> String {

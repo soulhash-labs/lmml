@@ -12,7 +12,7 @@ expression: render_app(&app)
 "│Status: Failed { reason: "port 8080 is already i││                                                          │"
 "│Profile: custom/global                          ││                                                          │"
 "│Model: llama.gguf                               ││                                                          │"
-"│Binary: $HOME/.local/share/lmml/bin/llama││                                                          │"
+"│Binary: $HOME/.local/share/lmml/llama.cpp││                                                          │"
 "│Host: 127.0.0.1                                 ││                                                          │"
 "│Port: 8080                                      ││                                                          │"
 "│Context: 4096                                   ││                                                          │"
