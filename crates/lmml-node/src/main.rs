@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -41,6 +42,20 @@ struct Args {
     tags: Vec<String>,
     #[arg(long, env = "LMML_NODE_SKIP_PROBE")]
     skip_probe: bool,
+    #[arg(long)]
+    advertise_lan: bool,
+    #[arg(
+        long = "lan-advertisement-addr",
+        env = "LMML_NODE_LAN_ADVERTISEMENT_ADDR",
+        default_value = lmml_api::LAN_DISCOVERY_MULTICAST_ADDR
+    )]
+    lan_advertisement_addr: SocketAddr,
+    #[arg(
+        long = "lan-advertisement-interval-ms",
+        env = "LMML_NODE_LAN_ADVERTISEMENT_INTERVAL_MS",
+        default_value_t = lmml_api::LAN_DISCOVERY_DEFAULT_INTERVAL_MS
+    )]
+    lan_advertisement_interval_ms: u64,
 }
 
 #[tokio::main]
@@ -57,6 +72,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         api_key: args.api_key,
         allow_unsafe_lan_without_auth: args.unsafe_allow_lan_without_auth,
         skip_system_probe: args.skip_probe,
+        advertise_lan: args.advertise_lan,
+        lan_advertisement_addr: args.lan_advertisement_addr,
+        lan_advertisement_interval_ms: args.lan_advertisement_interval_ms,
         ..NodeConfig::default()
     };
 
@@ -77,6 +95,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = snapshot.config.socket_addr()?;
     tracing::info!(addr = %addr, "starting lmml-node API");
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    if snapshot.config.advertise_lan {
+        let advertiser_snapshot = snapshot.clone();
+        tokio::spawn(async move {
+            if let Err(error) = lmml_node::run_lan_advertiser(advertiser_snapshot).await {
+                tracing::warn!(error = %error, "lmml-node LAN advertiser stopped");
+            }
+        });
+    }
     axum::serve(listener, router(NodeAppState::new(snapshot)))
         .with_graceful_shutdown(shutdown_signal())
         .await?;

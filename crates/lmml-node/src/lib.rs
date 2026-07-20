@@ -20,7 +20,8 @@ use lmml_api::{
     AgentQDescriptor, ApiErrorBody, BackendKind, ErrorResponse, GpuDescriptor, HealthResponse,
     InferRequest, InferResponse, LoadResponse, ModelDescriptor, NodeCapabilities, NodeRole,
     NodeStatus, PrivacyTier, ServerAction, ServerControlRequest, ServerControlResponse,
-    API_VERSION, HEADER_REQUEST_ID,
+    API_VERSION, HEADER_REQUEST_ID, LAN_DISCOVERY_DEFAULT_INTERVAL_MS,
+    LAN_DISCOVERY_MULTICAST_ADDR,
 };
 use lmml_detect::{BuildBackend, GpuInfo, SystemProfile};
 use lmml_models::{ModelEntry, ModelRegistry};
@@ -29,6 +30,10 @@ use serde_json::{json, Value};
 use thiserror::Error;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
+
+mod advertise;
+
+pub use advertise::{advertised_public_url, run_lan_advertiser};
 
 /// Default HTTP port for the headless LMML node API.
 pub const DEFAULT_NODE_PORT: u16 = 8101;
@@ -77,6 +82,12 @@ pub struct NodeConfig {
     pub agentq: Option<AgentQDescriptor>,
     /// Skip host system probing and serve conservative unknown capabilities.
     pub skip_system_probe: bool,
+    /// Periodically advertise this node on the LAN discovery multicast channel.
+    pub advertise_lan: bool,
+    /// Multicast endpoint used for LAN advertisements.
+    pub lan_advertisement_addr: SocketAddr,
+    /// Interval between LAN advertisements in milliseconds.
+    pub lan_advertisement_interval_ms: u64,
 }
 
 impl NodeConfig {
@@ -92,6 +103,12 @@ impl NodeConfig {
             return Err(NodeConfigError::ApiKeyRequiredForLanBind {
                 host: self.host.clone(),
             });
+        }
+        if self.advertise_lan {
+            if api_key(self).is_none() {
+                return Err(NodeConfigError::ApiKeyRequiredForLanAdvertisement);
+            }
+            advertise::advertised_public_url(self)?;
         }
         Ok(())
     }
@@ -125,6 +142,9 @@ impl Default for NodeConfig {
             roles: vec![NodeRole::LanWorker],
             agentq: None,
             skip_system_probe: false,
+            advertise_lan: false,
+            lan_advertisement_addr: default_lan_advertisement_addr(),
+            lan_advertisement_interval_ms: LAN_DISCOVERY_DEFAULT_INTERVAL_MS,
         }
     }
 }
@@ -135,6 +155,21 @@ pub enum NodeConfigError {
     /// Server control requires bearer authentication even on localhost.
     #[error("API key required when enabling lmml-node server control")]
     ApiKeyRequiredForServerControl,
+    /// LAN advertisement requires bearer authentication on protected routes.
+    #[error("API key required when enabling lmml-node LAN advertisement")]
+    ApiKeyRequiredForLanAdvertisement,
+    /// LAN advertisement needs a routable URL when the bind host is local or wildcard.
+    #[error("public URL required for LAN advertisement when binding lmml-node to {host}")]
+    PublicUrlRequiredForLanAdvertisement {
+        /// Host that cannot be advertised directly.
+        host: String,
+    },
+    /// LAN advertisement needs an HTTP(S) public URL.
+    #[error("invalid LAN advertisement public URL {url}")]
+    InvalidLanAdvertisementPublicUrl {
+        /// Invalid URL supplied for advertisement.
+        url: String,
+    },
     /// LAN-visible node APIs must be authenticated unless explicitly unsafe.
     #[error("API key required when binding lmml-node to non-local host {host}")]
     ApiKeyRequiredForLanBind {
@@ -1627,6 +1662,12 @@ fn default_model_dir() -> PathBuf {
     ModelState::default().models_dir
 }
 
+fn default_lan_advertisement_addr() -> SocketAddr {
+    LAN_DISCOVERY_MULTICAST_ADDR
+        .parse()
+        .expect("valid default LMML LAN discovery address")
+}
+
 fn utc_now_rfc3339() -> String {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
@@ -1683,6 +1724,79 @@ mod tests {
         };
 
         assert_eq!(config.validate(), Ok(()));
+    }
+
+    #[test]
+    fn lan_advertisement_requires_auth() {
+        let config = NodeConfig {
+            advertise_lan: true,
+            public_url: Some("http://192.168.1.12:8101".to_string()),
+            ..NodeConfig::default()
+        };
+
+        assert_eq!(
+            config.validate(),
+            Err(NodeConfigError::ApiKeyRequiredForLanAdvertisement)
+        );
+    }
+
+    #[test]
+    fn lan_advertisement_requires_public_url_for_local_or_wildcard_bind() {
+        let config = NodeConfig {
+            advertise_lan: true,
+            api_key: Some("secret".to_string()),
+            host: "0.0.0.0".to_string(),
+            allow_unsafe_lan_without_auth: false,
+            ..NodeConfig::default()
+        };
+
+        assert_eq!(
+            config.validate(),
+            Err(NodeConfigError::PublicUrlRequiredForLanAdvertisement {
+                host: "0.0.0.0".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn lan_advertisement_rejects_non_http_public_url() {
+        let config = NodeConfig {
+            advertise_lan: true,
+            api_key: Some("secret".to_string()),
+            public_url: Some("file:///tmp/lmml-node".to_string()),
+            ..NodeConfig::default()
+        };
+
+        assert_eq!(
+            config.validate(),
+            Err(NodeConfigError::InvalidLanAdvertisementPublicUrl {
+                url: "file:///tmp/lmml-node".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn lan_advertisement_uses_capability_metadata() {
+        let public_url = "http://192.168.1.12:8101";
+        let snapshot = test_snapshot(NodeConfig {
+            advertise_lan: true,
+            api_key: Some("secret".to_string()),
+            public_url: Some(public_url.to_string()),
+            tags: vec!["lmml".to_string(), "workstation".to_string()],
+            ..NodeConfig::default()
+        });
+
+        let advertisement = snapshot.lan_advertisement(public_url.to_string());
+
+        assert_eq!(advertisement.magic, lmml_api::LAN_DISCOVERY_MAGIC);
+        assert_eq!(advertisement.version, lmml_api::LAN_DISCOVERY_VERSION);
+        assert_eq!(advertisement.api_version, API_VERSION);
+        assert_eq!(advertisement.node_id, snapshot.config.node_id);
+        assert_eq!(advertisement.node_name, snapshot.config.node_name);
+        assert_eq!(advertisement.public_url, public_url);
+        assert_eq!(advertisement.auth_required, true);
+        assert_eq!(advertisement.roles, snapshot.config.roles);
+        assert_eq!(advertisement.tags, snapshot.config.tags);
     }
 
     #[test]

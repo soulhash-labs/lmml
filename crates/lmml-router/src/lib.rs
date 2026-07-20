@@ -8,6 +8,7 @@
 //! `lmml-node`, which in turn proxies to the local `llama-server`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -20,13 +21,17 @@ use axum::{Json, Router};
 use lmml_api::{
     ApiErrorBody, BackendKind, ErrorResponse, HealthResponse, InferRequest, LoadResponse,
     ModelDescriptor, NodeCapabilities, NodeRole, NodeStatus, PrivacyTier, API_VERSION,
-    HEADER_NODE_ID, HEADER_REQUEST_ID,
+    HEADER_NODE_ID, HEADER_REQUEST_ID, LAN_DISCOVERY_DEFAULT_TTL_MS,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use thiserror::Error;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
+
+mod discovery;
+
+pub use discovery::{parse_lan_advertisement, LanAdvertisementParseError};
 
 /// Default HTTP port for the LAN LMML router.
 pub const DEFAULT_ROUTER_PORT: u16 = 8100;
@@ -49,6 +54,8 @@ pub struct UpstreamNodeConfig {
     pub base_url: String,
     /// Optional bearer token used when calling protected upstream routes.
     pub api_key: Option<String>,
+    /// True when this upstream came from LAN discovery rather than static config.
+    pub discovered: bool,
 }
 
 impl UpstreamNodeConfig {
@@ -58,6 +65,7 @@ impl UpstreamNodeConfig {
             name: name.into(),
             base_url: normalize_base_url(&base_url.into()),
             api_key: None,
+            discovered: false,
         }
     }
 }
@@ -77,6 +85,14 @@ pub struct RouterConfig {
     pub public_url: Option<String>,
     /// Static upstream LMML nodes.
     pub upstreams: Vec<UpstreamNodeConfig>,
+    /// Listen for LAN node advertisements and merge them with static upstreams.
+    pub discover_lan: bool,
+    /// IPv4 multicast endpoint used for LAN node advertisements.
+    pub lan_discovery_addr: SocketAddr,
+    /// Expiry window for discovered nodes in milliseconds.
+    pub discovered_node_ttl_ms: u64,
+    /// Bearer token used when probing discovered upstream nodes.
+    pub discovered_upstream_api_key: Option<String>,
     /// Timeout for proxied inference requests in milliseconds.
     pub proxy_timeout_ms: u64,
     /// Per-node timeout for health/capability/load discovery in milliseconds.
@@ -92,8 +108,11 @@ pub struct RouterConfig {
 impl RouterConfig {
     /// Validate security-sensitive router settings before binding a socket.
     pub fn validate(&self) -> Result<(), RouterConfigError> {
-        if self.upstreams.is_empty() {
+        if self.upstreams.is_empty() && !self.discover_lan {
             return Err(RouterConfigError::NoUpstreams);
+        }
+        if self.discover_lan && discovered_upstream_api_key(self).is_none() {
+            return Err(RouterConfigError::ApiKeyRequiredForLanDiscovery);
         }
         if !is_local_bind(&self.host)
             && api_key(self).is_none()
@@ -126,6 +145,10 @@ impl Default for RouterConfig {
             router_name: default_router_name(),
             public_url: None,
             upstreams: Vec::new(),
+            discover_lan: false,
+            lan_discovery_addr: discovery::default_lan_discovery_addr(),
+            discovered_node_ttl_ms: LAN_DISCOVERY_DEFAULT_TTL_MS,
+            discovered_upstream_api_key: None,
             proxy_timeout_ms: DEFAULT_PROXY_TIMEOUT_MS,
             discovery_timeout_ms: DEFAULT_DISCOVERY_TIMEOUT_MS,
             api_key: None,
@@ -139,8 +162,11 @@ impl Default for RouterConfig {
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum RouterConfigError {
     /// At least one upstream node is required.
-    #[error("at least one upstream LMML node is required")]
+    #[error("at least one upstream LMML node is required unless LAN discovery is enabled")]
     NoUpstreams,
+    /// LAN discovery requires a default token for authenticated discovered probes.
+    #[error("default upstream key required when enabling LAN discovery; use --upstream-key default=<token>")]
+    ApiKeyRequiredForLanDiscovery,
     /// LAN-visible router APIs must be authenticated unless explicitly unsafe.
     #[error("API key required when binding lmml-router to non-local host {host}")]
     ApiKeyRequiredForLanBind {
@@ -182,6 +208,7 @@ pub struct RouterAppState {
     client: reqwest::Client,
     started_at: Instant,
     counters: Arc<Mutex<RouterCounters>>,
+    discovered: discovery::DiscoveredNodeTable,
 }
 
 impl RouterAppState {
@@ -193,7 +220,48 @@ impl RouterAppState {
             client: reqwest::Client::new(),
             started_at: Instant::now(),
             counters: Arc::new(Mutex::new(RouterCounters::default())),
+            discovered: discovery::DiscoveredNodeTable::default(),
         })
+    }
+
+    fn effective_upstreams(&self) -> Vec<UpstreamNodeConfig> {
+        let mut upstreams = self.config.upstreams.clone();
+        let Some(api_key) = discovered_upstream_api_key(&self.config) else {
+            return upstreams;
+        };
+        let static_names = upstreams
+            .iter()
+            .map(|upstream| upstream.name.clone())
+            .collect::<BTreeSet<_>>();
+        for upstream in
+            self.discovered
+                .upstreams(Instant::now(), self.discovered_node_ttl(), api_key)
+        {
+            if !static_names.contains(&upstream.name) {
+                upstreams.push(upstream);
+            }
+        }
+        upstreams
+    }
+
+    fn discovered_node_ttl(&self) -> Duration {
+        Duration::from_millis(self.config.discovered_node_ttl_ms)
+    }
+
+    fn active_discovered_len(&self) -> usize {
+        self.discovered
+            .active_len(Instant::now(), self.discovered_node_ttl())
+    }
+
+    fn record_discovered_advertisement(
+        &self,
+        advertisement: lmml_api::LanNodeAdvertisement,
+        now: Instant,
+    ) -> bool {
+        if discovered_upstream_api_key(&self.config).is_none() {
+            return false;
+        }
+        self.discovered.record(advertisement, now)
     }
 }
 
@@ -257,10 +325,14 @@ pub fn parse_upstream_spec(spec: &str) -> Result<UpstreamNodeConfig, RouterConfi
 }
 
 /// Apply `name=token` upstream API key specs to parsed upstreams.
+///
+/// A `default=token` spec returns the token used for authenticated probes
+/// against nodes found through LAN discovery.
 pub fn apply_upstream_key_specs(
     upstreams: &mut [UpstreamNodeConfig],
     specs: &[String],
-) -> Result<(), RouterConfigError> {
+) -> Result<Option<String>, RouterConfigError> {
+    let mut default_key = None;
     for spec in specs {
         let Some((name, key)) = spec.split_once('=') else {
             return Err(RouterConfigError::InvalidUpstreamKeySpec { spec: spec.clone() });
@@ -270,6 +342,10 @@ pub fn apply_upstream_key_specs(
         if name.is_empty() || key.is_empty() {
             return Err(RouterConfigError::InvalidUpstreamKeySpec { spec: spec.clone() });
         }
+        if name == "default" {
+            default_key = Some(key.to_string());
+            continue;
+        }
         let Some(upstream) = upstreams.iter_mut().find(|upstream| upstream.name == name) else {
             return Err(RouterConfigError::UnknownUpstreamKey {
                 name: name.to_string(),
@@ -277,12 +353,33 @@ pub fn apply_upstream_key_specs(
         };
         upstream.api_key = Some(key.to_string());
     }
-    Ok(())
+    Ok(default_key)
+}
+
+/// Listen for UDP multicast LAN advertisements and update router discovery state.
+pub async fn run_lan_discovery_listener(state: RouterAppState) -> io::Result<()> {
+    let socket = discovery::bind_lan_discovery_socket(state.config.lan_discovery_addr).await?;
+    let mut buffer = vec![0_u8; discovery::max_advertisement_bytes()];
+    loop {
+        let (len, peer) = socket.recv_from(&mut buffer).await?;
+        match parse_lan_advertisement(&buffer[..len]) {
+            Ok(advertisement) => {
+                let node_id = advertisement.node_id.clone();
+                if state.record_discovered_advertisement(advertisement, Instant::now()) {
+                    tracing::debug!(node_id, peer = %peer, "recorded LMML LAN advertisement");
+                }
+            }
+            Err(error) => {
+                tracing::trace!(error = %error, peer = %peer, "ignored LAN advertisement");
+            }
+        }
+    }
 }
 
 async fn health(State(state): State<RouterAppState>) -> Json<HealthResponse> {
     let probes = discover_upstreams(&state).await;
     let ready = probes.iter().filter(|probe| probe.is_ready()).count();
+    let total = probes.len();
     Json(HealthResponse {
         api_version: API_VERSION.to_string(),
         node_id: state.config.router_id.clone(),
@@ -297,8 +394,7 @@ async fn health(State(state): State<RouterAppState>) -> Json<HealthResponse> {
         llama_healthy: ready > 0,
         active_model: None,
         message: Some(format!(
-            "lmml-router active; {ready}/{} upstream nodes ready",
-            state.config.upstreams.len()
+            "lmml-router active; {ready}/{total} upstream nodes ready"
         )),
     })
 }
@@ -309,7 +405,7 @@ async fn capabilities(
 ) -> Result<Json<NodeCapabilities>, ApiFailure> {
     authorize(&state.config, &headers)?;
     let probes = discover_upstreams(&state).await;
-    Ok(Json(aggregate_capabilities(&state.config, &probes)))
+    Ok(Json(aggregate_capabilities(&state, &probes)))
 }
 
 async fn load(
@@ -368,10 +464,18 @@ struct UpstreamProbe {
 
 impl UpstreamProbe {
     fn is_ready(&self) -> bool {
-        self.health
+        let health_ready = self
+            .health
             .as_ref()
             .map(|health| health.status == NodeStatus::Ready && health.llama_healthy)
-            .unwrap_or(false)
+            .unwrap_or(false);
+        let auth_verified = !self.config.discovered
+            || self
+                .capabilities
+                .as_ref()
+                .map(|capabilities| capabilities.auth_required)
+                .unwrap_or(false);
+        health_ready && auth_verified
     }
 
     fn running_requests(&self) -> u32 {
@@ -621,13 +725,14 @@ async fn call_upstream_inner(
 }
 
 async fn discover_upstreams(state: &RouterAppState) -> Vec<UpstreamProbe> {
+    let upstreams = state.effective_upstreams();
     let mut tasks = tokio::task::JoinSet::new();
-    for (index, upstream) in state.config.upstreams.iter().cloned().enumerate() {
+    for (index, upstream) in upstreams.into_iter().enumerate() {
         let state = state.clone();
         tasks.spawn(async move { (index, fetch_upstream_probe(&state, &upstream).await) });
     }
 
-    let mut indexed = Vec::with_capacity(state.config.upstreams.len());
+    let mut indexed = Vec::new();
     while let Some(result) = tasks.join_next().await {
         if let Ok(probe) = result {
             indexed.push(probe);
@@ -671,7 +776,8 @@ where
     request.timeout(timeout).send().await?.json::<T>().await
 }
 
-fn aggregate_capabilities(config: &RouterConfig, probes: &[UpstreamProbe]) -> NodeCapabilities {
+fn aggregate_capabilities(state: &RouterAppState, probes: &[UpstreamProbe]) -> NodeCapabilities {
+    let config = state.config.as_ref();
     let mut gpus = Vec::new();
     let mut models = Vec::new();
     let mut model_ids = BTreeSet::new();
@@ -703,7 +809,15 @@ fn aggregate_capabilities(config: &RouterConfig, probes: &[UpstreamProbe]) -> No
 
     let ready = probes.iter().filter(|probe| probe.is_ready()).count();
     let mut extra = BTreeMap::new();
-    extra.insert("upstream_count".to_string(), json!(config.upstreams.len()));
+    extra.insert("upstream_count".to_string(), json!(probes.len()));
+    extra.insert(
+        "static_upstream_count".to_string(),
+        json!(config.upstreams.len()),
+    );
+    extra.insert(
+        "discovered_upstream_count".to_string(),
+        json!(state.active_discovered_len()),
+    );
     extra.insert("ready_upstream_count".to_string(), json!(ready));
     extra.insert(
         "upstreams".to_string(),
@@ -804,6 +918,7 @@ fn upstream_summary(probe: &UpstreamProbe) -> BTreeMap<String, Value> {
     let mut summary = BTreeMap::new();
     summary.insert("name".to_string(), json!(probe.config.name));
     summary.insert("url".to_string(), json!(probe.config.base_url));
+    summary.insert("discovered".to_string(), json!(probe.config.discovered));
     summary.insert(
         "status".to_string(),
         json!(probe
@@ -1004,6 +1119,13 @@ fn api_key(config: &RouterConfig) -> Option<&str> {
         .filter(|api_key| !api_key.trim().is_empty())
 }
 
+fn discovered_upstream_api_key(config: &RouterConfig) -> Option<&str> {
+    config
+        .discovered_upstream_api_key
+        .as_deref()
+        .filter(|api_key| !api_key.trim().is_empty())
+}
+
 fn is_local_bind(host: &str) -> bool {
     matches!(host, "127.0.0.1" | "::1" | "localhost")
 }
@@ -1080,7 +1202,10 @@ mod tests {
     use axum::body::{to_bytes, Body};
     use axum::http::Request;
     use axum::routing::post;
-    use lmml_api::{GpuDescriptor, ModelDescriptor};
+    use lmml_api::{
+        GpuDescriptor, LanNodeAdvertisement, ModelDescriptor, LAN_DISCOVERY_MAGIC,
+        LAN_DISCOVERY_VERSION,
+    };
     use pretty_assertions::assert_eq;
     use tower::ServiceExt;
 
@@ -1096,6 +1221,23 @@ mod tests {
                 .name,
             "192-168-50-178-8101"
         );
+    }
+
+    #[test]
+    fn upstream_key_specs_support_default_key_for_discovery() {
+        let mut upstreams = vec![UpstreamNodeConfig::new("static", "http://127.0.0.1:8101")];
+
+        let default_key = apply_upstream_key_specs(
+            &mut upstreams,
+            &[
+                "static=worker-key".to_string(),
+                "default=lan-key".to_string(),
+            ],
+        )
+        .expect("apply keys");
+
+        assert_eq!(upstreams[0].api_key.as_deref(), Some("worker-key"));
+        assert_eq!(default_key.as_deref(), Some("lan-key"));
     }
 
     #[test]
@@ -1120,6 +1262,50 @@ mod tests {
             RouterConfig::default().validate(),
             Err(RouterConfigError::NoUpstreams)
         );
+    }
+
+    #[test]
+    fn lan_discovery_requires_default_upstream_key() {
+        let config = RouterConfig {
+            discover_lan: true,
+            ..RouterConfig::default()
+        };
+
+        assert_eq!(
+            config.validate(),
+            Err(RouterConfigError::ApiKeyRequiredForLanDiscovery)
+        );
+    }
+
+    #[test]
+    fn discovered_upstreams_merge_with_static_and_static_wins() {
+        let state = RouterAppState::new(RouterConfig {
+            discover_lan: true,
+            discovered_upstream_api_key: Some("lan-key".to_string()),
+            upstreams: vec![UpstreamNodeConfig::new("node-a", "http://static:8101")],
+            ..RouterConfig::default()
+        })
+        .expect("router state");
+        let now = Instant::now();
+
+        assert!(state.record_discovered_advertisement(
+            test_advertisement("node-a", "http://discovered-a:8101"),
+            now
+        ));
+        assert!(state.record_discovered_advertisement(
+            test_advertisement("node-b", "http://discovered-b:8101"),
+            now
+        ));
+
+        let upstreams = state.effective_upstreams();
+
+        assert_eq!(upstreams.len(), 2);
+        assert_eq!(upstreams[0].name, "node-a");
+        assert_eq!(upstreams[0].base_url, "http://static:8101");
+        assert_eq!(upstreams[1].name, "node-b");
+        assert_eq!(upstreams[1].base_url, "http://discovered-b:8101");
+        assert_eq!(upstreams[1].api_key.as_deref(), Some("lan-key"));
+        assert!(upstreams[1].discovered);
     }
 
     #[tokio::test]
@@ -1311,6 +1497,39 @@ mod tests {
         assert_eq!(body["models"].as_array().expect("models").len(), 2);
         assert_eq!(body["extra"]["ready_upstream_count"], 2);
         assert_eq!(body["extra"]["upstream_count"], 3);
+    }
+
+    #[tokio::test]
+    async fn discovered_upstream_requires_authenticated_capabilities() {
+        let upstream = spawn_upstream(mock_node(
+            "node-a",
+            "qwen",
+            BackendKind::Cuda,
+            0,
+            "/v1/infer",
+        ))
+        .await;
+        let state = RouterAppState::new(RouterConfig {
+            discover_lan: true,
+            discovered_upstream_api_key: Some("worker-key".to_string()),
+            ..RouterConfig::default()
+        })
+        .expect("router state");
+        assert!(state.record_discovered_advertisement(
+            test_advertisement("node-a", &upstream),
+            Instant::now()
+        ));
+        let app = router(state);
+
+        let response = app
+            .oneshot(get_request("/v1/capabilities", None))
+            .await
+            .expect("response");
+        let body = json_body(response).await;
+
+        assert_eq!(body["models"].as_array().expect("models").len(), 0);
+        assert_eq!(body["extra"]["upstream_count"], 1);
+        assert_eq!(body["extra"]["ready_upstream_count"], 0);
     }
 
     #[tokio::test]
@@ -1641,6 +1860,24 @@ mod tests {
                     })
                 }),
             )
+    }
+
+    fn test_advertisement(node_id: &str, public_url: &str) -> LanNodeAdvertisement {
+        LanNodeAdvertisement {
+            magic: LAN_DISCOVERY_MAGIC.to_string(),
+            version: LAN_DISCOVERY_VERSION,
+            api_version: API_VERSION.to_string(),
+            node_id: node_id.to_string(),
+            node_name: node_id.to_string(),
+            public_url: public_url.to_string(),
+            backend: BackendKind::Cuda,
+            gpus: Vec::new(),
+            models: Vec::new(),
+            auth_required: true,
+            roles: vec![NodeRole::LanWorker],
+            tags: vec!["lmml".to_string()],
+            last_seen_utc: "2026-07-20T00:00:00Z".to_string(),
+        }
     }
 
     async fn spawn_upstream(router: axum::Router) -> String {

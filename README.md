@@ -330,6 +330,25 @@ Messages clients at `http://<router-ip>:8100`. LAN-visible router and worker
 routes require bearer auth unless explicitly started with the unsafe development
 escape hatch.
 
+Static upstreams can be replaced or supplemented with opt-in LAN discovery:
+
+```sh
+LMML_NODE_API_KEY=worker-key lmml-node \
+  --host 0.0.0.0 \
+  --port 8101 \
+  --public-url http://192.168.50.178:8101 \
+  --advertise-lan
+
+LMML_ROUTER_API_KEY=router-key lmml-router \
+  --host 0.0.0.0 \
+  --port 8100 \
+  --discover-lan \
+  --upstream-key default=worker-key
+```
+
+The router treats advertisements as hints only. Discovered nodes are used only
+after authenticated health, capability, and load probes pass.
+
 #### Hermes
 
 Hermes has two meanings in this repo:

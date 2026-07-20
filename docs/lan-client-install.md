@@ -207,6 +207,28 @@ chooses the ready worker with the lowest reported running request count.
 The router also exposes `GET /v1/models`, aggregated from currently routable
 workers, for clients that inspect model metadata before sending requests.
 
+For smaller LANs, static `--upstream` entries are simplest. For workstations
+that come and go, enable opt-in LAN discovery:
+
+```sh
+LMML_NODE_API_KEY=worker-key lmml-node \
+  --host 0.0.0.0 \
+  --port 8101 \
+  --public-url http://192.168.50.178:8101 \
+  --advertise-lan
+
+LMML_ROUTER_API_KEY=router-key lmml-router \
+  --host 0.0.0.0 \
+  --port 8100 \
+  --discover-lan \
+  --upstream-key default=worker-key
+```
+
+Discovered nodes must advertise authenticated APIs. The router ignores
+unauthenticated advertisements and still verifies each candidate through
+authenticated `/v1/health`, `/v1/capabilities`, and `/v1/load` probes before
+routing requests.
+
 ## Source Install
 
 Use source install when the client needs to build `llama.cpp` locally for its

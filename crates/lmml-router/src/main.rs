@@ -1,6 +1,9 @@
+use std::net::SocketAddr;
+
 use clap::Parser;
 use lmml_router::{
-    apply_upstream_key_specs, parse_upstream_spec, router, RouterAppState, RouterConfig,
+    apply_upstream_key_specs, parse_upstream_spec, router, run_lan_discovery_listener,
+    RouterAppState, RouterConfig,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -20,8 +23,7 @@ struct Args {
     #[arg(
         long = "upstream",
         env = "LMML_ROUTER_UPSTREAMS",
-        value_delimiter = ',',
-        required = true
+        value_delimiter = ','
     )]
     upstreams: Vec<String>,
     #[arg(
@@ -30,6 +32,20 @@ struct Args {
         value_delimiter = ','
     )]
     upstream_keys: Vec<String>,
+    #[arg(long)]
+    discover_lan: bool,
+    #[arg(
+        long = "lan-discovery-addr",
+        env = "LMML_ROUTER_LAN_DISCOVERY_ADDR",
+        default_value = lmml_api::LAN_DISCOVERY_MULTICAST_ADDR
+    )]
+    lan_discovery_addr: SocketAddr,
+    #[arg(
+        long = "discovered-node-ttl-ms",
+        env = "LMML_ROUTER_DISCOVERED_NODE_TTL_MS",
+        default_value_t = lmml_api::LAN_DISCOVERY_DEFAULT_TTL_MS
+    )]
+    discovered_node_ttl_ms: u64,
     #[arg(
         long = "proxy-timeout-ms",
         env = "LMML_ROUTER_PROXY_TIMEOUT_MS",
@@ -59,13 +75,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .map(|spec| parse_upstream_spec(spec))
         .collect::<Result<Vec<_>, _>>()?;
-    apply_upstream_key_specs(&mut upstreams, &args.upstream_keys)?;
+    let discovered_upstream_api_key =
+        apply_upstream_key_specs(&mut upstreams, &args.upstream_keys)?;
 
     let mut config = RouterConfig {
         host: args.host,
         port: args.port,
         public_url: args.public_url,
         upstreams,
+        discover_lan: args.discover_lan,
+        lan_discovery_addr: args.lan_discovery_addr,
+        discovered_node_ttl_ms: args.discovered_node_ttl_ms,
+        discovered_upstream_api_key,
         proxy_timeout_ms: args.proxy_timeout_ms,
         discovery_timeout_ms: args.discovery_timeout_ms,
         api_key: args.api_key,
@@ -85,6 +106,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let addr = config.socket_addr()?;
     let state = RouterAppState::new(config)?;
+    if args.discover_lan {
+        let discovery_state = state.clone();
+        tokio::spawn(async move {
+            if let Err(error) = run_lan_discovery_listener(discovery_state).await {
+                tracing::warn!(error = %error, "lmml-router LAN discovery listener stopped");
+            }
+        });
+    }
     tracing::info!(addr = %addr, "starting lmml-router API");
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, router(state))

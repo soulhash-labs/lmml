@@ -28,6 +28,24 @@ pub const HEADER_REQUEST_ID: &str = "x-lmml-request-id";
 /// Header used by nodes to identify the worker handling a response.
 pub const HEADER_NODE_ID: &str = "x-lmml-node-id";
 
+/// Default IPv4 multicast endpoint for LAN node advertisements.
+pub const LAN_DISCOVERY_MULTICAST_ADDR: &str = "239.77.77.11:8177";
+
+/// Magic marker used to identify LMML LAN advertisements.
+pub const LAN_DISCOVERY_MAGIC: &str = "lmml.node.advertisement";
+
+/// Current version of the LMML LAN advertisement payload.
+pub const LAN_DISCOVERY_VERSION: u16 = 1;
+
+/// Default interval between node LAN advertisements in milliseconds.
+pub const LAN_DISCOVERY_DEFAULT_INTERVAL_MS: u64 = 5_000;
+
+/// Default router expiry window for discovered nodes in milliseconds.
+pub const LAN_DISCOVERY_DEFAULT_TTL_MS: u64 = 30_000;
+
+/// Maximum UDP payload size accepted for LMML LAN advertisements.
+pub const MAX_LAN_ADVERTISEMENT_BYTES: usize = 60 * 1024;
+
 /// Hardware or runtime backend used by a node.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -205,6 +223,50 @@ pub struct NodeCapabilities {
     pub agentq: Option<AgentQDescriptor>,
     /// Extension map for non-breaking additions.
     pub extra: BTreeMap<String, Value>,
+}
+
+/// UDP multicast advertisement emitted by `lmml-node` for LAN discovery.
+///
+/// Routers use this payload only as a discovery hint. A node is not routable
+/// until the router verifies the advertised URL with authenticated
+/// `/v1/health`, `/v1/capabilities`, and `/v1/load` probes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LanNodeAdvertisement {
+    /// Magic marker used to reject unrelated UDP payloads.
+    pub magic: String,
+    /// Advertisement wire format version.
+    pub version: u16,
+    /// LMML node HTTP API version.
+    pub api_version: String,
+    /// Node identifier.
+    pub node_id: String,
+    /// Human-readable node name.
+    pub node_name: String,
+    /// Public base URL the router should probe, for example `http://host:8101`.
+    pub public_url: String,
+    /// Primary backend.
+    pub backend: BackendKind,
+    /// GPU descriptors.
+    pub gpus: Vec<GpuDescriptor>,
+    /// Models known to this node.
+    pub models: Vec<ModelDescriptor>,
+    /// Whether protected node routes require bearer authentication.
+    pub auth_required: bool,
+    /// Roles this node can serve.
+    pub roles: Vec<NodeRole>,
+    /// Free-form tags used for routing.
+    pub tags: Vec<String>,
+    /// UTC time when the node emitted this advertisement.
+    pub last_seen_utc: String,
+}
+
+impl LanNodeAdvertisement {
+    /// Return true when this payload is for the current LMML discovery format.
+    pub fn is_current_lmml_advertisement(&self) -> bool {
+        self.magic == LAN_DISCOVERY_MAGIC
+            && self.version == LAN_DISCOVERY_VERSION
+            && self.api_version == API_VERSION
+    }
 }
 
 /// Health response returned by `GET /v1/health`.
@@ -505,6 +567,32 @@ mod tests {
         assert_eq!(value["llama_cpp_commit"], "abc123");
         assert_eq!(value["auth_required"], true);
         assert_eq!(value["supports_anthropic_messages"], true);
+    }
+
+    #[test]
+    fn lan_advertisement_round_trips() {
+        let advertisement = LanNodeAdvertisement {
+            magic: LAN_DISCOVERY_MAGIC.to_string(),
+            version: LAN_DISCOVERY_VERSION,
+            api_version: API_VERSION.to_string(),
+            node_id: "node-a".to_string(),
+            node_name: "Node A".to_string(),
+            public_url: "http://192.168.1.12:8101".to_string(),
+            backend: BackendKind::Cuda,
+            gpus: Vec::new(),
+            models: Vec::new(),
+            auth_required: true,
+            roles: vec![NodeRole::LanWorker],
+            tags: vec!["lmml".to_string()],
+            last_seen_utc: "2026-07-20T00:00:00Z".to_string(),
+        };
+
+        let text = serde_json::to_string(&advertisement).expect("serialize advertisement");
+        let decoded: LanNodeAdvertisement =
+            serde_json::from_str(&text).expect("deserialize advertisement");
+
+        assert_eq!(decoded, advertisement);
+        assert!(decoded.is_current_lmml_advertisement());
     }
 
     #[test]
