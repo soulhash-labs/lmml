@@ -1034,6 +1034,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "lmml-router"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "clap",
+ "lmml-api",
+ "pretty_assertions",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "time",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "lmml-server"
 version = "0.1.0"
 dependencies = [

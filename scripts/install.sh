@@ -297,9 +297,19 @@ fi
 install_binary_and_uninstaller() {
   binary=$1
   uninstaller=$2
+  node_binary=${3:-}
+  router_binary=${4:-}
   mkdir -p "$install_dir"
   cp "$binary" "$install_dir/lmml"
   chmod 755 "$install_dir/lmml"
+  if [ -n "$node_binary" ]; then
+    cp "$node_binary" "$install_dir/lmml-node"
+    chmod 755 "$install_dir/lmml-node"
+  fi
+  if [ -n "$router_binary" ]; then
+    cp "$router_binary" "$install_dir/lmml-router"
+    chmod 755 "$install_dir/lmml-router"
+  fi
   if [ -n "$uninstaller" ]; then
     cp "$uninstaller" "$install_dir/lmml-uninstall"
     chmod 755 "$install_dir/lmml-uninstall"
@@ -318,8 +328,16 @@ install_binary_mode() {
   if [ -z "$binary" ]; then
     fail "lmml binary not found in release archive"
   fi
+  node_binary=$(find "$TMP_DIR/extract" -type f -name lmml-node | head -n 1)
+  router_binary=$(find "$TMP_DIR/extract" -type f -name lmml-router | head -n 1)
+  if [ -z "$node_binary" ]; then
+    fail "lmml-node binary not found in release archive"
+  fi
+  if [ -z "$router_binary" ]; then
+    fail "lmml-router binary not found in release archive"
+  fi
   uninstaller=$(find "$TMP_DIR/extract" -type f -path '*/scripts/uninstall.sh' | head -n 1)
-  install_binary_and_uninstaller "$binary" "$uninstaller"
+  install_binary_and_uninstaller "$binary" "$uninstaller" "$node_binary" "$router_binary"
 }
 
 install_source_mode() {
@@ -342,13 +360,21 @@ install_source_mode() {
     fail "lmml source tree not found in source archive"
   fi
   source_dir=$(dirname "$(dirname "$(dirname "$source_dir")")")
-  (cd "$source_dir" && cargo build --release -p lmml-tui)
+  (cd "$source_dir" && cargo build --release -p lmml-tui -p lmml-node -p lmml-router)
   binary="$source_dir/target/release/lmml"
   if [ ! -x "$binary" ]; then
     fail "source build completed but lmml binary was not produced"
   fi
+  node_binary="$source_dir/target/release/lmml-node"
+  router_binary="$source_dir/target/release/lmml-router"
+  if [ ! -x "$node_binary" ]; then
+    fail "source build completed but lmml-node binary was not produced"
+  fi
+  if [ ! -x "$router_binary" ]; then
+    fail "source build completed but lmml-router binary was not produced"
+  fi
   uninstaller="$source_dir/scripts/uninstall.sh"
-  install_binary_and_uninstaller "$binary" "$uninstaller"
+  install_binary_and_uninstaller "$binary" "$uninstaller" "$node_binary" "$router_binary"
 }
 
 case "$INSTALL_MODE" in
@@ -376,6 +402,8 @@ echo
 echo "  Get started:"
 echo "    lmml doctor       — check your system"
 echo "    lmml              — launch the TUI"
+echo "    lmml-node         — expose one machine as an LMML worker"
+echo "    lmml-router       — route requests across LMML workers"
 
 if [ "$LMML_PROFILE_HINT" = "orion-qwen35-4b-q8" ]; then
   echo

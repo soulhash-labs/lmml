@@ -2,15 +2,16 @@
 set -eu
 
 if [ "${PREFIX:-}" ]; then
-  binary="$PREFIX/bin/lmml"
-  uninstaller="$PREFIX/bin/lmml-uninstall"
+  bin_dir="$PREFIX/bin"
 elif [ "$(id -u)" -eq 0 ]; then
-  binary="/usr/local/bin/lmml"
-  uninstaller="/usr/local/bin/lmml-uninstall"
+  bin_dir="/usr/local/bin"
 else
-  binary="$HOME/.local/bin/lmml"
-  uninstaller="$HOME/.local/bin/lmml-uninstall"
+  bin_dir="$HOME/.local/bin"
 fi
+binary="$bin_dir/lmml"
+node_binary="$bin_dir/lmml-node"
+router_binary="$bin_dir/lmml-router"
+uninstaller="$bin_dir/lmml-uninstall"
 
 prompt_yes() {
   question=$1
@@ -27,6 +28,8 @@ prompt_yes() {
 
 if prompt_yes "Uninstall lmml from $binary?"; then
   rm -f "$binary"
+  rm -f "$node_binary"
+  rm -f "$router_binary"
   rm -f "$uninstaller"
 else
   echo "Uninstall cancelled."

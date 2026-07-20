@@ -159,6 +159,54 @@ curl -fsS http://127.0.0.1:8080/health
 Use `0.0.0.0:8080` only on a trusted LAN. Add firewall rules or keep the host on
 `127.0.0.1` when the network is shared or untrusted.
 
+## LAN AI Router
+
+`lmml-router` lets one machine act as the LAN coordinator while GPU machines
+serve as LMML workers. Use this when agents should send requests to one endpoint
+and let LMML pick between a workstation GPU and a BC-250 node.
+
+Each worker needs a running `llama-server` and a running `lmml-node`:
+
+```sh
+LMML_NODE_API_KEY=worker-key lmml-node \
+  --host 0.0.0.0 \
+  --port 8101 \
+  --node-name workstation \
+  --llama-url http://127.0.0.1:1200
+
+LMML_NODE_API_KEY=worker-key lmml-node \
+  --host 0.0.0.0 \
+  --port 8101 \
+  --node-name bc250 \
+  --llama-url http://127.0.0.1:8080
+```
+
+Run the router on the coordinator:
+
+```sh
+LMML_ROUTER_API_KEY=router-key lmml-router \
+  --host 0.0.0.0 \
+  --port 8100 \
+  --upstream workstation=http://192.168.50.178:8101 \
+  --upstream bc250=http://192.168.50.176:8101 \
+  --upstream-key workstation=worker-key \
+  --upstream-key bc250=worker-key
+```
+
+Agents and clients can then use:
+
+```text
+OpenAI-compatible base URL: http://<router-ip>:8100/v1
+Anthropic Messages base URL: http://<router-ip>:8100
+LMML-native inference:        POST http://<router-ip>:8100/v1/infer
+```
+
+Router selection is intentionally conservative: it probes worker health,
+capabilities, and load; filters by supported endpoint and requested model; then
+chooses the ready worker with the lowest reported running request count.
+The router also exposes `GET /v1/models`, aggregated from currently routable
+workers, for clients that inspect model metadata before sending requests.
+
 ## Source Install
 
 Use source install when the client needs to build `llama.cpp` locally for its

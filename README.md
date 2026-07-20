@@ -289,6 +289,47 @@ maps OpenAI tool calls back to Anthropic `tool_use` blocks, and synthesizes
 Anthropic SSE events when `"stream": true`. Image and document content blocks
 are intentionally rejected until lmml has validated multimodal routing.
 
+#### LAN Router / Load Balancer
+
+For a LAN with multiple GPU machines, run `lmml-node` on each worker and
+`lmml-router` on the coordinator. The router exposes the same useful endpoints
+to clients and selects a ready upstream by route support, requested model, and
+current LMML load metadata. It also aggregates `GET /v1/models` from currently
+routable workers so OpenAI-compatible clients can inspect the coordinator as
+their base URL.
+
+Example with a main workstation and a BC-250 worker:
+
+```sh
+# Workstation worker, usually near the TUI-managed llama-server on port 1200.
+LMML_NODE_API_KEY=worker-key lmml-node \
+  --host 0.0.0.0 \
+  --port 8101 \
+  --node-name workstation \
+  --llama-url http://127.0.0.1:1200
+
+# BC-250 worker, usually beside a Vulkan llama-server on port 8080.
+LMML_NODE_API_KEY=worker-key lmml-node \
+  --host 0.0.0.0 \
+  --port 8101 \
+  --node-name bc250 \
+  --llama-url http://127.0.0.1:8080
+
+# Coordinator router.
+LMML_ROUTER_API_KEY=router-key lmml-router \
+  --host 0.0.0.0 \
+  --port 8100 \
+  --upstream workstation=http://192.168.50.178:8101 \
+  --upstream bc250=http://192.168.50.176:8101 \
+  --upstream-key workstation=worker-key \
+  --upstream-key bc250=worker-key
+```
+
+Point OpenAI-compatible clients at `http://<router-ip>:8100/v1` and Anthropic
+Messages clients at `http://<router-ip>:8100`. LAN-visible router and worker
+routes require bearer auth unless explicitly started with the unsafe development
+escape hatch.
+
 #### Hermes
 
 Hermes has two meanings in this repo:

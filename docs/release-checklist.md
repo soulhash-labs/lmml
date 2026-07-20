@@ -21,7 +21,7 @@ cargo test --workspace
 tests/integration/script_syntax.sh
 tests/integration/preflight.sh
 tests/integration/signed_checksums.sh
-cargo build --release -p lmml-tui
+cargo build --release -p lmml-tui -p lmml-node -p lmml-router
 ldd target/release/lmml
 scripts/package-release.sh
 SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) scripts/package-release.sh
@@ -72,10 +72,10 @@ curl -fsSL http://192.168.1.100:8000/preflight.sh | LMML_INSTALL_MODE=source LMM
 curl -fsSL http://192.168.1.100:8000/install.sh | BASE_URL=http://192.168.1.100:8000 INSTALL_MODE=source LMML_GPU_MODE=cpu-only bash
 ```
 
-The installer must verify SHA256 checksums, install `lmml` and `lmml-uninstall`,
-run `lmml doctor`, and print the success summary only when doctor passes. If
-doctor reports missing hard prerequisites, the installer must exit non-zero with
-the prerequisite error visible.
+The installer must verify SHA256 checksums, install `lmml`, `lmml-node`,
+`lmml-router`, and `lmml-uninstall`, run `lmml doctor`, and print the success
+summary only when doctor passes. If doctor reports missing hard prerequisites,
+the installer must exit non-zero with the prerequisite error visible.
 
 The LAN HTTP checksum is an integrity check, not authenticity. It detects
 corrupt or incomplete downloads from a trusted release host, but it does not
@@ -142,6 +142,8 @@ For each target:
 TARGET_TRIPLE=<target> scripts/package-release.sh
 tar -tzf dist/lmml-0.1.0-<target>.tar.gz
 ```
+
+The archive must include `lmml`, `lmml-node`, and `lmml-router`.
 
 Then install on matching hardware/OS and run:
 

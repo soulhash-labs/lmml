@@ -27,9 +27,11 @@ rm -rf "$STAGE_DIR"
 rm -rf "$SOURCE_STAGE_DIR"
 mkdir -p "$STAGE_DIR/scripts"
 
-cargo build --release -p lmml-tui --target "$TARGET_TRIPLE"
+cargo build --release -p lmml-tui -p lmml-node -p lmml-router --target "$TARGET_TRIPLE"
 
 cp "$ROOT_DIR/target/$TARGET_TRIPLE/release/lmml" "$STAGE_DIR/lmml"
+cp "$ROOT_DIR/target/$TARGET_TRIPLE/release/lmml-node" "$STAGE_DIR/lmml-node"
+cp "$ROOT_DIR/target/$TARGET_TRIPLE/release/lmml-router" "$STAGE_DIR/lmml-router"
 cp "$ROOT_DIR/README.md" "$STAGE_DIR/README.md"
 cp "$ROOT_DIR/LICENSE" "$STAGE_DIR/LICENSE"
 cp "$ROOT_DIR/scripts/install.sh" "$STAGE_DIR/scripts/install.sh"
@@ -48,7 +50,7 @@ rustc=$(rustc --version)
 source_date_epoch=$SOURCE_DATE_EPOCH
 EOF
 
-chmod 755 "$STAGE_DIR/lmml" "$STAGE_DIR/scripts/install.sh" "$STAGE_DIR/scripts/preflight.sh" "$STAGE_DIR/scripts/uninstall.sh"
+chmod 755 "$STAGE_DIR/lmml" "$STAGE_DIR/lmml-node" "$STAGE_DIR/lmml-router" "$STAGE_DIR/scripts/install.sh" "$STAGE_DIR/scripts/preflight.sh" "$STAGE_DIR/scripts/uninstall.sh"
 chmod 644 "$STAGE_DIR/README.md" "$STAGE_DIR/LICENSE" "$STAGE_DIR/RELEASE-METADATA"
 find "$STAGE_DIR" -type d -exec chmod 755 {} +
 
