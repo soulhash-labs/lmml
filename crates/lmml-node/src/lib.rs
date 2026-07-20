@@ -75,6 +75,8 @@ pub struct NodeConfig {
     pub roles: Vec<NodeRole>,
     /// Optional AgentQ bridge advertisement. Routes are not enabled in Phase 2B.
     pub agentq: Option<AgentQDescriptor>,
+    /// Skip host system probing and serve conservative unknown capabilities.
+    pub skip_system_probe: bool,
 }
 
 impl NodeConfig {
@@ -122,6 +124,7 @@ impl Default for NodeConfig {
             tags: vec!["lmml".to_string()],
             roles: vec![NodeRole::LanWorker],
             agentq: None,
+            skip_system_probe: false,
         }
     }
 }
@@ -166,7 +169,11 @@ impl NodeSnapshot {
     #[tracing::instrument(skip(config), fields(node_id = %config.node_id))]
     pub async fn detect(config: NodeConfig) -> Result<Self, NodeConfigError> {
         config.validate()?;
-        let system = SystemProfile::detect().await;
+        let system = if config.skip_system_probe {
+            SystemProfile::skipped_probe()
+        } else {
+            SystemProfile::detect().await
+        };
         let models = scan_models(&config.model_dirs).await;
         Ok(Self {
             config,

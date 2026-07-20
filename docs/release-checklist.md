@@ -23,6 +23,7 @@ tests/integration/preflight.sh
 tests/integration/signed_checksums.sh
 cargo build --release -p lmml-tui -p lmml-node -p lmml-router
 ldd target/release/lmml
+cargo test -p lmml-router --test node_router_chain
 scripts/package-release.sh
 SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) scripts/package-release.sh
 ./target/release/lmml doctor

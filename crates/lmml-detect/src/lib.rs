@@ -143,6 +143,56 @@ impl SystemProfile {
         detect_with_runner(&runner, disk_path).await
     }
 
+    /// Return a conservative profile without running host hardware probes.
+    ///
+    /// This exists for deterministic headless API tests and service startup
+    /// paths where the process should bind before slow or brittle probe tools
+    /// can block API availability.
+    pub fn skipped_probe() -> SystemProfile {
+        let disk_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        SystemProfile {
+            compiler: None,
+            cmake: None,
+            git: None,
+            cuda: CudaCompatibility::NvccMissing,
+            gpus: Vec::new(),
+            gpu_probe_error: Some("system probe skipped".to_string()),
+            nvidia_devices: NvidiaDeviceNodes {
+                control: false,
+                uvm: false,
+                gpu_count: 0,
+                errors: Vec::new(),
+            },
+            sccache: None,
+            metal: MetalSupport {
+                available: false,
+                displays: Vec::new(),
+            },
+            vulkan: VulkanSupport {
+                available: false,
+                devices: Vec::new(),
+            },
+            cpu: CpuFeatures {
+                model: "probe skipped".to_string(),
+                cores: 1,
+                threads: 1,
+                avx: false,
+                avx2: false,
+                avx512: false,
+                neon: false,
+                features: Vec::new(),
+            },
+            memory: MemInfo {
+                total_mb: 0,
+                available_mb: 0,
+            },
+            disk: DiskInfo {
+                available_bytes: 0,
+                path: disk_path,
+            },
+        }
+    }
+
     /// The recommended llama.cpp build backend for this machine.
     pub fn recommended_backend(&self) -> BuildBackend {
         match &self.cuda {

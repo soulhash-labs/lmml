@@ -39,6 +39,8 @@ struct Args {
     unsafe_allow_lan_without_auth: bool,
     #[arg(long = "tag")]
     tags: Vec<String>,
+    #[arg(long, env = "LMML_NODE_SKIP_PROBE")]
+    skip_probe: bool,
 }
 
 #[tokio::main]
@@ -54,6 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         enable_server_control: args.enable_server_control,
         api_key: args.api_key,
         allow_unsafe_lan_without_auth: args.unsafe_allow_lan_without_auth,
+        skip_system_probe: args.skip_probe,
         ..NodeConfig::default()
     };
 
