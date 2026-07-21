@@ -1,267 +1,259 @@
 # lmml
 
-**Local Model Manager for llama.cpp.**
+<p align="center">
+  <strong>🧭 Local Model Manager for llama.cpp</strong><br />
+  Run local AI on the machines you already own.
+</p>
 
-lmml is a Rust terminal UI for local AI: detect hardware, build llama.cpp,
-manage GGUF models, and run an OpenAI-compatible inference server for humans,
-scripts, and coding agents.
+<p align="center">
+  <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" /></a>
+  <img alt="Rust" src="https://img.shields.io/badge/Rust-local--AI-orange.svg" />
+  <img alt="llama.cpp" src="https://img.shields.io/badge/runtime-llama.cpp-green.svg" />
+  <img alt="LAN ready" src="https://img.shields.io/badge/LAN-router%20%2B%20workers-purple.svg" />
+</p>
 
-Current v0.1.0 release scope is the tested Linux x86_64 LAN install flow. Other
-target tarballs should be built and validated on matching builders before they
-are advertised as release-ready.
+**Local AI should be easier to own, inspect, and route.**
 
-This is a local/LAN release scope, not a broad production-ready claim. GPU
-acceleration is the primary path; intentional CPU-only nodes are supported by
-explicit opt-in during preflight/install.
+`lmml` helps developers, researchers, and small teams run GGUF models with
+`llama.cpp` without hand-assembling hardware probes, build flags, runtime
+profiles, model paths, OpenAI-compatible endpoints, and LAN routing.
 
-## ✨ What lmml Gives You
+It is an open-source Rust toolkit from SoulHash for local model operations:
+hardware detection, `llama.cpp` builds, GGUF model management, server lifecycle,
+agent/client wiring, LAN node APIs, and a lightweight router for multiple idle
+GPU machines.
 
-- 🧭 Hardware-aware llama.cpp builds for NVIDIA CUDA, AMD ROCm/HIP, Intel,
-  Vulkan, Metal, and CPU fallback paths.
-- 🧠 Built-in model-family guidance for Qwen3.5, Qwen3.6, Gemma 4, and Hermes 4.
-- ⚡ Runtime profiles for validated local-agent setups, including Qwen fanout and
-  Gemma 4 MTP speculative decoding.
-- 🔌 OpenAI-compatible local serving for OpenCode, LAN agents, shell scripts, and
-  proxy/gateway integrations.
-- 🔐 Local-first defaults: `127.0.0.1` serving unless you intentionally expose a
-  LAN node.
+> **One-line value proposition:** `lmml` helps local-AI builders deploy and
+> coordinate `llama.cpp` inference without fragile shell glue by using a
+> hardware-aware TUI, tested runtime profiles, OpenAI/Anthropic-compatible
+> adapters, and opt-in LAN worker discovery.
 
-## 🚀 How To Use
-
-Start with [`docs/how-to-use.md`](docs/how-to-use.md). It covers the human TUI
-workflow, agent/harness integration, runtime profiles, LAN install, and common
-troubleshooting. For training-specific workflows, use
-[`docs/training-how-to-use.md`](docs/training-how-to-use.md).
-For the built-in NVIDIA/AMD/Intel local-AI GPU catalog, use
-[`docs/hardware-gpu-support.md`](docs/hardware-gpu-support.md).
-For the built-in Qwen3.5/Qwen3.6/Gemma 4/Hermes 4 model-family catalog, use
-[`docs/llm-model-support.md`](docs/llm-model-support.md).
-
-## 📦 Install
-
-### One-line install (Linux / macOS)
-
-```sh
-curl -fsSL https://your-lan-or-github/install.sh | sh
+```mermaid
+flowchart LR
+    Human["🧑‍💻 Human / Developer"] --> Client["🔌 OpenCode, Claude Code, scripts, agents"]
+    Client --> API["🌐 OpenAI or Anthropic-compatible API"]
+    API --> LMML["🧭 lmml"]
+    LMML --> Llama["🦙 llama.cpp / llama-server"]
+    Llama --> GPU["🖥️ Local GPU or LAN worker"]
 ```
 
-### LAN install
+## 🧩 The Challenge
 
-If you are serving lmml on a local network:
+You are building with local models because ownership, latency, cost control, and
+inspectability matter. The hard part is not usually one command; it is keeping
+the whole path dependable:
+
+- choosing the right backend for CUDA, ROCm/HIP, Vulkan, Metal, Intel, or CPU;
+- compiling a recent `llama.cpp` build with the right flags;
+- matching GGUF models to VRAM, context, KV cache, draft heads, and chat format;
+- exposing a safe local endpoint for tools such as OpenCode, Claude Code,
+  Hermes-style clients, scripts, and agents;
+- using idle LAN GPUs without turning every workstation into a manual snowflake.
+
+The common failure mode is hidden complexity: stale binaries, wrong GPU arch
+flags, broken model templates, context settings that exhaust VRAM, missing auth
+on LAN routes, and agent clients pointed at the wrong endpoint.
+
+## 🛠️ The Solution
+
+SoulHash built `lmml` as the guide layer around `llama.cpp`.
+
+`lmml` does not replace `llama.cpp`; it makes the operational path repeatable.
+It detects the machine, builds or installs the runtime, tracks local GGUF files,
+starts `llama-server`, exposes compatibility APIs, and can coordinate multiple
+LAN workers through `lmml-node` and `lmml-router`.
+
+The customer owns the mission: run useful local AI infrastructure with control.
+`lmml` supplies the leverage: sane defaults, clear diagnostics, and tested
+integration paths.
+
+## ✨ Why It Matters
+
+Local AI should not require surrendering ownership to a remote platform or
+memorising every `llama-server` flag by hand. With `lmml`, you can move from
+"I have a GPU and a model file" to "I have a working local endpoint for humans,
+scripts, and agents" with fewer undocumented assumptions.
+
+The practical value is simple:
+
+- **Developers** get a local OpenAI-compatible server for coding agents and
+  automation.
+- **Researchers** get a repeatable way to test GGUF models and llama.cpp
+  features on real hardware.
+- **Small teams** get a LAN-first path for using idle workstation GPUs before
+  buying more infrastructure.
+- **Operators** get explicit security boundaries: localhost by default, bearer
+  auth for LAN worker/router APIs, and opt-in discovery.
+
+## ✅ Current Status
+
+`lmml` is **open source** and in **active development**.
+
+Implemented and tested today:
+
+- Rust TUI binary: `lmml`.
+- Worker API binary: `lmml-node`.
+- LAN routing binary: `lmml-router`.
+- Linux x86_64 LAN install/release flow for v0.1.0.
+- Source-build bootstrap for development and host-specific builds.
+- OpenAI-compatible `/v1/chat/completions`, `/v1/embeddings`, and `/v1/models`
+  pass-throughs.
+- Anthropic `/v1/messages` compatibility endpoint through `lmml-node` and
+  `lmml-router`.
+- Model-family guidance for Qwen3.5, Qwen3.6, Gemma 4, and Hermes 4.
+- Runtime profile support for validated Qwen, Gemma MTP, and BC-250 Vulkan
+  scenarios.
+- Opt-in LAN node discovery and authenticated router-to-worker probing.
+
+Experimental or host-dependent:
+
+- Native `llama.cpp` training workflows through `llama-finetune`.
+- Gemma 4 MTP speculative decoding profiles, which require a matching draft
+  model and recent `llama.cpp` support.
+- Multimodal model operation, which requires the correct `mmproj` file and
+  validated client routing.
+- Non-Linux release artifacts until built and tested on matching hosts.
+
+Not part of this project:
+
+- No proprietary SoulHash or AgentQ engine code.
+- No quantum technology claims or quantum-specific implementation.
+- No bundled model weights.
+
+## 🚀 Core Capabilities
+
+**🧭 Hardware-aware setup:** Detects GPU, CPU, OS, compiler, and runtime tools so
+you can build or install `llama.cpp` with fewer architecture mismatches.
+
+**🖥️ TUI-driven local operations:** Gives humans a terminal interface to detect,
+build, scan models, start/stop the server, inspect logs, and switch profiles.
+
+**🧠 GGUF model management:** Scans local model directories, tracks aliases, reads
+basic metadata, and maps known model families to safer runtime guidance.
+
+**🔌 Agent-ready serving:** Runs local `llama-server` endpoints for OpenCode,
+Claude Code, Hermes-style clients, shell scripts, and OpenAI-compatible tools.
+
+**💬 Anthropic compatibility:** Adds `/v1/messages` translation for clients that
+speak Anthropic-style Messages APIs while your backend remains `llama.cpp`.
+
+**🌐 LAN worker routing:** Lets one coordinator route requests across authenticated
+`lmml-node` workers, including opt-in multicast discovery for idle GPU machines.
+
+**⚙️ Runtime profiles:** Stores repeatable profile settings for context size,
+parallelism, GPU layers, KV cache, draft-model flags, sampling, and server args.
+
+**🧪 Training command support:** Wraps current upstream `llama-finetune` behavior
+without pretending unsupported flags such as `--lora-out` exist unless the local
+binary advertises them.
+
+## 🧭 How It Works
+
+1. **Start:** Install `lmml`, or build it from source.
+2. **Activate:** Run the TUI, build/probe `llama.cpp`, scan GGUF models, and
+   start a local server.
+3. **Advance:** Wire coding agents or LAN workers to the local endpoint, then
+   route requests through `lmml-node` or `lmml-router` as your setup grows.
+
+## ⚡ Quick Start
+
+### Build From Source
+
+```sh
+git clone https://github.com/soulhash-labs/lmml.git
+cd lmml
+cargo build --release -p lmml-tui -p lmml-node -p lmml-router
+./target/release/lmml doctor
+./target/release/lmml
+```
+
+### Binary Or LAN Install
+
+The release package includes `lmml`, `lmml-node`, `lmml-router`, `install.sh`,
+`preflight.sh`, and `uninstall.sh`.
+
+Serve the `dist/` directory from a trusted LAN release host:
+
+```sh
+cd dist
+python3 -m http.server 8000
+```
+
+Install from another LAN machine:
 
 ```sh
 curl -fsSL http://192.168.1.100:8000/install.sh | BASE_URL=http://192.168.1.100:8000 sh
 ```
 
-Serve the packaged `dist/` directory from the release host:
+Run after install:
 
 ```sh
-cd dist && python3 -m http.server 8000
+lmml doctor
+lmml
 ```
 
-The LAN HTTP flow verifies `SHA256SUMS` to catch corrupt or incomplete
-downloads. It is not tamper-proof: anyone who can alter the HTTP response can
-alter both the tarball and checksum file. Treat it as an integrity check for a
-trusted LAN release host unless you require signed checksum verification.
-
-For a future public or non-local signed release, publish `SHA256SUMS.minisig`
-from `scripts/package-release.sh` and require minisign verification during
-install:
+The LAN HTTP flow verifies `SHA256SUMS` for corruption detection. For untrusted
+networks or public releases, require signed checksum verification:
 
 ```sh
-curl -fsSL https://release.example/install.sh | LMML_CHECKSUM_VERIFY=required LMML_MINISIGN_PUBLIC_KEY='RW...' sh
+curl -fsSL https://release.example/install.sh | \
+  LMML_CHECKSUM_VERIFY=required \
+  LMML_MINISIGN_PUBLIC_KEY='RW...' \
+  sh
 ```
 
-### Preflight and source-build bootstrap
+### Source-Build Bootstrap
 
-The default install path above uses the verified binary tarball. For a
-source-build LAN/dev bootstrap, run preflight first and then opt into source
-mode explicitly:
+Use source mode when the target machine must build `llama.cpp` locally, such as
+Vulkan-only or unusual GPU hosts:
 
 ```sh
 curl -fsSL http://192.168.1.100:8000/preflight.sh | LMML_INSTALL_MODE=source bash
-curl -fsSL http://192.168.1.100:8000/install.sh | BASE_URL=http://192.168.1.100:8000 INSTALL_MODE=source bash
+curl -fsSL http://192.168.1.100:8000/install.sh | \
+  BASE_URL=http://192.168.1.100:8000 \
+  INSTALL_MODE=source \
+  bash
 ```
 
-GPU acceleration is primary and first-class in preflight. Intentional CPU-only
-nodes must opt in explicitly:
+For intentional CPU-only nodes:
 
 ```sh
-curl -fsSL http://192.168.1.100:8000/preflight.sh | LMML_INSTALL_MODE=source LMML_GPU_MODE=cpu-only bash
-curl -fsSL http://192.168.1.100:8000/install.sh | BASE_URL=http://192.168.1.100:8000 INSTALL_MODE=source LMML_GPU_MODE=cpu-only bash
+curl -fsSL http://192.168.1.100:8000/preflight.sh | \
+  LMML_INSTALL_MODE=source \
+  LMML_GPU_MODE=cpu-only \
+  bash
 ```
 
-Narrow apt fixes for compiler/CMake/Git/curl/sccache are opt-in. On Ubuntu
-CUDA 11.x hosts with GCC 13+, preflight also recommends `g++-11` because
-CUDA 11's device compiler can fail on glibc `_FloatN` headers unless CMake is
-configured with `-DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-11`:
+## 🔌 Agent And Client Wiring
 
-```sh
-curl -fsSL http://192.168.1.100:8000/preflight.sh | LMML_INSTALL_MODE=source LMML_FIX_DEPS=1 bash
-```
+### OpenCode
 
-For a Quadro M6000 24GB target running Qwen3.5 9B Q8, the piped installer can
-print the proposed fanout profile math after install:
-
-```sh
-curl -fsSL http://192.168.1.100:8000/install.sh | BASE_URL=http://192.168.1.100:8000 LMML_PROFILE_HINT=quadro-m6000-qwen35-9b-q8 sh
-```
-
-That hint documents:
-
-```text
-llama-server ctx_size: 262144 tokens
-OpenCode compaction.reserved: 49152 tokens for 4-slot fanout
-per-slot context at parallel 4: 65536 tokens
-recommended subagent soft cap: 32768 tokens
-recommended extra_args: ["--parallel", "4", "--slot-save-path", "/home/angelo/.local/share/lmml/llama-slots"]
-Qwen thinking sampling: temperature=0.6 top_p=0.95 top_k=20 min_p=0
-Qwen non-thinking sampling: temperature=0.7 top_p=0.8 top_k=20 min_p=0
-minimum context for thinking: 128000 tokens
-vision/video support: requires matching mmproj vision encoder beside the GGUF
-MTP support: supported by model, keep disabled until profiled
-```
-
-The Qwen3.5 9B model is natively multimodal, but llama.cpp cannot accept
-image/video inputs from the text GGUF alone. Put the matching `mmproj` vision
-encoder file beside the main GGUF and configure lmml/llama-server to load both
-files before claiming vision support on a LAN node.
-
-For the validated Orion GTX 1080 Ti 11GB + Qwen3.5 4B Q8 deep profile:
-
-```sh
-curl -fsSL http://192.168.1.100:8000/install.sh | BASE_URL=http://192.168.1.100:8000 LMML_PROFILE_HINT=orion-qwen35-4b-q8 sh
-```
-
-That hint documents the current local OpenCode/lmml route:
-
-```text
-llama-server ctx_size: 262144 tokens
-OpenCode compaction.reserved: 65536 tokens
-OpenCode usable input limit: 196608 tokens
-OpenCode output limit: 18000 tokens
-operator compact target: 90000-120000 live prompt tokens
-operator red zone: 120000-170000 live prompt tokens
-operator hard compress/reject: 170000-190000 live prompt tokens
-OpenCode provider timeout: 7200 seconds
-OpenCode stream chunk timeout: 2400 seconds
-llama-server parallel slots: 1
-recommended extra_args: ["--parallel", "1", "--slot-save-path", "/home/angelo/.local/share/lmml/llama-slots"]
-recommended KV/cache args: ["-ctk", "q8_0", "-ctv", "q8_0", "--cache-ram", "4096"]
-```
-
-For a headless AMD BC-250 Vulkan target running Qwen3.5 9B Q4_K_M, use source
-install so llama.cpp builds with Vulkan/RADV on that board:
-
-```sh
-curl -fsSL http://192.168.1.100:8000/preflight.sh | LMML_INSTALL_MODE=source LMML_GPU_MODE=vulkan bash
-curl -fsSL http://192.168.1.100:8000/install.sh | BASE_URL=http://192.168.1.100:8000 INSTALL_MODE=source LMML_GPU_MODE=vulkan LMML_PROFILE_HINT=bc250-qwen35-9b-q4km-vulkan sh
-```
-
-That hint documents the headless LAN profile:
-
-```text
-Ubuntu Server / Debian headless: ~6-8GB
-llama.cpp source + binaries: ~1GB
-Qwen3.5 9B Q4_K_M GGUF: ~5.5GB
-Profile: bc250-qwen9b-q4km-vulkan
-Host: 0.0.0.0
-Port: 8080
-Context: 4096
-GPU layers: 99
-Threads: 6
-Backend: Vulkan/RADV
-```
-
-### After install
-
-```sh
-lmml doctor    # check your system
-lmml           # launch the TUI
-```
-
-For the full training procedure, dataset formatting examples, agent checklist,
-and VRAM guidance, see [`docs/training-how-to-use.md`](docs/training-how-to-use.md).
-
-Experimental fine-tuning uses llama.cpp's native C++ training binaries, not a
-Python/PyTorch training script. Current upstream `llama-finetune` performs
-full-model GGUF fine-tuning: lmml maps `--train-data` to `--file`, maps
-`--model-base` to `--model` unless the binary advertises `--model-base`, and
-passes `--output` through as the fine-tuned GGUF output:
-
-```sh
-lmml train \
-  --model-base ./models/Qwen3.5-9B-BF16.gguf \
-  --train-data ./data/train.txt \
-  --output ./models/Qwen3.5-9B-Finetuned.gguf \
-  -- --epochs 3 --ctx-size 512 --batch-size 4 --n-gpu-layers 32
-```
-
-Use an F16/BF16 base GGUF for training, then quantize the output GGUF afterward
-with `llama-quantize` if you need Q8/Q4 deployment artifacts. lmml only enables
-custom-fork adapter flags such as `--lora-out`, `--checkpoint-in`, and
-`--checkpoint-out` when `llama-finetune --help` explicitly advertises them.
-
-The installer runs `lmml doctor` before reporting success. Missing hard
-prerequisites such as a compiler, CMake, Git, or required disk space cause the
-install command to fail clearly even though the binary has already been copied.
-Fix the reported prerequisites and rerun `lmml doctor`.
-
-### Uninstall
-
-```sh
-curl -fsSL https://your-lan-or-github/uninstall.sh | sh
-```
-
-Or, after installing:
-
-```sh
-lmml-uninstall
-```
-
-## Build From Source
-
-```sh
-cargo build --release -p lmml-tui
-./target/release/lmml doctor
-```
-
-## Harness Runtime Direction
-
-For the practical agent setup path, see [`docs/how-to-use.md`](docs/how-to-use.md).
-
-For coding harnesses such as OpenCode, Claude Code, and Hermes-compatible
-clients, lmml should manage long-running `llama-server` HTTP endpoints.
-`llama-cli` is reserved for one-shot diagnostics and smoke checks.
-
-`lmml runtime configure opencode` is local-first by default: it adds the
-lmml-managed providers and routes OpenCode's top-level `model` and
-`small_model` to those local providers. Operators who want to keep cloud routing
-active can pass `--model-source existing --small-model-source existing`.
-
-### 🔌 Agent Client Wiring
-
-#### OpenCode
-
-OpenCode is the first-class local harness target today. Point its OpenAI-
-compatible provider at the lmml server:
+OpenCode is the first-class local coding harness target. Keep the TUI-managed
+server on port `1200` and point OpenCode at the OpenAI-compatible base URL:
 
 ```text
 baseURL: http://127.0.0.1:1200/v1
 model: llamacpp/<your-gguf-model-name>
 ```
 
-Use the helper when you want lmml to write the provider block:
+Let `lmml` write the provider block:
 
 ```sh
 lmml runtime configure opencode --base-url http://127.0.0.1:1200/v1
 ```
 
-#### Claude Code
+Quick verification:
 
-Claude Code can use lmml through the `lmml-node` Anthropic Messages
-compatibility endpoint. Keep the TUI-managed `llama-server` on port `1200`, then
-start `lmml-node` as the API adapter on port `8101`:
+```sh
+curl -fsS http://127.0.0.1:1200/health
+curl -fsS http://127.0.0.1:1200/v1/models
+opencode models llamacpp
+```
+
+### Claude Code
+
+Claude Code can use `lmml-node` through the Anthropic Messages compatibility
+endpoint. Keep `llama-server` on port `1200`, then start the adapter:
 
 ```sh
 LMML_NODE_API_KEY=local-dev-key lmml-node --llama-url http://127.0.0.1:1200
@@ -277,60 +269,72 @@ export ANTHROPIC_SMALL_FAST_MODEL=Qwen3.5-4B-Q8_0.gguf
 claude
 ```
 
-Direct adapter contract:
+Request path:
 
 ```text
-Claude Code -> http://127.0.0.1:8101/v1/messages -> lmml-node -> http://127.0.0.1:1200/v1/chat/completions
+Claude Code -> /v1/messages -> lmml-node -> llama-server /v1/chat/completions
 ```
 
-The compatibility endpoint maps Anthropic text messages to OpenAI-compatible
-chat completions, translates Anthropic tool schemas into OpenAI function tools,
-maps OpenAI tool calls back to Anthropic `tool_use` blocks, and synthesizes
-Anthropic SSE events when `"stream": true`. Image and document content blocks
-are intentionally rejected until lmml has validated multimodal routing.
+### Hermes-Style Clients
 
-#### LAN Router / Load Balancer
+Hermes-style OpenAI-compatible clients can target any `lmml` OpenAI-compatible
+base URL:
 
-For a LAN with multiple GPU machines, run `lmml-node` on each worker and
-`lmml-router` on the coordinator. The router exposes the same useful endpoints
-to clients and selects a ready upstream by route support, requested model, and
-current LMML load metadata. It also aggregates `GET /v1/models` from currently
-routable workers so OpenAI-compatible clients can inspect the coordinator as
-their base URL.
+```text
+base URL: http://127.0.0.1:1200/v1
+model: <your Hermes or other GGUF filename>
+```
 
-Example with a main workstation and a BC-250 worker:
+`lmml` also recognizes Hermes 4 GGUF names and displays family-specific guidance
+where available. Recognition is not the same as a tuned runtime profile; keep
+Hermes profiles explicit and hardware-validated.
+
+## 🌐 LAN Routing And Idle Workstations
+
+A LAN setup has two layers:
+
+- `lmml-node`: exposes one machine as an authenticated worker API in front of a
+  local `llama-server`.
+- `lmml-router`: exposes one coordinator URL and routes requests across ready
+  workers by route support, requested model, and current load metadata.
+
+```mermaid
+flowchart LR
+    Client["🤖 Agents / IDEs / Scripts"] --> Router["🌐 lmml-router<br/>one LAN endpoint"]
+    Router --> WS1["🖥️ lmml-node<br/>workstation GPU"]
+    Router --> WS2["🎮 lmml-node<br/>idle gaming GPU"]
+    Router --> BC250["🧱 lmml-node<br/>BC-250 Vulkan"]
+    WS1 --> L1["🦙 llama-server"]
+    WS2 --> L2["🦙 llama-server"]
+    BC250 --> L3["🦙 llama-server"]
+```
+
+Static example:
 
 ```sh
-# Workstation worker, usually near the TUI-managed llama-server on port 1200.
+# Worker beside a TUI-managed llama-server on port 1200.
 LMML_NODE_API_KEY=worker-key lmml-node \
   --host 0.0.0.0 \
   --port 8101 \
   --node-name workstation \
   --llama-url http://127.0.0.1:1200
 
-# BC-250 worker, usually beside a Vulkan llama-server on port 8080.
-LMML_NODE_API_KEY=worker-key lmml-node \
-  --host 0.0.0.0 \
-  --port 8101 \
-  --node-name bc250 \
-  --llama-url http://127.0.0.1:8080
-
 # Coordinator router.
 LMML_ROUTER_API_KEY=router-key lmml-router \
   --host 0.0.0.0 \
   --port 8100 \
   --upstream workstation=http://192.168.50.178:8101 \
-  --upstream bc250=http://192.168.50.176:8101 \
-  --upstream-key workstation=worker-key \
-  --upstream-key bc250=worker-key
+  --upstream-key workstation=worker-key
 ```
 
-Point OpenAI-compatible clients at `http://<router-ip>:8100/v1` and Anthropic
-Messages clients at `http://<router-ip>:8100`. LAN-visible router and worker
-routes require bearer auth unless explicitly started with the unsafe development
-escape hatch.
+Point clients at the router:
 
-Static upstreams can be replaced or supplemented with opt-in LAN discovery:
+```text
+OpenAI-compatible base URL: http://<router-ip>:8100/v1
+Anthropic-compatible base URL: http://<router-ip>:8100
+```
+
+Opt-in LAN discovery:
 
 ```sh
 LMML_NODE_API_KEY=worker-key lmml-node \
@@ -346,229 +350,187 @@ LMML_ROUTER_API_KEY=router-key lmml-router \
   --upstream-key default=worker-key
 ```
 
-The router treats advertisements as hints only. Discovered nodes are used only
+Advertisements are hints, not trust. The router only uses a discovered worker
 after authenticated health, capability, and load probes pass.
 
-#### Hermes
+## 🧠 Model Family Guidance
 
-Hermes has two meanings in this repo:
+`lmml` includes model-family guidance, not model weights.
 
-- **Hermes 4 models:** lmml recognizes Hermes 4 14B, 4.3 36B, 70B, and 405B FP8
-  GGUF names and displays ChatML/reasoning guidance.
-- **Hermes-style clients/agents:** configure them like any OpenAI-compatible
-  client when they can target a local base URL:
+### Qwen3.5 And Qwen3.6
 
-```text
-base URL: http://127.0.0.1:1200/v1
-model: <your Hermes or other GGUF filename>
-```
+Qwen profiles focus on long-context coding and agent workloads. `lmml` includes
+safeguards for known Qwen runtime issues, including raw reasoning output when
+needed, KV cache quantization guidance for large context, and profile-specific
+context/parallelism settings.
 
-Hermes runtime profiles should stay explicit and hardware-validated. The model
-catalog can recognize the family before LMML claims a tuned runtime profile.
+Supported catalog families include small Qwen variants and larger Qwen3.6
+variants such as 27B and 35B-A3B-style MoE profiles where the hardware and GGUF
+files are available.
 
-### OpenCode With The TUI Server On Port 1200
+### Gemma 4
 
-On this workstation, OpenCode is intentionally wired to the live lmml TUI server:
-
-```text
-http://127.0.0.1:1200/v1
-```
-
-Do not "repair" this back to the default managed runtime profile ports
-`4010/4011` unless the separate `lmml runtime start opencode --detach` flow is
-actually being used. If the TUI Server tab says ready at `127.0.0.1:1200`,
-OpenCode providers should use `baseURL: "http://127.0.0.1:1200/v1"`.
-
-Quick verification:
-
-```sh
-curl -fsS http://127.0.0.1:1200/health
-curl -fsS http://127.0.0.1:1200/v1/models
-opencode models llamacpp
-opencode models llamacpp_fast
-```
-
-Expected OpenCode config shape:
-
-```json
-{
-  "provider": {
-    "llamacpp": {
-      "options": {
-        "baseURL": "http://127.0.0.1:1200/v1"
-      }
-    },
-    "llamacpp_fast": {
-      "options": {
-        "baseURL": "http://127.0.0.1:1200/v1"
-      }
-    }
-  },
-  "model": "llamacpp/Qwen3.5-4B-Q8_0.gguf",
-  "small_model": "llamacpp_fast/Qwen3.5-4B-Q8_0.gguf",
-  "compaction": {
-    "auto": true,
-    "prune": true,
-    "reserved": 65536
-  }
-}
-```
-
-Current proven context math:
+Gemma 4 support includes QAT-oriented guidance and an MTP profile for speculative
+decoding when a matching draft head is available:
 
 ```text
-server context: 262144 tokens
-OpenCode compaction.reserved: 65536 tokens
-OpenCode model output limit: 18000 tokens
-OpenCode stream chunk timeout: 2400 seconds
-OpenCode long-run timeout: 7200 seconds
-usable input before compaction: 196608 tokens
-operator compact target: 90000-120000 live prompt tokens
-operator red zone: 120000-170000 live prompt tokens
-hard reject/compress threshold: 170000-190000 tokens
-llama-server parallel slots: 1
-slot save path: /home/angelo/.local/share/lmml/llama-slots
-```
-
-On the 11GB GTX 1080 Ti validation machine, the working deep profile is
-single-slot Qwen Q8 at 256k with Q8 KV cache and 4096 MiB host cache. Earlier
-128k testing proved that auto-selected four-slot mode exhausted KV cache during
-concurrent OpenCode background work. Keep this TUI-managed 1200 server in deep
-single-agent mode unless VRAM headroom and per-slot context are revalidated:
-
-```toml
-extra_args = [
-  "--parallel", "1",
-  "--slot-save-path", "/home/angelo/.local/share/lmml/llama-slots",
-  "-ctk", "q8_0",
-  "-ctv", "q8_0",
-  "--cache-ram", "4096"
-]
-```
-
-The TUI includes two built-in runtime profiles for `Qwen3.5-4B-Q8_0.gguf`.
-Press `p` on the Models or Server tab to switch between them:
-
-```text
-orion-qwen-q8-deep:
-  ctx_size: 262144
-  parallel: 1
-  OpenCode/Sisyphus: 0 subagents by default
-  operator compact target: 90000-120000
-  hard compress/reject: 170000-190000
-
-orion-qwen-q8-balanced:
-  ctx_size: 262144
-  parallel: 2
-  OpenCode/Sisyphus: 1 subagent max
-  per-slot theoretical context: 131072
-  practical per-agent target: 60000-80000
-  hard compress/reject: 100000-115000
-
-orion-qwen-q8-kvu-fanout4 / fanout6 / fanout8:
-  ctx_size: 65536
-  parallel: 4, 6, or 8
-  KV: q4_0 key/value with --kv-unified
-  target: high-concurrency experimental harness runs on 11/12GB GPUs
-
-5060ti-qwen4b-fanout4:
-  ctx_size: 131072
-  parallel: 4
-  OpenCode/Sisyphus: 3 subagents max
-  per-slot theoretical context: 32768
-  practical per-agent target: 16000-24000
-
-5060ti-qwen4b-dual:
-  ctx_size: 262144
-  parallel: 2
-
-5060ti-qwen4b-kvu-fanout4 / fanout6 / fanout8:
-  ctx_size: 73728
-  parallel: 4, 6, or 8
-  KV: q4_0 key/value with --kv-unified
-
-5070ti-qwen4b-fanout4:
-  ctx_size: 131072
-  parallel: 4
-  OpenCode/Sisyphus: 3 subagents max
-  per-slot theoretical context: 32768
-  practical per-agent target: 16000-24000
-
-5070ti-qwen4b-dual:
-  ctx_size: 262144
-  parallel: 2
-  OpenCode/Sisyphus: 1 subagent max
-  per-slot theoretical context: 131072
-  practical per-agent target: 60000-90000
-
-5070ti-qwen4b-kvu-fanout4 / fanout6 / fanout8:
-  ctx_size: 73728
-  parallel: 4, 6, or 8
-  KV: q4_0 key/value with --kv-unified
-
-m6000-qwen9b-deep:
-  ctx_size: 262144
-  parallel: 1
-  OpenCode/Sisyphus: 0 subagents by default
-  practical single-agent target: 120000-170000
-
-m6000-qwen9b-fanout4:
-  ctx_size: 262144
-  parallel: 4
-  OpenCode/Sisyphus: 3 subagents max
-  per-slot theoretical context: 65536
-  practical per-agent target: 32000-48000
-
-m6000-qwen9b-fanout6:
-  ctx_size: 262144
-  parallel: 6
-  OpenCode/Sisyphus: 5 subagents max after validation
-  per-slot theoretical context: 43690
-  practical per-agent target: 20000-30000
-
-5070ti-qwen9b-deep:
-  ctx_size: 196608
-  parallel: 1
-  OpenCode/Sisyphus: 0 subagents by default
-  practical single-agent target: 90000-130000
-
-5070ti-qwen9b-balanced2:
-  ctx_size: 131072
-  parallel: 2
-  OpenCode/Sisyphus: 1 subagent max
-  per-slot theoretical context: 65536
-  practical per-agent target: 32000-48000
-
 gemma4-12b-mtp-q4km:
   model: Gemma4-12B-QAT-Q4_K_M.gguf
-  required draft model: mtp-gemma-4-12B-it.gguf beside the main GGUF
-  ctx_size: 73728
-  gpu_layers: 99
-  parallel: 1
-  MTP: -md <models>/mtp-gemma-4-12B-it.gguf --spec-type draft-mtp
+  draft: mtp-gemma-4-12B-it.gguf
+  args: -md <draft> --spec-type draft-mtp -fa on
   sampling: temperature=0.6 top_k=64 top_p=0.9 min_p=0.05 repeat_penalty=1.1
-
-bc250-qwen9b-q4km-vulkan:
-  model: Qwen3.5-9B-Q4_K_M.gguf
-  backend: Vulkan/RADV
-  host: 0.0.0.0
-  port: 8080
-  ctx_size: 4096
-  gpu_layers: 99
-  parallel: 1
-  threads: 6
 ```
 
-Switching while the server is running changes the saved profile and visible
-settings, but the active `llama-server` process keeps its launch arguments until
-you stop and restart it. OpenCode must also be restarted after changing
-`LMML_SISYPHUS_SUBAGENTS` or `opencode.json`.
+### BC-250 Vulkan Nodes
 
-Use the GGUF embedded chat template for Qwen and Nemotron by keeping lmml
-`chat_template` empty. Do not share one external Qwen template across models
-unless that exact model/profile has been revalidated.
+Headless AMD BC-250 machines can run as LAN workers with source-built Vulkan
+support:
 
-Frozen evidence for the current working setup is in
-[docs/opencode-1200-evidence.md](docs/opencode-1200-evidence.md).
+```sh
+curl -fsSL http://192.168.1.100:8000/install.sh | \
+  BASE_URL=http://192.168.1.100:8000 \
+  INSTALL_MODE=source \
+  LMML_GPU_MODE=vulkan \
+  LMML_PROFILE_HINT=bc250-qwen35-9b-q4km-vulkan \
+  sh
+```
 
-See [docs/runtime-harness-plan.md](docs/runtime-harness-plan.md).
+## 🧪 Native llama.cpp Training
+
+`lmml train` is an experimental wrapper around native `llama.cpp` training
+binaries. It does not run a Python/PyTorch fine-tuning stack.
+
+Current upstream `llama-finetune` behavior is treated as full-model GGUF
+fine-tuning. `lmml` maps common intent flags to the local binary’s advertised
+capabilities and only enables custom-fork flags such as `--lora-out` when
+`llama-finetune --help` explicitly reports support.
+
+Example:
+
+```sh
+lmml train \
+  --model-base ./models/Qwen3.5-9B-BF16.gguf \
+  --train-data ./data/train.txt \
+  --output ./models/Qwen3.5-9B-Finetuned.gguf \
+  -- --epochs 3 --ctx-size 512 --batch-size 4 --n-gpu-layers 32
+```
+
+Use F16/BF16 bases for training and quantize the output GGUF afterward.
+
+## 🏗️ Architecture
+
+```mermaid
+flowchart TB
+    TUI["🧭 lmml TUI"]
+    Detect["🔎 hardware detection"]
+    Build["🛠️ llama.cpp build/install"]
+    Models["🧠 GGUF scan + profiles"]
+    Server["🦙 llama-server lifecycle"]
+    Node["🔐 lmml-node worker API"]
+    Router["🌐 lmml-router coordinator"]
+    Clients["🤖 OpenCode / Claude Code / Hermes / scripts"]
+
+    TUI --> Detect --> Build --> Models --> Server
+    Server --> Node
+    Node --> Router
+    Clients --> Router
+    Clients --> Server
+```
+
+Workspace crates:
+
+- `lmml-api` — shared API DTOs and version constants.
+- `lmml-build` — `llama.cpp` clone/configure/build pipeline.
+- `lmml-compat` — `llama-server` flag compatibility probing.
+- `lmml-detect` — hardware and toolchain detection.
+- `lmml-models` — GGUF scanning, aliases, and model catalog guidance.
+- `lmml-node` — worker API in front of a local `llama-server`.
+- `lmml-router` — LAN coordinator and load router.
+- `lmml-server` — local server lifecycle management.
+- `lmml-state` — config/state/runtime profile persistence.
+- `lmml-tui` — terminal UI and CLI entrypoint.
+
+## 📚 Documentation
+
+- [How to use lmml](docs/how-to-use.md)
+- [LAN client install guide](docs/lan-client-install.md)
+- [Training guide](docs/training-how-to-use.md)
+- [GPU support catalog](docs/hardware-gpu-support.md)
+- [LLM model support catalog](docs/llm-model-support.md)
+- [Runtime harness plan](docs/runtime-harness-plan.md)
+- [Release checklist](docs/release-checklist.md)
+- [Integration contract](docs/lmml-integration-contract.md)
+
+## 🧑‍💻 Development
+
+Prerequisites:
+
+```sh
+rustup update stable
+```
+
+Common commands:
+
+```sh
+cargo fmt --all -- --check
+cargo test --workspace
+cargo clippy --workspace -- -D warnings
+cargo build --release -p lmml-tui -p lmml-node -p lmml-router
+```
+
+Package a release:
+
+```sh
+scripts/package-release.sh
+```
+
+Run the TUI from source:
+
+```sh
+cargo run -p lmml-tui
+```
+
+## 🔐 Security Model
+
+- Localhost is the default serving posture.
+- LAN binds require bearer auth unless an explicit unsafe development escape
+  hatch is used.
+- `lmml-node` and `lmml-router` require authenticated non-health routes.
+- LAN discovery is opt-in and advertisements are verified before routing.
+- LAN HTTP installer checksums detect corrupt downloads; signed checksum
+  verification is required for untrusted distribution.
+- Model weights are not bundled.
+
+Please do not report private credentials in public issues. If this repository
+adds a dedicated security contact, use that path for sensitive reports.
+
+## 🤝 Contributing
+
+Contributions are useful when they improve a tested path:
+
+- hardware probe fixtures for more GPUs and drivers;
+- runtime profiles with clear model, quant, context, and VRAM evidence;
+- compatibility tests for `llama.cpp` flag changes;
+- docs that separate validated behavior from planned behavior;
+- LAN routing and agent-client integration tests.
+
+Before opening a pull request, run:
+
+```sh
+cargo fmt --all -- --check
+cargo test --workspace
+cargo clippy --workspace -- -D warnings
+```
+
+## 📄 License
+
+Apache-2.0. See [LICENSE](LICENSE).
+
+## ⭐ Call To Action
+
+Clone the repository, run `lmml doctor`, and try the TUI against one local GGUF
+model. If it helps you turn an idle GPU into a dependable local-AI endpoint,
+star the repo and contribute the hardware/profile evidence back.
+
+**Purpose:** `lmml` exists so advanced local AI remains open, inspectable, and
+controlled by the people running it.
