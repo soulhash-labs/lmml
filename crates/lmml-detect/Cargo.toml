@@ -3,6 +3,8 @@ name = "lmml-detect"
 version = "0.1.0"
 edition = "2021"
 description = "Hardware and prerequisite detection for lmml"
+license = "Apache-2.0"
+repository = "https://github.com/soulhash-labs/lmml"
 
 [dependencies]
 libc = "0.2"

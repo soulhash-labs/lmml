@@ -3,6 +3,8 @@ name = "lmml-server"
 version = "0.1.0"
 edition = "2021"
 description = "llama-server lifecycle management for lmml"
+license = "Apache-2.0"
+repository = "https://github.com/soulhash-labs/lmml"
 
 [dependencies]
 libc = "0.2"

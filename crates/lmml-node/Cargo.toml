@@ -3,6 +3,8 @@ name = "lmml-node"
 version = "0.1.0"
 edition = "2021"
 description = "Headless LMML node HTTP API"
+license = "Apache-2.0"
+repository = "https://github.com/soulhash-labs/lmml"
 
 [lib]
 name = "lmml_node"

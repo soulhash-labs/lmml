@@ -70,7 +70,7 @@ This script:
    containing:
    - `lmml` binary
    - `README.md`
-   - `LICENSE` (create one if absent — MIT is fine)
+   - `LICENSE` (Apache-2.0)
    - `scripts/install.sh`
    - `scripts/uninstall.sh`
 4. Writes a `SHA256SUMS` file alongside the tarball.

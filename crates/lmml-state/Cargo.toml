@@ -3,6 +3,8 @@ name = "lmml-state"
 version = "0.1.0"
 edition = "2021"
 description = "Persistent state storage for lmml"
+license = "Apache-2.0"
+repository = "https://github.com/soulhash-labs/lmml"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

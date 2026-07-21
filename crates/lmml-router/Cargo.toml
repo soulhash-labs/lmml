@@ -3,6 +3,8 @@ name = "lmml-router"
 version = "0.1.0"
 edition = "2021"
 description = "LAN router and load balancer for LMML node APIs"
+license = "Apache-2.0"
+repository = "https://github.com/soulhash-labs/lmml"
 
 [lib]
 name = "lmml_router"

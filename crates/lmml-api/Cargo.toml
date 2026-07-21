@@ -3,6 +3,8 @@ name = "lmml-api"
 version = "0.1.0"
 edition = "2021"
 description = "Shared HTTP API contracts for lmml node and cluster clients"
+license = "Apache-2.0"
+repository = "https://github.com/soulhash-labs/lmml"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

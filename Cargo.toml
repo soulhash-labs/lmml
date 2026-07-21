@@ -13,3 +13,7 @@ members = [
 ]
 default-members = ["crates/lmml-tui"]
 resolver = "2"
+
+[workspace.package]
+license = "Apache-2.0"
+repository = "https://github.com/soulhash-labs/lmml"
