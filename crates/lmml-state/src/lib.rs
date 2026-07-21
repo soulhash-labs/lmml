@@ -844,7 +844,7 @@ pub struct RuntimeProfile {
 impl RuntimeProfile {
     fn opencode_default() -> Self {
         Self {
-            port: 4010,
+            port: 1200,
             ctx_size: 65_536,
             parallel: 4,
             ..Self::default()
@@ -853,7 +853,7 @@ impl RuntimeProfile {
 
     fn opencode_fast_default() -> Self {
         Self {
-            port: 4011,
+            port: 1200,
             ctx_size: 32_768,
             parallel: 2,
             ..Self::default()
@@ -879,7 +879,7 @@ impl Default for RuntimeProfile {
     fn default() -> Self {
         Self {
             host: "127.0.0.1".to_string(),
-            port: 4010,
+            port: 1200,
             model: PathBuf::new(),
             ctx_size: 65_536,
             gpu_layers: -1,
@@ -1205,10 +1205,10 @@ mod tests {
         assert_eq!(state.server.threads, 8);
         assert!(state.server.flash_attn);
         assert_eq!(state.build.track_mode, TrackMode::Main);
-        assert_eq!(state.runtime.opencode.port, 4010);
+        assert_eq!(state.runtime.opencode.port, 1200);
         assert_eq!(state.runtime.opencode.ctx_size, 65_536);
         assert_eq!(state.runtime.opencode.parallel, 4);
-        assert_eq!(state.runtime.opencode_fast.port, 4011);
+        assert_eq!(state.runtime.opencode_fast.port, 1200);
         assert_eq!(state.runtime.opencode_fast.ctx_size, 32_768);
         assert_eq!(state.runtime.opencode_fast.parallel, 2);
         assert_eq!(state.runtime.opencode.gpu_layers, -1);
@@ -1568,13 +1568,13 @@ mod tests {
             runtime
                 .profile("opencode")
                 .map(RuntimeProfile::api_base_url),
-            Some("http://127.0.0.1:4010/v1".to_string())
+            Some("http://127.0.0.1:1200/v1".to_string())
         );
         assert_eq!(
             runtime
                 .profile("opencode-fast")
                 .map(RuntimeProfile::api_base_url),
-            Some("http://127.0.0.1:4011/v1".to_string())
+            Some("http://127.0.0.1:1200/v1".to_string())
         );
         assert!(runtime.profile("missing").is_none());
 
@@ -1691,11 +1691,11 @@ mod tests {
     fn runtime_profile_base_url_brackets_ipv6_literals() {
         let profile = RuntimeProfile {
             host: "::1".to_string(),
-            port: 4010,
+            port: 1200,
             ..RuntimeProfile::default()
         };
 
-        assert_eq!(profile.api_base_url(), "http://[::1]:4010/v1");
+        assert_eq!(profile.api_base_url(), "http://[::1]:1200/v1");
     }
 
     #[test]
@@ -1767,7 +1767,7 @@ mod tests {
             runtime: RuntimeConfig {
                 opencode: RuntimeProfile {
                     host: "127.0.0.1".to_string(),
-                    port: 4010,
+                    port: 1200,
                     model: PathBuf::from("/models/full.gguf"),
                     ctx_size: 65_536,
                     gpu_layers: -1,
@@ -1779,7 +1779,7 @@ mod tests {
                 },
                 opencode_fast: RuntimeProfile {
                     host: "127.0.0.1".to_string(),
-                    port: 4011,
+                    port: 1200,
                     model: PathBuf::from("/models/fast.gguf"),
                     ctx_size: 32_768,
                     gpu_layers: -1,
@@ -1794,7 +1794,7 @@ mod tests {
                         status: RuntimeStatus::Ready,
                         pid: Some(1234),
                         host: "127.0.0.1".to_string(),
-                        port: 4010,
+                        port: 1200,
                         model: PathBuf::from("/models/full.gguf"),
                         log_path: PathBuf::from("/state/lmml/runtime/opencode.log"),
                         started_at: "2026-06-01T00:00:00Z".to_string(),

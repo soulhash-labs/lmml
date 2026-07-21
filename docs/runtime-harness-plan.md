@@ -166,9 +166,8 @@ extra_args   = []
 autostart    = false
 ```
 
-These values describe the current workstation-proven TUI-server route. Future
-detached multi-instance profiles may use `4010` and `4011`, but those ports are
-not the active OpenCode route on this machine.
+These values describe the current TUI-server route. The public OpenCode setup
+uses `1200` as the single active local server port.
 
 Rules:
 
@@ -348,10 +347,8 @@ runtime-profile servers, for OpenCode. The live server is:
 http://127.0.0.1:1200/v1
 ```
 
-This is intentional. Agents and humans should not change OpenCode back to
-`4010/4011` just because those are the default future managed-profile ports.
-Use `4010/4011` only when `lmml runtime start opencode --detach` and
-`lmml runtime start opencode-fast --detach` are the active server lifecycle.
+This is intentional. Agents and humans should keep OpenCode on `1200` unless an
+operator has explicitly configured a different local profile.
 Keep any local evidence snapshots outside the public documentation tree unless
 they have been sanitized into generic examples.
 
@@ -419,7 +416,7 @@ Troubleshooting when OpenCode cannot see lmml while the TUI says server ready:
    values on this workstation.
 7. Check `~/.config/opencode/oh-my-openagent.json` and
    `~/.config/opencode/validator.ts`; both have previously carried stale
-  Q6 or `4010`/`4011` routing after `opencode.json` was already correct.
+  Q6 or old detached-profile routing after `opencode.json` was already correct.
 
 Troubleshooting hidden thinking / empty output:
 
@@ -712,8 +709,8 @@ Initial detached multi-instance defaults:
 
 | Profile | Port | Purpose |
 |---|---:|---|
-| `opencode` | `4010` | full coding-agent runtime |
-| `opencode-fast` | `4011` | small/fast helper runtime |
+| `opencode` | `1200` | primary TUI-managed coding-agent runtime |
+| `opencode-fast` | `1200` | fast lane routed to the same active TUI server by default |
 
 Suggested settings should be conservative and editable:
 

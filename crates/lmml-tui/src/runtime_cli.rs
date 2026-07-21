@@ -1345,7 +1345,7 @@ mod tests {
         assert!(table.contains("opencode"));
         assert!(table.contains("ready"));
         assert!(table.contains("1234"));
-        assert!(table.contains("http://127.0.0.1:4010/v1"));
+        assert!(table.contains("http://127.0.0.1:1200/v1"));
         assert!(table.contains("opencode-fast"));
     }
 
@@ -1360,11 +1360,11 @@ mod tests {
 
         assert_eq!(
             json["provider"]["llamacpp"]["options"]["baseURL"],
-            "http://127.0.0.1:4010/v1"
+            "http://127.0.0.1:1200/v1"
         );
         assert_eq!(
             json["provider"]["llamacpp_fast"]["options"]["baseURL"],
-            "http://127.0.0.1:4011/v1"
+            "http://127.0.0.1:1200/v1"
         );
         assert_eq!(json["model"], "llamacpp/full.gguf");
         assert_eq!(json["small_model"], "llamacpp_fast/fast.gguf");
@@ -1470,7 +1470,7 @@ mod tests {
         assert_eq!(updated["small_model"], "openai/gpt-4.1-mini");
         assert_eq!(
             updated["provider"]["llamacpp"]["options"]["baseURL"],
-            "http://127.0.0.1:4010/v1"
+            "http://127.0.0.1:1200/v1"
         );
     }
 
@@ -1566,7 +1566,7 @@ mod tests {
         assert_eq!(updated["plugin"][0], "keep");
         assert_eq!(
             updated["provider"]["llamacpp"]["options"]["baseURL"],
-            "http://127.0.0.1:4010/v1"
+            "http://127.0.0.1:1200/v1"
         );
     }
 

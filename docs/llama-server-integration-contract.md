@@ -25,14 +25,14 @@ Claude Code -> lmml-node /v1/messages -> llama-server /v1/chat/completions
 responses, synthesized SSE responses, and Anthropic-shaped errors. Raw
 `llama-server` remains OpenAI-compatible; it does not own `/v1/messages`.
 
-Default detached profile targets:
+Default OpenCode provider targets:
 
 | Profile | Port | Purpose |
 |---|---:|---|
-| `opencode` | `4010` | primary/full coding-agent runtime |
-| `opencode-fast` | `4011` | secondary fast/small runtime |
+| `opencode` | `1200` | primary/full coding-agent runtime |
+| `opencode-fast` | `1200` | secondary fast/small lane using the active TUI server by default |
 
-Each profile owns:
+Each provider lane declares:
 
 - one detached `llama-server` process group
 - one static host/port
@@ -54,9 +54,8 @@ practical single-agent input target: 80000-90000 tokens
 hard reject/compress threshold: 96000-100000 tokens
 ```
 
-The `4010` and `4011` profile ports remain detached multi-instance targets. On
-this workstation they are not the active OpenCode route unless the detached
-runtime profiles have actually been started.
+Both OpenCode provider lanes should target the active TUI-managed `1200` server
+by default.
 
 ## Profile Schema Target
 
@@ -68,7 +67,7 @@ remaining backward-compatible through `#[serde(default)]`.
 [runtime.opencode]
 copied_from = "preset-12gb-workstation"
 host = "127.0.0.1"
-port = 4010
+port = 1200
 model = "~/.local/share/lmml/models/mistral-7b-q4_k_m.gguf"
 ctx_size = 32768
 compaction_reserved = 16384
@@ -252,10 +251,9 @@ model:       llamacpp/Qwen3.5-4B-Q8_0.gguf
 small_model: llamacpp_fast/Qwen3.5-4B-Q8_0.gguf
 ```
 
-`opencode.json` alone is not the whole integration. On Orion,
-`oh-my-openagent.json` and `validator.ts` also needed to be updated because they
-  retained stale Q6 or `4010`/`4011` routing after provider config was
-corrected.
+`opencode.json` alone may not be the whole integration. If a client
+has validator, category, or provider extension files, keep them aligned with the
+same model and `1200` base URL after provider config is corrected.
 
 For 128k+ contexts, slot count is part of the memory budget. The 11GB GTX 1080
 Ti validation machine failed with auto `n_parallel = 4` under concurrent
@@ -501,19 +499,19 @@ Behavior:
 - Does not start, stop, or configure external harnesses.
 - Returns `1` if any profile is `failed` or `unhealthy`.
 
-Target detached-profile table:
+Target status table:
 
 ```text
 profile        status     pid     url                         model
-opencode       ready      12345   http://127.0.0.1:4010/v1    mistral-7b-q4_k_m.gguf
-opencode-fast  stopped    -       http://127.0.0.1:4011/v1    phi-3-mini-q4.gguf
+opencode       ready      12345   http://127.0.0.1:1200/v1    model.gguf
+opencode-fast  ready      12345   http://127.0.0.1:1200/v1    model.gguf
 ```
 
 ### `lmml runtime status --json`
 
 Purpose: machine-readable status for scripts, CI, and harness launchers.
 
-Target detached-profile output:
+Target runtime status JSON output:
 
 ```json
 {
@@ -522,7 +520,7 @@ Target detached-profile output:
       "name": "opencode",
       "status": "ready",
       "pid": 12345,
-      "url": "http://127.0.0.1:4010/v1",
+      "url": "http://127.0.0.1:1200/v1",
       "model": "/home/user/.local/share/lmml/models/mistral-7b-q4_k_m.gguf",
       "log_path": "/home/user/.local/share/lmml/logs/profile-opencode.log",
       "last_health": "ok",

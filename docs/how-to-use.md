@@ -142,14 +142,9 @@ should be:
 "baseURL": "http://127.0.0.1:1200/v1"
 ```
 
-Do not change this back to `4010`/`4011` unless using the separate detached
-runtime flow:
-
-```sh
-lmml runtime start opencode --detach
-lmml runtime status
-lmml runtime logs opencode --follow
-```
+The public OpenCode setup uses the active TUI-managed server on `1200`. If an
+operator configures another port, keep all provider lanes aligned with that one
+active server.
 
 ### Agent context policy
 

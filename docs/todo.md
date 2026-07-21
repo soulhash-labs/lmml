@@ -425,9 +425,8 @@ Current workstation override:
 - The TUI-managed server is the active runtime for OpenCode.
 - Keep OpenCode on `http://127.0.0.1:1200/v1` while the TUI Server tab reports
   `Ready { url: "http://127.0.0.1:1200" }`.
-- Do not switch this machine back to `4010/4011` unless detached runtime
-  profiles are started and verified with `lmml runtime start opencode --detach`
-  and `lmml runtime start opencode-fast --detach`.
+- Keep the active OpenCode route on the TUI-managed server at `1200` unless an
+  operator explicitly configures a different single active server.
 - Current server context: `262144` tokens.
 - Current OpenCode `compaction.reserved`: `65536` tokens.
 - Current OpenCode local model output limit: `18000` tokens.
@@ -456,9 +455,8 @@ Current workstation override:
 - [x] Update active OpenCode provider timeout policy to `timeout=7200s` and
   `chunkTimeout=2400s`
 - [x] Fix stale OpenCode validator routing that still mapped deep/quick lanes to
-  old `4010/4011` lane names
-- [x] Support at least `opencode` on port `4010` and `opencode-fast` on port
-  `4011`
+  old detached-profile lane names
+- [x] Route both `opencode` and `opencode-fast` through the active TUI-managed `1200` server by default
 - [ ] Allow simultaneous managed `llama-server` instances for full and fast
   profiles
 - [ ] Keep each profile isolated: failure of one profile must not stop another
