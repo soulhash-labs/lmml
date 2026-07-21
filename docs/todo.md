@@ -456,7 +456,7 @@ Current workstation override:
 - [x] Update active OpenCode provider timeout policy to `timeout=7200s` and
   `chunkTimeout=2400s`
 - [x] Fix stale OpenCode validator routing that still mapped deep/quick lanes to
-  `4010/4011` and GlyphOS lane names
+  old `4010/4011` lane names
 - [x] Support at least `opencode` on port `4010` and `opencode-fast` on port
   `4011`
 - [ ] Allow simultaneous managed `llama-server` instances for full and fast

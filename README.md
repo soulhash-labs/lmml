@@ -457,8 +457,10 @@ Workspace crates:
 - [Training guide](docs/training-how-to-use.md)
 - [GPU support catalog](docs/hardware-gpu-support.md)
 - [LLM model support catalog](docs/llm-model-support.md)
+- [Fleet profile reference](docs/lmml-fleet-profiles.md)
 - [Runtime harness plan](docs/runtime-harness-plan.md)
 - [Release checklist](docs/release-checklist.md)
+- [Integration contract](docs/lmml-integration-contract.md)
 
 ## 🧑‍💻 Development
 

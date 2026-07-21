@@ -10,8 +10,9 @@ That contract is the Phase 11 target for `lmml-compat` flag generation, profile
 schema expansion, VRAM/context guards, prompt-cache controls, and OpenCode
 compaction drift detection.
 
-Fleet-level machine roles should stay in public runtime profiles only after they
-have generic names, clear validation status, and no site-specific machine
+Fleet-level machine roles and validation policy are tracked in
+[`docs/lmml-fleet-profiles.md`](lmml-fleet-profiles.md). Public fleet profiles
+use generic names, clear validation status, and no site-specific machine
 references.
 
 ## Decision
@@ -418,7 +419,7 @@ Troubleshooting when OpenCode cannot see lmml while the TUI says server ready:
    values on this workstation.
 7. Check `~/.config/opencode/oh-my-openagent.json` and
    `~/.config/opencode/validator.ts`; both have previously carried stale
-   Q6/GlyphOS/`4010`/`4011` routing after `opencode.json` was already correct.
+  Q6 or `4010`/`4011` routing after `opencode.json` was already correct.
 
 Troubleshooting hidden thinking / empty output:
 

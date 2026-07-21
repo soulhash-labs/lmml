@@ -117,8 +117,9 @@ Field meanings:
 lmml should ship read-only presets. Operators copy presets into editable
 profiles; presets themselves are never modified.
 
-Fleet-specific profile composition should stay generic in public docs and must
-separate validated local profiles from proposed profiles for other machines.
+Fleet-specific profile composition is tracked in
+[`docs/lmml-fleet-profiles.md`](lmml-fleet-profiles.md). Public profiles must
+stay generic and separate validated profiles from proposed profiles.
 
 ```sh
 lmml profile copy preset-12gb-workstation opencode
@@ -253,7 +254,7 @@ small_model: llamacpp_fast/Qwen3.5-4B-Q8_0.gguf
 
 `opencode.json` alone is not the whole integration. On Orion,
 `oh-my-openagent.json` and `validator.ts` also needed to be updated because they
-retained stale Q6/GlyphOS/`4010`/`4011` routing after provider config was
+  retained stale Q6 or `4010`/`4011` routing after provider config was
 corrected.
 
 For 128k+ contexts, slot count is part of the memory budget. The 11GB GTX 1080

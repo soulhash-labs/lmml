@@ -353,4 +353,5 @@ If nothing appears, use full-model GGUF fine-tuning with `--output`.
 - `docs/training-how-to-use.md` — training workflow, dataset formatting, and VRAM guidance.
 - `docs/runtime-harness-plan.md` — harness routing and context budget details.
 - `docs/llama-server-integration-contract.md` — server integration contract.
+- `docs/lmml-fleet-profiles.md` — generic fleet profile roles and validation policy.
 - `docs/release-checklist.md` — packaging and release validation.
