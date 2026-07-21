@@ -72,6 +72,12 @@ mkdir -p "$SOURCE_STAGE_DIR"
     --exclude='./target' \
     --exclude='./dist' \
     --exclude='./.planning' \
+    --exclude='./*.zip' \
+    --exclude='./*.docx' \
+    --exclude='./docs/*.docx' \
+    --exclude='./session-*.md' \
+    --exclude='./production Rust workspace CROWN11 agentq swarm.md' \
+    --exclude='./wired LMML + AgentQ Rust pack.md' \
     --exclude='*.swp' \
     --exclude='.*.swp' \
     --exclude='*.kate-swp' \
