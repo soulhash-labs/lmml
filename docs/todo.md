@@ -310,7 +310,7 @@ targets. macOS validation is deferred to a later phase.
 - [x] Record the exact GPU, driver version, CUDA toolkit version, and validation
   commands/output summary in `docs/release-checklist.md`
 
-Host precheck evidence from Angelo's terminal:
+Host precheck evidence from a local validation terminal:
 
 ```text
 NVIDIA GeForce GTX 1080 Ti, driver 580.159.03, 11264 MiB, compute capability 6.1
@@ -337,9 +337,9 @@ Install validation evidence:
   architecture fix
 - [x] Run a clean TUI build with CUDA backend selected by auto-detection
 - [x] Confirm the resulting server binary path:
-  `/home/angelo/.local/share/lmml/llama.cpp/build/bin/llama-server`
+  `/home/user/.local/share/lmml/llama.cpp/build/bin/llama-server`
 - [x] Start `llama-server` through lmml with a local GGUF model:
-  `/home/angelo/.local/share/lmml/models/Qwen3.5-4B-Q6_K.gguf`
+  `/home/user/.local/share/lmml/models/Qwen3.5-4B-Q6_K.gguf`
 - [x] Confirm server reaches ready state at `http://127.0.0.1:1200`
 - [x] Confirm llama.cpp runtime reports CUDA device usage:
   `CUDA0: NVIDIA GeForce GTX 1080 Ti`
@@ -349,8 +349,8 @@ Install validation evidence:
 Live validation evidence:
 
 ```text
-Binary: /home/angelo/.local/share/lmml/llama.cpp/build/bin/llama-server
-Model: /home/angelo/.local/share/lmml/models/Qwen3.5-4B-Q6_K.gguf
+Binary: /home/user/.local/share/lmml/llama.cpp/build/bin/llama-server
+Model: /home/user/.local/share/lmml/models/Qwen3.5-4B-Q6_K.gguf
 Status: Ready { url: "http://127.0.0.1:1200" }
 CUDA0: NVIDIA GeForce GTX 1080 Ti (11157 MiB, 10658 MiB free)
 system_info: CUDA : ARCHS = 610
@@ -360,7 +360,7 @@ Latest Orion deep-profile runtime evidence:
 
 ```text
 Date: 2026-06-03
-Model: /home/angelo/.local/share/lmml/models/Qwen3.5-4B-Q8_0.gguf
+Model: /home/user/.local/share/lmml/models/Qwen3.5-4B-Q8_0.gguf
 Status: Ready { url: "http://127.0.0.1:1200" }
 Context: 262144
 parallel: 1
@@ -436,12 +436,12 @@ Current workstation override:
 - Practical single-agent input target before compaction: `120000-170000` tokens.
 - Hard reject/compress threshold: about `196000` tokens.
 - Current `llama-server` slot policy:
-  `extra_args = ["--parallel", "1", "--slot-save-path", "/home/angelo/.local/share/lmml/llama-slots", "-ctk", "q8_0", "-ctv", "q8_0", "--cache-ram", "4096"]`.
+  `extra_args = ["--parallel", "1", "--slot-save-path", "/home/user/.local/share/lmml/llama-slots", "-ctk", "q8_0", "-ctv", "q8_0", "--cache-ram", "4096"]`.
 - Expected local model routing:
   `model = "llamacpp/Qwen3.5-4B-Q8_0.gguf"` and
   `small_model = "llamacpp_fast/Qwen3.5-4B-Q8_0.gguf"`.
-- Frozen evidence snapshot:
-  `docs/opencode-1200-evidence.md`.
+- Local evidence snapshots should stay outside the public documentation tree
+  unless sanitized into generic examples.
 
 - [x] Add runtime profile config schema for harness-managed servers
 - [x] Add separate runtime state schema for PID, status, health, and log path
@@ -521,9 +521,8 @@ Current workstation override:
   `cache_ram_mb >= 4096`
 - [ ] Add log guidance for `ggml_cuda_host_alloc` pinned-memory failures during
   `--cache-ram` testing
-- [ ] Add fleet profile support from `docs/lmml-fleet-profiles.md`,
-  including validation status, per-slot context checks, LAN host/auth checks,
-  and proposed-vs-validated labels
+- [ ] Add fleet profile support with validation status, per-slot context checks,
+  LAN host/auth checks, and proposed-vs-validated labels
 - [ ] Add Qwen3.5 9B model preset metadata:
   262k native context, 128k minimum thinking context, 9B dense/32 layers,
   multimodal requires matching `mmproj`, MTP is supported but disabled by

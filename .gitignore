@@ -11,3 +11,16 @@ session-ses_*.md
 *.old
 production Rust workspace CROWN11 agentq swarm.md
 wired LMML + AgentQ Rust pack.md
+
+# Private/internal docs excluded from the public repo.
+/docs/agentq-lmml-integration-plan.md
+/docs/learnings.md
+/docs/lmml-fleet-profiles.md
+/docs/lmml-integration-contract.md
+/docs/lmml-packaging-prompt.md
+/docs/lmml-plan.md
+/docs/lmml-plan_v2.md
+/docs/lmml_harness_integration.svg
+/docs/milestones-report.md
+/docs/opencode-1200-evidence.md
+/docs/plan.md

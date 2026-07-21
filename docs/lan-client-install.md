@@ -8,10 +8,10 @@ release files served by the LMML release host.
 Current checked host:
 
 ```text
-http://192.168.50.176:8000
+http://192.168.1.100:8000
 ```
 
-If the release host IP changes, replace `192.168.50.176` in the commands below
+If the release host IP changes, replace `192.168.1.100` in the commands below
 with the current host IP.
 
 ## Release Host Setup
@@ -19,7 +19,7 @@ with the current host IP.
 On the machine that has the LMML repository and release files:
 
 ```sh
-cd /home/angelo/repos/lmml/dist
+cd /path/to/lmml/dist
 python3 -m http.server 8000 --bind 0.0.0.0
 ```
 
@@ -33,8 +33,8 @@ curl -fsSI http://127.0.0.1:8000/install.sh
 Verify from a LAN client:
 
 ```sh
-curl -fsS http://192.168.50.176:8000/latest
-curl -fsSI http://192.168.50.176:8000/install.sh
+curl -fsS http://192.168.1.100:8000/latest
+curl -fsSI http://192.168.1.100:8000/install.sh
 ```
 
 ## Default Binary Install
@@ -42,7 +42,7 @@ curl -fsSI http://192.168.50.176:8000/install.sh
 Run this on the LAN client:
 
 ```sh
-curl -fsSL http://192.168.50.176:8000/install.sh | BASE_URL=http://192.168.50.176:8000 sh
+curl -fsSL http://192.168.1.100:8000/install.sh | BASE_URL=http://192.168.1.100:8000 sh
 ```
 
 This installs the packaged `lmml` binary, verifies release checksums, installs
@@ -56,19 +56,19 @@ make the expected runtime profile explicit.
 ### Orion Qwen3.5 4B Q8
 
 ```sh
-curl -fsSL http://192.168.50.176:8000/install.sh | BASE_URL=http://192.168.50.176:8000 LMML_PROFILE_HINT=orion-qwen35-4b-q8 sh
+curl -fsSL http://192.168.1.100:8000/install.sh | BASE_URL=http://192.168.1.100:8000 LMML_PROFILE_HINT=orion-qwen35-4b-q8 sh
 ```
 
 ### Quadro M6000 Qwen3.5 9B Q8
 
 ```sh
-curl -fsSL http://192.168.50.176:8000/install.sh | BASE_URL=http://192.168.50.176:8000 LMML_PROFILE_HINT=quadro-m6000-qwen35-9b-q8 sh
+curl -fsSL http://192.168.1.100:8000/install.sh | BASE_URL=http://192.168.1.100:8000 LMML_PROFILE_HINT=quadro-m6000-qwen35-9b-q8 sh
 ```
 
 ### Gemma4 12B QAT Q4_K_M with MTP
 
 ```sh
-curl -fsSL http://192.168.50.176:8000/install.sh | BASE_URL=http://192.168.50.176:8000 LMML_PROFILE_HINT=gemma4-12b-mtp-q4km sh
+curl -fsSL http://192.168.1.100:8000/install.sh | BASE_URL=http://192.168.1.100:8000 LMML_PROFILE_HINT=gemma4-12b-mtp-q4km sh
 ```
 
 Gemma4 MTP requires both GGUF files in the LMML model directory:
@@ -88,8 +88,8 @@ BC-250 should use a source install so llama.cpp is built locally with the Vulkan
 backend:
 
 ```sh
-curl -fsSL http://192.168.50.176:8000/preflight.sh | LMML_INSTALL_MODE=source LMML_GPU_MODE=vulkan bash
-curl -fsSL http://192.168.50.176:8000/install.sh | BASE_URL=http://192.168.50.176:8000 INSTALL_MODE=source LMML_GPU_MODE=vulkan LMML_PROFILE_HINT=bc250-qwen35-9b-q4km-vulkan sh
+curl -fsSL http://192.168.1.100:8000/preflight.sh | LMML_INSTALL_MODE=source LMML_GPU_MODE=vulkan bash
+curl -fsSL http://192.168.1.100:8000/install.sh | BASE_URL=http://192.168.1.100:8000 INSTALL_MODE=source LMML_GPU_MODE=vulkan LMML_PROFILE_HINT=bc250-qwen35-9b-q4km-vulkan sh
 ```
 
 Expected footprint:
@@ -187,8 +187,8 @@ Run the router on the coordinator:
 LMML_ROUTER_API_KEY=router-key lmml-router \
   --host 0.0.0.0 \
   --port 8100 \
-  --upstream workstation=http://192.168.50.178:8101 \
-  --upstream bc250=http://192.168.50.176:8101 \
+  --upstream workstation=http://192.168.1.101:8101 \
+  --upstream bc250=http://192.168.1.100:8101 \
   --upstream-key workstation=worker-key \
   --upstream-key bc250=worker-key
 ```
@@ -214,7 +214,7 @@ that come and go, enable opt-in LAN discovery:
 LMML_NODE_API_KEY=worker-key lmml-node \
   --host 0.0.0.0 \
   --port 8101 \
-  --public-url http://192.168.50.178:8101 \
+  --public-url http://192.168.1.101:8101 \
   --advertise-lan
 
 LMML_ROUTER_API_KEY=router-key lmml-router \
@@ -235,15 +235,15 @@ Use source install when the client needs to build `llama.cpp` locally for its
 own GPU/backend:
 
 ```sh
-curl -fsSL http://192.168.50.176:8000/preflight.sh | LMML_INSTALL_MODE=source bash
-curl -fsSL http://192.168.50.176:8000/install.sh | BASE_URL=http://192.168.50.176:8000 INSTALL_MODE=source bash
+curl -fsSL http://192.168.1.100:8000/preflight.sh | LMML_INSTALL_MODE=source bash
+curl -fsSL http://192.168.1.100:8000/install.sh | BASE_URL=http://192.168.1.100:8000 INSTALL_MODE=source bash
 ```
 
 For CPU-only source install:
 
 ```sh
-curl -fsSL http://192.168.50.176:8000/preflight.sh | LMML_INSTALL_MODE=source LMML_GPU_MODE=cpu-only bash
-curl -fsSL http://192.168.50.176:8000/install.sh | BASE_URL=http://192.168.50.176:8000 INSTALL_MODE=source LMML_GPU_MODE=cpu-only bash
+curl -fsSL http://192.168.1.100:8000/preflight.sh | LMML_INSTALL_MODE=source LMML_GPU_MODE=cpu-only bash
+curl -fsSL http://192.168.1.100:8000/install.sh | BASE_URL=http://192.168.1.100:8000 INSTALL_MODE=source LMML_GPU_MODE=cpu-only bash
 ```
 
 ## Signed Checksum Policy
@@ -254,13 +254,13 @@ accepted for trusted LAN testing, but `SHA256SUMS` is still checked.
 Require minisign verification when a signed checksum is published:
 
 ```sh
-curl -fsSL http://192.168.50.176:8000/install.sh | BASE_URL=http://192.168.50.176:8000 LMML_CHECKSUM_VERIFY=required LMML_MINISIGN_PUBLIC_KEY='<public-key>' sh
+curl -fsSL http://192.168.1.100:8000/install.sh | BASE_URL=http://192.168.1.100:8000 LMML_CHECKSUM_VERIFY=required LMML_MINISIGN_PUBLIC_KEY='<public-key>' sh
 ```
 
 Disable checksum verification only for local debugging:
 
 ```sh
-curl -fsSL http://192.168.50.176:8000/install.sh | BASE_URL=http://192.168.50.176:8000 LMML_CHECKSUM_VERIFY=off sh
+curl -fsSL http://192.168.1.100:8000/install.sh | BASE_URL=http://192.168.1.100:8000 LMML_CHECKSUM_VERIFY=off sh
 ```
 
 ## Client Verification

@@ -181,7 +181,7 @@ rustup show active-toolchain
 sccache --version
 ```
 
-Latest host precheck evidence from Angelo's terminal:
+Latest host precheck evidence from a local validation terminal:
 
 ```text
 NVIDIA GeForce GTX 1080 Ti, driver 580.159.03, 11264 MiB, compute capability 6.1
@@ -220,7 +220,7 @@ llama-server ctx_size:              262144 tokens
 OpenCode compaction.reserved:       49152 tokens for 4-slot fanout
 per-slot context at parallel 4:     65536 tokens
 recommended subagent soft cap:      32768 tokens
-recommended extra_args:             ["--parallel", "4", "--slot-save-path", "/home/angelo/.local/share/lmml/llama-slots"]
+recommended extra_args:             ["--parallel", "4", "--slot-save-path", "/home/user/.local/share/lmml/llama-slots"]
 Qwen thinking sampling:             temperature=0.6 top_p=0.95 top_k=20 min_p=0
 Qwen non-thinking sampling:         temperature=0.7 top_p=0.8 top_k=20 min_p=0
 minimum context for thinking:       128000 tokens
@@ -275,8 +275,8 @@ Latest live validation:
 
 - Date: 2026-06-03
 - Build trigger: installed lmml TUI clean build
-- Server binary: `/home/angelo/.local/share/lmml/llama.cpp/build/bin/llama-server`
-- Model: `/home/angelo/.local/share/lmml/models/Qwen3.5-4B-Q8_0.gguf`
+- Server binary: `/home/user/.local/share/lmml/llama.cpp/build/bin/llama-server`
+- Model: `/home/user/.local/share/lmml/models/Qwen3.5-4B-Q8_0.gguf`
 - Server URL: `http://127.0.0.1:1200`
 - Result: server reached ready state with `ctx_size=262144`, `parallel=1`,
   Q8 KV cache, and `cache_ram=4096`

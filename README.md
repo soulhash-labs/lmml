@@ -323,7 +323,7 @@ LMML_NODE_API_KEY=worker-key lmml-node \
 LMML_ROUTER_API_KEY=router-key lmml-router \
   --host 0.0.0.0 \
   --port 8100 \
-  --upstream workstation=http://192.168.50.178:8101 \
+  --upstream workstation=http://192.168.1.101:8101 \
   --upstream-key workstation=worker-key
 ```
 
@@ -340,7 +340,7 @@ Opt-in LAN discovery:
 LMML_NODE_API_KEY=worker-key lmml-node \
   --host 0.0.0.0 \
   --port 8101 \
-  --public-url http://192.168.50.178:8101 \
+  --public-url http://192.168.1.101:8101 \
   --advertise-lan
 
 LMML_ROUTER_API_KEY=router-key lmml-router \
@@ -459,7 +459,6 @@ Workspace crates:
 - [LLM model support catalog](docs/llm-model-support.md)
 - [Runtime harness plan](docs/runtime-harness-plan.md)
 - [Release checklist](docs/release-checklist.md)
-- [Integration contract](docs/lmml-integration-contract.md)
 
 ## 🧑‍💻 Development
 

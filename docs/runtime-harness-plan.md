@@ -10,10 +10,9 @@ That contract is the Phase 11 target for `lmml-compat` flag generation, profile
 schema expansion, VRAM/context guards, prompt-cache controls, and OpenCode
 compaction drift detection.
 
-Fleet-level machine roles and proposed multi-host profiles are tracked in
-[`docs/lmml-fleet-profiles.md`](lmml-fleet-profiles.md). The Orion
-256k profile is validated; Quadro M6000 and RTX 5070 Ti profiles remain proposed
-until load-tested on those machines.
+Fleet-level machine roles should stay in public runtime profiles only after they
+have generic names, clear validation status, and no site-specific machine
+references.
 
 ## Decision
 
@@ -190,8 +189,8 @@ status          = "ready"
 pid             = 12345
 host            = "127.0.0.1"
 port            = 1200
-model           = "/home/angelo/.local/share/lmml/models/Qwen3.5-4B-Q8_0.gguf"
-log_path        = "/home/angelo/.local/state/lmml/runtime/opencode.log"
+model           = "/home/user/.local/share/lmml/models/Qwen3.5-4B-Q8_0.gguf"
+log_path        = "/home/user/.local/state/lmml/runtime/opencode.log"
 started_at      = "2026-06-01T10:00:00Z"
 last_health_at  = "2026-06-01T10:00:10Z"
 last_health     = "ok"
@@ -352,8 +351,8 @@ This is intentional. Agents and humans should not change OpenCode back to
 `4010/4011` just because those are the default future managed-profile ports.
 Use `4010/4011` only when `lmml runtime start opencode --detach` and
 `lmml runtime start opencode-fast --detach` are the active server lifecycle.
-The frozen evidence snapshot for this working route is
-[`docs/opencode-1200-evidence.md`](opencode-1200-evidence.md).
+Keep any local evidence snapshots outside the public documentation tree unless
+they have been sanitized into generic examples.
 
 For the current TUI server flow, keep these files aligned:
 
@@ -366,12 +365,12 @@ port = 1200
 [runtime.opencode]
 host = "127.0.0.1"
 port = 1200
-model = "/home/angelo/.local/share/lmml/models/Qwen3.5-4B-Q8_0.gguf"
+model = "/home/user/.local/share/lmml/models/Qwen3.5-4B-Q8_0.gguf"
 
 [runtime.opencode-fast]
 host = "127.0.0.1"
 port = 1200
-model = "/home/angelo/.local/share/lmml/models/Qwen3.5-4B-Q8_0.gguf"
+model = "/home/user/.local/share/lmml/models/Qwen3.5-4B-Q8_0.gguf"
 ```
 
 OpenCode config:
@@ -473,7 +472,7 @@ Compaction policy for this machine:
 - Operator red zone is `120000-170000` live prompt tokens.
 - Hard reject/compress threshold is about `170000-190000` live prompt tokens.
 - `llama-server` parallel slots stay at `1` for this 11GB validation machine.
-- Slot save path is `/home/angelo/.local/share/lmml/llama-slots`.
+- Slot save path is `/home/user/.local/share/lmml/llama-slots`.
 - KV cache type is `q8_0` for both K and V.
 - Host cache is `--cache-ram 4096`.
 - Qwen sampling should be profile-specific. For Qwen3.5 thinking mode use

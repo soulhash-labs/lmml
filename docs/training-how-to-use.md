@@ -52,13 +52,13 @@ lmml detects custom-fork capabilities at runtime by parsing
 
 ```sh
 lmml smoke
-/home/angelo/.local/share/lmml/llama.cpp/build/bin/llama-finetune --help | head
+/home/user/.local/share/lmml/llama.cpp/build/bin/llama-finetune --help | head
 ```
 
 Check whether your binary is upstream-style or custom-fork style:
 
 ```sh
-/home/angelo/.local/share/lmml/llama.cpp/build/bin/llama-finetune --help | grep -E 'model-base|train-data|lora-out|checkpoint'
+/home/user/.local/share/lmml/llama.cpp/build/bin/llama-finetune --help | grep -E 'model-base|train-data|lora-out|checkpoint'
 ```
 
 Expected official upstream behavior: no `--lora-out`.
@@ -146,7 +146,7 @@ Notes:
 ### 5. Quantize the output for serving
 
 ```sh
-/home/angelo/.local/share/lmml/llama.cpp/build/bin/llama-quantize \
+/home/user/.local/share/lmml/llama.cpp/build/bin/llama-quantize \
   ./outputs/Qwen3.5-9B-lmml-tuned.gguf \
   ./outputs/Qwen3.5-9B-lmml-tuned-Q8_0.gguf \
   Q8_0
@@ -174,7 +174,7 @@ training.
 ### Capability probe
 
 ```sh
-FINETUNE=/home/angelo/.local/share/lmml/llama.cpp/build/bin/llama-finetune
+FINETUNE=/home/user/.local/share/lmml/llama.cpp/build/bin/llama-finetune
 $FINETUNE --version
 $FINETUNE --help | grep -E 'model-base|train-data|lora-out|checkpoint|--output|--model|--file'
 ```
@@ -241,7 +241,7 @@ Only use this section when capability detection proves the installed binary
 advertises the flags.
 
 ```sh
-/home/angelo/.local/share/lmml/llama.cpp/build/bin/llama-finetune --help | grep -E 'lora-out|checkpoint-in|checkpoint-out'
+/home/user/.local/share/lmml/llama.cpp/build/bin/llama-finetune --help | grep -E 'lora-out|checkpoint-in|checkpoint-out'
 ```
 
 If present:

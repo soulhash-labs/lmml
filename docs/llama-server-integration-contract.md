@@ -117,9 +117,8 @@ Field meanings:
 lmml should ship read-only presets. Operators copy presets into editable
 profiles; presets themselves are never modified.
 
-Fleet-specific profile composition and validation status are tracked in
-[`docs/lmml-fleet-profiles.md`](lmml-fleet-profiles.md). That document
-separates validated local profiles from proposed profiles for other machines.
+Fleet-specific profile composition should stay generic in public docs and must
+separate validated local profiles from proposed profiles for other machines.
 
 ```sh
 lmml profile copy preset-12gb-workstation opencode
@@ -523,8 +522,8 @@ Target detached-profile output:
       "status": "ready",
       "pid": 12345,
       "url": "http://127.0.0.1:4010/v1",
-      "model": "/home/angelo/.local/share/lmml/models/mistral-7b-q4_k_m.gguf",
-      "log_path": "/home/angelo/.local/share/lmml/logs/profile-opencode.log",
+      "model": "/home/user/.local/share/lmml/models/mistral-7b-q4_k_m.gguf",
+      "log_path": "/home/user/.local/share/lmml/logs/profile-opencode.log",
       "last_health": "ok",
       "failure_count": 0
     }

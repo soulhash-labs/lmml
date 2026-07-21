@@ -42,14 +42,14 @@ Important boundaries:
 From a LAN release host:
 
 ```sh
-curl -fsSL http://192.168.50.178:8000/install.sh | BASE_URL=http://192.168.50.178:8000 sh
+curl -fsSL http://192.168.1.101:8000/install.sh | BASE_URL=http://192.168.1.101:8000 sh
 ```
 
 Optional profile hints print recommended settings after install:
 
 ```sh
-curl -fsSL http://192.168.50.178:8000/install.sh | BASE_URL=http://192.168.50.178:8000 LMML_PROFILE_HINT=orion-qwen35-4b-q8 sh
-curl -fsSL http://192.168.50.178:8000/install.sh | BASE_URL=http://192.168.50.178:8000 LMML_PROFILE_HINT=quadro-m6000-qwen35-9b-q8 sh
+curl -fsSL http://192.168.1.101:8000/install.sh | BASE_URL=http://192.168.1.101:8000 LMML_PROFILE_HINT=orion-qwen35-4b-q8 sh
+curl -fsSL http://192.168.1.101:8000/install.sh | BASE_URL=http://192.168.1.101:8000 LMML_PROFILE_HINT=quadro-m6000-qwen35-9b-q8 sh
 ```
 
 ### 2. Run preflight checks
@@ -231,7 +231,7 @@ lmml train \
 Then quantize for serving if needed:
 
 ```sh
-/home/angelo/.local/share/lmml/llama.cpp/build/bin/llama-quantize \
+/home/user/.local/share/lmml/llama.cpp/build/bin/llama-quantize \
   ./models/Qwen3.5-9B-Finetuned.gguf \
   ./models/Qwen3.5-9B-Finetuned-Q8_0.gguf \
   Q8_0
@@ -280,14 +280,14 @@ If a checkout already exists, lmml uses `git pull --ff-only` before building.
 On the release host:
 
 ```sh
-cd /home/angelo/repos/lmml/dist
+cd /path/to/lmml/dist
 python3 -m http.server 8000 --bind 0.0.0.0
 ```
 
 On another LAN machine:
 
 ```sh
-curl -fsSL http://192.168.50.178:8000/install.sh | BASE_URL=http://192.168.50.178:8000 sh
+curl -fsSL http://192.168.1.101:8000/install.sh | BASE_URL=http://192.168.1.101:8000 sh
 ```
 
 ### Package a new release
@@ -322,7 +322,7 @@ it is usually safe to ignore. For 4/6/8-slot agent fanout, use a `kvu` profile.
 Check `--slot-save-path`. It must point to a directory:
 
 ```sh
-mkdir -p /home/angelo/.local/share/lmml/llama-slots
+mkdir -p /home/user/.local/share/lmml/llama-slots
 ```
 
 ### OpenCode cannot start a new session
@@ -343,7 +343,7 @@ operations.
 Your installed `llama-finetune` probably does not advertise those flags. Check:
 
 ```sh
-/home/angelo/.local/share/lmml/llama.cpp/build/bin/llama-finetune --help | grep -E 'lora-out|checkpoint'
+/home/user/.local/share/lmml/llama.cpp/build/bin/llama-finetune --help | grep -E 'lora-out|checkpoint'
 ```
 
 If nothing appears, use full-model GGUF fine-tuning with `--output`.
@@ -353,6 +353,4 @@ If nothing appears, use full-model GGUF fine-tuning with `--output`.
 - `docs/training-how-to-use.md` — training workflow, dataset formatting, and VRAM guidance.
 - `docs/runtime-harness-plan.md` — harness routing and context budget details.
 - `docs/llama-server-integration-contract.md` — server integration contract.
-- `docs/lmml-fleet-profiles.md` — fleet profile rationale.
-- `docs/learnings.md` — operational notes and decisions.
 - `docs/release-checklist.md` — packaging and release validation.
