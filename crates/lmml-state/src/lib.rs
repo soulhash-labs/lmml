@@ -994,6 +994,12 @@ pub struct SystemProfile {
     pub gpu_names: Vec<String>,
     /// Detected GPU CUDA architectures.
     pub gpu_archs: Vec<String>,
+    /// Whether ROCm/HIP was detected as an auto-selectable backend.
+    #[serde(default)]
+    pub rocm_available: bool,
+    /// Detected ROCm/HIP `gfx*` GPU targets.
+    #[serde(default)]
+    pub rocm_targets: Vec<String>,
     /// Total VRAM per GPU in MiB.
     pub vram_mb: Vec<u64>,
     /// Whether sccache was detected.
@@ -1812,6 +1818,8 @@ mod tests {
                 cuda_toolkit: Some("12.4".to_string()),
                 gpu_names: vec!["NVIDIA GeForce RTX 3090".to_string()],
                 gpu_archs: vec!["sm_86".to_string()],
+                rocm_available: false,
+                rocm_targets: Vec::new(),
                 vram_mb: vec![24576],
                 sccache: true,
             }),

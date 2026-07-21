@@ -1415,6 +1415,7 @@ fn backend_kind(backend: &BuildBackend) -> BackendKind {
     match backend {
         BuildBackend::Cuda { .. } => BackendKind::Cuda,
         BuildBackend::Metal => BackendKind::Metal,
+        BuildBackend::Rocm { .. } => BackendKind::Hip,
         BuildBackend::Vulkan => BackendKind::Vulkan,
         BuildBackend::CpuAvx2 => BackendKind::CpuAvx2,
         BuildBackend::CpuAvx => BackendKind::CpuAvx,
@@ -1684,7 +1685,7 @@ mod tests {
     use axum::routing::post;
     use lmml_detect::{
         CpuFeatures, CudaCompatibility, DiskInfo, MemInfo, MetalSupport, NvidiaDeviceNodes,
-        VulkanSupport,
+        RocmSupport, VulkanSupport,
     };
     use pretty_assertions::assert_eq;
     use tower::ServiceExt;
@@ -2935,6 +2936,7 @@ mod tests {
             cmake: None,
             git: None,
             cuda: CudaCompatibility::NoGpu,
+            rocm: RocmSupport::default(),
             gpus: Vec::new(),
             gpu_probe_error: None,
             nvidia_devices: NvidiaDeviceNodes::default(),

@@ -20,6 +20,12 @@ For local llama.cpp inference, the practical priority is:
 VRAM remains the first sizing constraint for local AI. Ecosystem support is the
 second constraint.
 
+Current lmml ROCm/HIP support is conservative: `lmml-detect` probes
+`hipconfig` and `rocminfo`, auto-selects HIP only when at least one `gfx*` target
+is visible, and `lmml-build` emits upstream llama.cpp flags
+`-DGGML_HIP=ON -DGPU_TARGETS=...`. Operators can still force Vulkan for AMD
+cards that have Mesa/RADV support but do not have a clean ROCm stack.
+
 ## NVIDIA CUDA
 
 | Class | GPU | Nominal Memory | LMML Guidance |

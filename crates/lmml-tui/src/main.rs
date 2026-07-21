@@ -888,6 +888,22 @@ async fn run_doctor() -> i32 {
         }
     }
 
+    if profile.rocm.available {
+        let version = profile.rocm.version.as_deref().unwrap_or("version unknown");
+        let targets = if profile.rocm.targets.is_empty() {
+            "targets auto".to_string()
+        } else {
+            profile.rocm.targets.join(", ")
+        };
+        println!("  ✓  ROCm/HIP available  ·  {version}  ·  {targets}");
+    } else if profile.rocm.hipconfig_path.is_some() {
+        soft_issues += 1;
+        println!("  ⚠  ROCm/HIP tooling found, but no supported gfx target was detected");
+        if let Some(error) = &profile.rocm.rocminfo_error {
+            println!("     → rocminfo: {error}");
+        }
+    }
+
     let disk_gb = profile.disk.available_bytes / 1024 / 1024 / 1024;
     if profile.disk.require(4 * 1024 * 1024 * 1024).is_ok() {
         println!("  ✓  disk: {disk_gb} GB available");

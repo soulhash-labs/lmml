@@ -229,6 +229,20 @@ unauthenticated advertisements and still verifies each candidate through
 authenticated `/v1/health`, `/v1/capabilities`, and `/v1/load` probes before
 routing requests.
 
+## AMD ROCm/HIP Source Nodes
+
+Use ROCm/HIP mode on supported AMD cards when `hipconfig` and `rocminfo` both
+work and `rocminfo` reports a real `gfx*` target. lmml passes
+`-DGGML_HIP=ON -DGPU_TARGETS=...` to the upstream llama.cpp CMake build.
+
+```sh
+curl -fsSL http://192.168.1.100:8000/preflight.sh | LMML_INSTALL_MODE=source LMML_GPU_MODE=rocm bash
+curl -fsSL http://192.168.1.100:8000/install.sh | BASE_URL=http://192.168.1.100:8000 INSTALL_MODE=source LMML_GPU_MODE=rocm bash
+```
+
+If the same AMD host has Vulkan/RADV but ROCm is not clean, use
+`LMML_GPU_MODE=vulkan` instead.
+
 ## Source Install
 
 Use source install when the client needs to build `llama.cpp` locally for its

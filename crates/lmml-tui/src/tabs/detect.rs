@@ -2,7 +2,7 @@
 
 use lmml_detect::{
     gpu_catalog, CmakeInfo, CompilerInfo, CudaCompatibility, GitInfo, GpuInfo, MissingPrerequisite,
-    SystemProfile, VulkanSupport,
+    RocmSupport, SystemProfile, VulkanSupport,
 };
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -44,6 +44,12 @@ fn system_lines(app: &App) -> Vec<Line<'static>> {
                     cached.gpu_archs.join(", ")
                 )));
             }
+            if cached.rocm_available {
+                lines.push(Line::from(format!(
+                    "ROCm targets: {}",
+                    cached.rocm_targets.join(", ")
+                )));
+            }
             lines.push(Line::from(""));
             lines.push(Line::from("Press d to refresh full probe details."));
             return lines;
@@ -60,6 +66,9 @@ fn system_lines(app: &App) -> Vec<Line<'static>> {
         git_line(profile.git.as_ref()),
         cuda_line(&profile.cuda),
     ];
+    if let Some(line) = rocm_line(&profile.rocm) {
+        lines.push(line);
+    }
     if let Some(line) = vulkan_line(&profile.vulkan) {
         lines.push(line);
     }
@@ -232,6 +241,24 @@ fn vulkan_line(vulkan: &VulkanSupport) -> Option<Line<'static>> {
     }
 }
 
+fn rocm_line(rocm: &RocmSupport) -> Option<Line<'static>> {
+    if rocm.available {
+        let targets = if rocm.targets.is_empty() {
+            "targets auto".to_string()
+        } else {
+            rocm.targets.join(";")
+        };
+        return Some(badge_line(Badge::Ok, format!("ROCm/HIP: {targets}")));
+    }
+    if rocm.hipconfig_path.is_some() {
+        return Some(badge_line(
+            Badge::Warn,
+            "ROCm/HIP tooling found; no gfx target detected".to_string(),
+        ));
+    }
+    None
+}
+
 fn gpu_lines(gpus: &[GpuInfo]) -> Vec<Line<'static>> {
     if gpus.is_empty() {
         return vec![badge_line(Badge::Warn, "GPU: none detected".to_string())];
@@ -322,6 +349,7 @@ mod tests {
             cuda: CudaCompatibility::Compatible {
                 archs: vec!["sm_86"],
             },
+            rocm: lmml_detect::RocmSupport::default(),
             gpus: vec![GpuInfo {
                 name: "RTX 3090".to_string(),
                 memory_total_mb: 24576,
@@ -381,6 +409,7 @@ mod tests {
             cmake: None,
             git: None,
             cuda: CudaCompatibility::NvccMissing,
+            rocm: lmml_detect::RocmSupport::default(),
             gpus: Vec::new(),
             gpu_probe_error: None,
             nvidia_devices: lmml_detect::NvidiaDeviceNodes::default(),

@@ -502,7 +502,7 @@ if [ "$LMML_PROFILE_HINT" = "qwen36-27b-q4" ] || [ "$LMML_PROFILE_HINT" = "qwen3
   echo "  LMML support mode:"
   echo "    model catalog:                     supported"
   echo "    built-in runtime profile:          not yet field-validated"
-  echo "    recommended backend:               CUDA first, ROCm/Metal/Vulkan only after local validation"
+  echo "    recommended backend:               CUDA, Metal, ROCm/HIP, Vulkan, then CPU by local detection"
   echo "    recommended quant for local use:   Q4-class GGUF on 24GB minimum, 32GB+ preferred"
   echo
   echo "  Notes:"

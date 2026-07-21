@@ -36,6 +36,10 @@ pub struct BuildConfig {
     pub cuda_host_compiler: Option<PathBuf>,
     /// Enable a generated glibc compatibility shim for CUDA 13 C23 math conflicts.
     pub cuda_glibc_compat_shim: bool,
+    /// Optional HIP clang executable used by ROCm/HIP CMake builds.
+    pub rocm_hipcxx: Option<PathBuf>,
+    /// Optional ROCm root exported as `HIP_PATH` for ROCm/HIP CMake builds.
+    pub rocm_hip_path: Option<PathBuf>,
     /// Extra CMake flags appended after generated flags.
     pub extra_cmake_flags: Vec<String>,
     /// Parallel build jobs. `0` means use available parallelism.
@@ -57,6 +61,8 @@ impl BuildConfig {
             cuda_compiler: None,
             cuda_host_compiler: None,
             cuda_glibc_compat_shim: false,
+            rocm_hipcxx: None,
+            rocm_hip_path: None,
             extra_cmake_flags: Vec::new(),
             jobs: 0,
             clean: false,
@@ -252,6 +258,12 @@ pub fn cmake_configure_args(config: &BuildConfig) -> Vec<String> {
             }
         }
         BuildBackend::Metal => args.push("-DGGML_METAL=ON".to_string()),
+        BuildBackend::Rocm { targets } => {
+            args.push("-DGGML_HIP=ON".to_string());
+            if !targets.is_empty() {
+                args.push(format!("-DGPU_TARGETS={}", targets.join(";")));
+            }
+        }
         BuildBackend::Vulkan => args.push("-DGGML_VULKAN=ON".to_string()),
         BuildBackend::CpuAvx2 => args.push("-DGGML_AVX2=ON".to_string()),
         BuildBackend::CpuAvx => args.push("-DGGML_AVX=ON".to_string()),
@@ -296,7 +308,7 @@ fn cuda_glibc_compat_shim_path(config: &BuildConfig) -> PathBuf {
         .join("lmml-cuda13-glibc-compat.h")
 }
 
-fn cuda_configure_env(config: &BuildConfig) -> Vec<(String, String)> {
+fn cmake_configure_env(config: &BuildConfig) -> Vec<(String, String)> {
     let mut env = Vec::new();
     if let Some(cuda_compiler) = &config.cuda_compiler {
         env.push((
@@ -308,6 +320,15 @@ fn cuda_configure_env(config: &BuildConfig) -> Vec<(String, String)> {
         env.push((
             "CUDAHOSTCXX".to_string(),
             host_compiler.to_string_lossy().into_owned(),
+        ));
+    }
+    if let Some(hipcxx) = &config.rocm_hipcxx {
+        env.push(("HIPCXX".to_string(), hipcxx.to_string_lossy().into_owned()));
+    }
+    if let Some(hip_path) = &config.rocm_hip_path {
+        env.push((
+            "HIP_PATH".to_string(),
+            hip_path.to_string_lossy().into_owned(),
         ));
     }
     env
@@ -489,7 +510,7 @@ async fn run_build_inner(
     .await;
     let server = expected_server_binary(&config.source_dir);
     let fingerprint = build_fingerprint(commit, &configure_args, server.clone());
-    let configure_env = cuda_configure_env(config);
+    let configure_env = cmake_configure_env(config);
     stream_command_with_env(
         "cmake",
         &configure_args,
@@ -866,6 +887,7 @@ fn binary_name(base: &str) -> String {
 fn backend_archs(backend: &BuildBackend) -> Vec<String> {
     match backend {
         BuildBackend::Cuda { archs } => archs.iter().map(|arch| (*arch).to_string()).collect(),
+        BuildBackend::Rocm { targets } => targets.clone(),
         BuildBackend::Metal
         | BuildBackend::Vulkan
         | BuildBackend::CpuAvx2
@@ -975,7 +997,7 @@ mod tests {
     }
 
     #[test]
-    fn cuda_configure_env_sets_cuda_tools() {
+    fn cmake_configure_env_sets_cuda_and_rocm_tools() {
         let mut config = BuildConfig::new(
             PathBuf::from("/tmp/llama.cpp"),
             BuildBackend::Cuda {
@@ -984,15 +1006,19 @@ mod tests {
         );
         config.cuda_compiler = Some(PathBuf::from("/usr/local/cuda-12.4/bin/nvcc"));
         config.cuda_host_compiler = Some(PathBuf::from("/usr/bin/g++-11"));
+        config.rocm_hipcxx = Some(PathBuf::from("/opt/rocm/llvm/bin/clang"));
+        config.rocm_hip_path = Some(PathBuf::from("/opt/rocm"));
 
         assert_eq!(
-            cuda_configure_env(&config),
+            cmake_configure_env(&config),
             vec![
                 (
                     "CUDACXX".to_string(),
                     "/usr/local/cuda-12.4/bin/nvcc".to_string()
                 ),
-                ("CUDAHOSTCXX".to_string(), "/usr/bin/g++-11".to_string())
+                ("CUDAHOSTCXX".to_string(), "/usr/bin/g++-11".to_string()),
+                ("HIPCXX".to_string(), "/opt/rocm/llvm/bin/clang".to_string()),
+                ("HIP_PATH".to_string(), "/opt/rocm".to_string())
             ]
         );
     }
@@ -1001,6 +1027,12 @@ mod tests {
     fn assembles_backend_specific_flags() {
         let cases = [
             (BuildBackend::Metal, Some("-DGGML_METAL=ON")),
+            (
+                BuildBackend::Rocm {
+                    targets: vec!["gfx1100".to_string()],
+                },
+                Some("-DGGML_HIP=ON"),
+            ),
             (BuildBackend::Vulkan, Some("-DGGML_VULKAN=ON")),
             (BuildBackend::CpuAvx2, Some("-DGGML_AVX2=ON")),
             (BuildBackend::CpuAvx, Some("-DGGML_AVX=ON")),
@@ -1015,9 +1047,34 @@ mod tests {
             } else {
                 assert!(!args.iter().any(|arg| arg.starts_with("-DGGML_AVX")));
                 assert!(!args.iter().any(|arg| arg == "-DGGML_METAL=ON"));
+                assert!(!args.iter().any(|arg| arg == "-DGGML_HIP=ON"));
                 assert!(!args.iter().any(|arg| arg == "-DGGML_VULKAN=ON"));
             }
         }
+    }
+
+    #[test]
+    fn assembles_rocm_gpu_targets() {
+        let config = BuildConfig::new(
+            PathBuf::from("/tmp/llama.cpp"),
+            BuildBackend::Rocm {
+                targets: vec!["gfx1100".to_string(), "gfx942".to_string()],
+            },
+        );
+
+        assert_eq!(
+            cmake_configure_args(&config),
+            vec![
+                "-S",
+                "/tmp/llama.cpp",
+                "-B",
+                "/tmp/llama.cpp/build",
+                "-DCMAKE_BUILD_TYPE=Release",
+                "-DLLAMA_BUILD_SERVER=ON",
+                "-DGGML_HIP=ON",
+                "-DGPU_TARGETS=gfx1100;gfx942",
+            ]
+        );
     }
 
     #[test]

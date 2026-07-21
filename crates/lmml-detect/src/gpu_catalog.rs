@@ -577,6 +577,7 @@ mod tests {
             cuda: CudaCompatibility::Compatible {
                 archs: vec!["sm_89"],
             },
+            rocm: crate::RocmSupport::default(),
             gpus: vec![GpuInfo {
                 name: "NVIDIA GeForce RTX 4090".to_string(),
                 memory_total_mb: 24_576,

@@ -205,13 +205,27 @@ curl -fsSL https://release.example/install.sh | \
 ### Source-Build Bootstrap
 
 Use source mode when the target machine must build `llama.cpp` locally, such as
-Vulkan-only or unusual GPU hosts:
+ROCm/HIP, Vulkan-only, or unusual GPU hosts:
 
 ```sh
 curl -fsSL http://192.168.1.100:8000/preflight.sh | LMML_INSTALL_MODE=source bash
 curl -fsSL http://192.168.1.100:8000/install.sh | \
   BASE_URL=http://192.168.1.100:8000 \
   INSTALL_MODE=source \
+  bash
+```
+
+For AMD ROCm/HIP nodes with a supported `rocminfo` `gfx*` target:
+
+```sh
+curl -fsSL http://192.168.1.100:8000/preflight.sh | \
+  LMML_INSTALL_MODE=source \
+  LMML_GPU_MODE=rocm \
+  bash
+curl -fsSL http://192.168.1.100:8000/install.sh | \
+  BASE_URL=http://192.168.1.100:8000 \
+  INSTALL_MODE=source \
+  LMML_GPU_MODE=rocm \
   bash
 ```
 

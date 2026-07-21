@@ -13,6 +13,12 @@ GPU_MODE=${LMML_GPU_MODE:-required}
 HARD_FAILURES=0
 GPU_FAILURES=0
 APT_PACKAGES=()
+CUDA_DRIVER_OK=0
+CUDA_TOOLKIT_OK=0
+CUDA_OK=0
+ROCM_OK=0
+VULKAN_OK=0
+METAL_OK=0
 
 section() {
   printf '\n%b%s%b\n' "$BOLD" "$1" "$NC"
@@ -100,10 +106,10 @@ case "$MODE" in
 esac
 
 case "$GPU_MODE" in
-  required|cpu-only|vulkan) ;;
+  required|cpu-only|rocm|vulkan) ;;
   *)
     printf '%b✗ Unsupported LMML_GPU_MODE=%s%b\n' "$RED" "$GPU_MODE" "$NC" >&2
-    printf '  Use LMML_GPU_MODE=required, LMML_GPU_MODE=vulkan, or LMML_GPU_MODE=cpu-only.\n' >&2
+    printf '  Use LMML_GPU_MODE=required, LMML_GPU_MODE=rocm, LMML_GPU_MODE=vulkan, or LMML_GPU_MODE=cpu-only.\n' >&2
     exit 2
     ;;
 esac
@@ -209,6 +215,8 @@ fi
 section "GPU ACCELERATION"
 if [[ "$GPU_MODE" == "cpu-only" ]]; then
   warn "CPU-only mode selected; GPU acceleration checks are informational."
+elif [[ "$GPU_MODE" == "rocm" ]]; then
+  printf 'ROCm/HIP GPU acceleration selected for lmml preflight.\n'
 elif [[ "$GPU_MODE" == "vulkan" ]]; then
   printf 'Vulkan GPU acceleration selected for lmml preflight.\n'
 else
@@ -218,25 +226,19 @@ fi
 if command -v nvidia-smi >/dev/null 2>&1; then
   if NVIDIA_SMI_OUTPUT=$(nvidia-smi --query-gpu=name,memory.total,compute_cap --format=csv,noheader 2>&1); then
     ok "NVIDIA driver/GPU probe succeeded"
+    CUDA_DRIVER_OK=1
     printf '%s\n' "$NVIDIA_SMI_OUTPUT" | sed 's/^/    /'
   else
-    if [[ "$GPU_MODE" == "cpu-only" || "$GPU_MODE" == "vulkan" ]]; then
-      warn "nvidia-smi failed: $NVIDIA_SMI_OUTPUT"
-    else
-      gpu_fail "nvidia-smi failed: $NVIDIA_SMI_OUTPUT"
-    fi
+    warn "nvidia-smi failed: $NVIDIA_SMI_OUTPUT"
   fi
 else
-  if [[ "$GPU_MODE" == "cpu-only" || "$GPU_MODE" == "vulkan" ]]; then
-    warn "nvidia-smi not found"
-  else
-    gpu_fail "nvidia-smi not found"
-  fi
+  warn "nvidia-smi not found"
 fi
 
 if command -v nvcc >/dev/null 2>&1; then
   NVCC_VERSION=$(nvcc --version | sed -n 's/.*release \([^,]*\).*/\1/p' | head -n 1)
   ok "nvcc ${NVCC_VERSION:-found}"
+  CUDA_TOOLKIT_OK=1
   GCC_MAJOR=""
   if command -v g++ >/dev/null 2>&1; then
     GCC_MAJOR=$(major_version "$(g++ -dumpfullversion -dumpversion)")
@@ -252,16 +254,64 @@ if command -v nvcc >/dev/null 2>&1; then
     fi
   fi
 else
-  if [[ "$GPU_MODE" == "cpu-only" || "$GPU_MODE" == "vulkan" ]]; then
-    warn "nvcc not found"
+  warn "nvcc not found"
+fi
+
+if (( CUDA_DRIVER_OK == 1 && CUDA_TOOLKIT_OK == 1 )); then
+  CUDA_OK=1
+fi
+
+if command -v hipconfig >/dev/null 2>&1; then
+  if HIP_VERSION=$(hipconfig --version 2>&1 | first_line); then
+    ok "hipconfig ${HIP_VERSION:-found}"
   else
-    gpu_fail "nvcc not found"
+    warn "hipconfig exists but version probe failed: $(printf '%s\n' "$HIP_VERSION" | first_line)"
+  fi
+  if HIP_ROOT=$(hipconfig -R 2>/dev/null | first_line); then
+    [[ -n "$HIP_ROOT" ]] && ok "HIP_PATH $HIP_ROOT"
+  fi
+  if HIP_LLVM=$(hipconfig -l 2>/dev/null | first_line); then
+    if [[ -n "$HIP_LLVM" && -x "$HIP_LLVM/clang" ]]; then
+      ok "HIP clang $HIP_LLVM/clang"
+    elif [[ -n "$HIP_LLVM" ]]; then
+      warn "HIP clang not executable at $HIP_LLVM/clang"
+    fi
+  fi
+  if command -v rocminfo >/dev/null 2>&1; then
+    if ROCMINFO_OUTPUT=$(rocminfo 2>&1); then
+      ROCM_TARGETS=$(printf '%s\n' "$ROCMINFO_OUTPUT" | grep -Eo 'gfx[0-9a-z]+' | grep -v '^gfx000$' | sed 's/^gfx1035$/gfx1030/' | sort -u | tr '\n' ' ' | sed 's/[[:space:]]*$//' || true)
+      if [[ -n "$ROCM_TARGETS" ]]; then
+        ok "ROCm gfx targets: $ROCM_TARGETS"
+        ROCM_OK=1
+      else
+        warn "rocminfo succeeded but no supported gfx target was reported"
+      fi
+    else
+      if [[ "$GPU_MODE" == "rocm" ]]; then
+        gpu_fail "rocminfo failed: $(printf '%s\n' "$ROCMINFO_OUTPUT" | first_line)"
+      else
+        warn "rocminfo failed: $(printf '%s\n' "$ROCMINFO_OUTPUT" | first_line)"
+      fi
+    fi
+  else
+    if [[ "$GPU_MODE" == "rocm" ]]; then
+      gpu_fail "rocminfo not found"
+    else
+      warn "rocminfo not found"
+    fi
+  fi
+else
+  if [[ "$GPU_MODE" == "rocm" ]]; then
+    gpu_fail "hipconfig not found"
+  else
+    warn "hipconfig not found"
   fi
 fi
 
 if command -v vulkaninfo >/dev/null 2>&1; then
   if vulkaninfo --summary >/dev/null 2>&1; then
     ok "Vulkan runtime available"
+    VULKAN_OK=1
   else
     if [[ "$GPU_MODE" == "vulkan" ]]; then
       gpu_fail "vulkaninfo found but summary probe failed"
@@ -271,6 +321,7 @@ if command -v vulkaninfo >/dev/null 2>&1; then
   fi
 elif command -v ldconfig >/dev/null 2>&1 && ldconfig -p 2>/dev/null | grep -q 'libvulkan'; then
   ok "libvulkan found"
+  VULKAN_OK=1
 else
   if [[ "$GPU_MODE" == "vulkan" ]]; then
     gpu_fail "Vulkan runtime not detected"
@@ -282,6 +333,7 @@ fi
 if [[ "$OS" == "Darwin" ]]; then
   if system_profiler SPDisplaysDataType 2>/dev/null | grep -q "Metal"; then
     ok "Metal supported"
+    METAL_OK=1
   else
     if [[ "$GPU_MODE" == "cpu-only" ]]; then
       warn "Metal support not detected"
@@ -291,6 +343,14 @@ if [[ "$OS" == "Darwin" ]]; then
   fi
 else
   printf '  Metal: N/A on %s\n' "$OS"
+fi
+
+if [[ "$GPU_MODE" == "required" && "$CUDA_OK" == "0" && "$ROCM_OK" == "0" && "$VULKAN_OK" == "0" && "$METAL_OK" == "0" ]]; then
+  gpu_fail "no usable GPU backend detected; need CUDA, ROCm/HIP, Vulkan, or Metal"
+elif [[ "$GPU_MODE" == "rocm" && "$ROCM_OK" == "0" && "$GPU_FAILURES" == "0" ]]; then
+  gpu_fail "ROCm/HIP mode selected but no usable HIP gfx target was detected"
+elif [[ "$GPU_MODE" == "vulkan" && "$VULKAN_OK" == "0" && "$GPU_FAILURES" == "0" ]]; then
+  gpu_fail "Vulkan mode selected but no usable Vulkan runtime was detected"
 fi
 
 section "RESOLUTION"
@@ -308,6 +368,7 @@ fi
 
 if (( HARD_FAILURES > 0 || GPU_FAILURES > 0 )); then
   printf '\n%bPreflight failed:%b %d hard prerequisite failure(s), %d first-class GPU acceleration failure(s).\n' "$RED" "$NC" "$HARD_FAILURES" "$GPU_FAILURES"
+  printf '  For ROCm/HIP nodes, re-run with LMML_GPU_MODE=rocm after installing ROCm and rocminfo.\n'
   printf '  For Vulkan-only nodes, re-run with LMML_GPU_MODE=vulkan.\n'
   printf '  For intentional CPU-only nodes, re-run with LMML_GPU_MODE=cpu-only.\n'
   exit 1
@@ -315,6 +376,8 @@ fi
 
 if [[ "$GPU_MODE" == "cpu-only" ]]; then
   printf '\n%bPreflight passed.%b Hard prerequisites passed for an intentional CPU-only node.\n' "$GREEN" "$NC"
+elif [[ "$GPU_MODE" == "rocm" ]]; then
+  printf '\n%bPreflight passed.%b Hard prerequisites and ROCm/HIP acceleration checks passed.\n' "$GREEN" "$NC"
 elif [[ "$GPU_MODE" == "vulkan" ]]; then
   printf '\n%bPreflight passed.%b Hard prerequisites and Vulkan acceleration checks passed.\n' "$GREEN" "$NC"
 else

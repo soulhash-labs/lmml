@@ -261,6 +261,7 @@ fn profile() -> lmml_detect::SystemProfile {
         cmake: None,
         git: None,
         cuda: CudaCompatibility::NoGpu,
+        rocm: lmml_detect::RocmSupport::default(),
         gpus: Vec::new(),
         gpu_probe_error: None,
         nvidia_devices: lmml_detect::NvidiaDeviceNodes::default(),

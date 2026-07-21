@@ -116,9 +116,10 @@ diff -u /tmp/lmml-SHA256SUMS.first dist/SHA256SUMS
 
 ## ROCm Scope
 
-ROCm/HIP remains a documented v2 production gap. Do not claim AMD GPU
-acceleration is production-ready until the ROCm probe, build flags, telemetry,
-settings wiring, and tests are implemented.
+ROCm/HIP is implemented as a conservative source-build backend. Release checks
+must verify `hipconfig`/`rocminfo` probing, `gfx*` target mapping,
+`-DGGML_HIP=ON -DGPU_TARGETS=...` CMake flags, settings persistence, and tests.
+Do not claim complete AMD production telemetry until ROCm VRAM polling is added.
 
 ## Debian-Family Linux Cross-Target Validation
 

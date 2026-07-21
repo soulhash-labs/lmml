@@ -1,9 +1,9 @@
 //! Hardware and prerequisite detection for lmml.
 //!
 //! This crate probes the local machine for the compiler, build tools, CUDA,
-//! Vulkan, GPU architecture, CPU features, RAM, and disk space needed to build
-//! and run llama.cpp. The main entry point is [`SystemProfile::detect`], which
-//! runs the probes concurrently and returns a complete [`SystemProfile`].
+//! ROCm/HIP, Vulkan, GPU architecture, CPU features, RAM, and disk space needed
+//! to build and run llama.cpp. The main entry point is [`SystemProfile::detect`],
+//! which runs the probes concurrently and returns a complete [`SystemProfile`].
 
 use std::collections::BTreeSet;
 use std::ffi::CString;
@@ -114,6 +114,8 @@ pub struct SystemProfile {
     pub git: Option<GitInfo>,
     /// CUDA toolkit/GPU compatibility state.
     pub cuda: CudaCompatibility,
+    /// ROCm/HIP toolchain and GPU target capability.
+    pub rocm: RocmSupport,
     /// CUDA-capable GPUs reported by `nvidia-smi`.
     pub gpus: Vec<GpuInfo>,
     /// Error returned by `nvidia-smi` when GPU enumeration failed.
@@ -155,6 +157,7 @@ impl SystemProfile {
             cmake: None,
             git: None,
             cuda: CudaCompatibility::NvccMissing,
+            rocm: RocmSupport::default(),
             gpus: Vec::new(),
             gpu_probe_error: Some("system probe skipped".to_string()),
             nvidia_devices: NvidiaDeviceNodes {
@@ -206,6 +209,10 @@ impl SystemProfile {
             | CudaCompatibility::NvccMissing => {
                 if self.metal.available {
                     BuildBackend::Metal
+                } else if self.rocm.available {
+                    BuildBackend::Rocm {
+                        targets: self.rocm.targets.clone(),
+                    }
                 } else if self.vulkan.available {
                     BuildBackend::Vulkan
                 } else if self.cpu.avx2 {
@@ -320,6 +327,19 @@ impl SystemProfile {
                     .map(|message| DetectionWarning { message }),
             );
         }
+        if self.rocm.hipconfig_path.is_some() && !self.rocm.available {
+            let detail = self
+                .rocm
+                .rocminfo_error
+                .as_deref()
+                .filter(|message| !message.is_empty())
+                .unwrap_or("rocminfo did not report a supported gfx target");
+            warnings.push(DetectionWarning {
+                message: format!(
+                    "ROCm/HIP tooling found, but HIP backend is not auto-selected: {detail}"
+                ),
+            });
+        }
         if self.sccache.is_none() {
             warnings.push(DetectionWarning {
                 message: "sccache not found; repeat builds will be slower".to_string(),
@@ -339,6 +359,7 @@ where
     let cmake = detect_cmake(runner);
     let git = detect_git(runner);
     let nvcc = detect_nvcc(runner);
+    let rocm = detect_rocm(runner);
     let gpus = detect_gpus(runner);
     let nvidia_devices = detect_nvidia_device_nodes();
     let sccache = detect_sccache(runner);
@@ -353,6 +374,7 @@ where
         cmake,
         git,
         nvcc,
+        rocm,
         gpus,
         nvidia_devices,
         sccache,
@@ -366,6 +388,7 @@ where
         cmake,
         git,
         nvcc,
+        rocm,
         gpus,
         nvidia_devices,
         sccache,
@@ -385,6 +408,7 @@ where
         cmake,
         git,
         cuda,
+        rocm,
         gpus,
         gpu_probe_error,
         nvidia_devices,
@@ -546,6 +570,25 @@ pub enum CudaCompatibility {
     NvccMissing,
 }
 
+/// ROCm/HIP toolchain and target information used for AMD GPU builds.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RocmSupport {
+    /// Whether lmml can safely auto-select the HIP backend.
+    pub available: bool,
+    /// `hipconfig` executable path, if detected.
+    pub hipconfig_path: Option<PathBuf>,
+    /// ROCm/HIP version string, when `hipconfig --version` reports one.
+    pub version: Option<String>,
+    /// ROCm root returned by `hipconfig -R`, exported as `HIP_PATH` for llama.cpp builds.
+    pub hip_path: Option<PathBuf>,
+    /// HIP clang executable inferred from `hipconfig -l`, if available.
+    pub hip_clang_path: Option<PathBuf>,
+    /// Normalized AMD GPU targets, such as `gfx1100`.
+    pub targets: Vec<String>,
+    /// Error returned by `rocminfo` when target detection failed.
+    pub rocminfo_error: Option<String>,
+}
+
 /// macOS Metal capability.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetalSupport {
@@ -650,6 +693,11 @@ pub enum BuildBackend {
     },
     /// Apple Metal backend.
     Metal,
+    /// AMD ROCm/HIP backend with optional `gfx*` GPU targets.
+    Rocm {
+        /// Normalized AMD GPU targets, such as `gfx1100`.
+        targets: Vec<String>,
+    },
     /// Vulkan backend.
     Vulkan,
     /// CPU backend with AVX2 acceleration.
@@ -857,6 +905,82 @@ where
         path,
         version: parse_cuda_version(&output.stdout)?,
     })
+}
+
+async fn detect_rocm<R>(runner: &R) -> RocmSupport
+where
+    R: CommandRunner + Sync,
+{
+    let Some(hipconfig_path) = which(runner, "hipconfig").await else {
+        return RocmSupport::default();
+    };
+    let program = hipconfig_path.to_string_lossy();
+    let version_output = runner.run(&program, &["--version"], None).await;
+    let version = version_output.success.then(|| {
+        parse_version(&version_output.stdout)
+            .or_else(|| parse_version(&version_output.stderr))
+            .unwrap_or_else(|| first_line(&version_output.stdout, &version_output.stderr))
+    });
+
+    let hip_path = rocm_hip_path_from_hipconfig(runner, &program).await;
+    let hip_clang_path = rocm_hip_clang_from_hipconfig(runner, &program).await;
+    let rocminfo = runner.run("rocminfo", &[], None).await;
+    let targets = if rocminfo.success {
+        parse_rocm_targets(&rocminfo.stdout)
+    } else {
+        Vec::new()
+    };
+    let rocminfo_error = (!rocminfo.success)
+        .then(|| first_line(&rocminfo.stderr, &rocminfo.stdout))
+        .filter(|message| !message.is_empty());
+
+    RocmSupport {
+        available: !targets.is_empty(),
+        hipconfig_path: Some(hipconfig_path),
+        version: version.filter(|value| !value.is_empty()),
+        hip_path,
+        hip_clang_path,
+        targets,
+        rocminfo_error,
+    }
+}
+
+async fn rocm_hip_path_from_hipconfig<R>(runner: &R, program: &str) -> Option<PathBuf>
+where
+    R: CommandRunner + Sync,
+{
+    let output = runner.run(program, &["-R"], None).await;
+    output
+        .success
+        .then(|| {
+            output
+                .stdout
+                .lines()
+                .next()
+                .map(str::trim)
+                .unwrap_or_default()
+        })
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+}
+
+async fn rocm_hip_clang_from_hipconfig<R>(runner: &R, program: &str) -> Option<PathBuf>
+where
+    R: CommandRunner + Sync,
+{
+    let output = runner.run(program, &["-l"], None).await;
+    output
+        .success
+        .then(|| {
+            output
+                .stdout
+                .lines()
+                .next()
+                .map(str::trim)
+                .unwrap_or_default()
+        })
+        .filter(|path| !path.is_empty())
+        .map(|path| PathBuf::from(path).join("clang"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1131,6 +1255,33 @@ fn parse_cuda_version(output: &str) -> Option<CudaVersion> {
             minor,
         })
     })
+}
+
+/// Parse and normalize AMD ROCm GPU targets from `rocminfo` output.
+pub fn parse_rocm_targets(output: &str) -> Vec<String> {
+    output
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter_map(normalize_rocm_target)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn normalize_rocm_target(token: &str) -> Option<String> {
+    let token = token.trim();
+    let suffix = token.strip_prefix("gfx")?;
+    if suffix.is_empty() || !suffix.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+        return None;
+    }
+    if !suffix.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    match token {
+        "gfx000" => None,
+        // llama.cpp upstream documents gfx1035 hosts as compiling for gfx1030.
+        "gfx1035" => Some("gfx1030".to_string()),
+        _ => Some(token.to_string()),
+    }
 }
 
 fn parse_version(output: &str) -> Option<String> {
@@ -1454,7 +1605,67 @@ mod tests {
     }
 
     #[test]
-    fn recommended_backend_prefers_cuda_then_metal_then_vulkan_then_cpu() {
+    fn parses_rocm_targets_from_rocminfo() {
+        let output = "\
+Agent 2
+  Name:                    gfx1100
+  Marketing Name:          AMD Radeon RX 7900 XTX
+Agent 3
+  Name:                    gfx1035
+Agent 4
+  Name:                    gfx000
+";
+        assert_eq!(
+            parse_rocm_targets(output),
+            vec!["gfx1030".to_string(), "gfx1100".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn rocm_probe_detects_hipconfig_and_gfx_targets() {
+        let runner = FakeRunner::default()
+            .with(
+                "which",
+                &["hipconfig"],
+                FakeRunner::success("/opt/rocm/bin/hipconfig\n"),
+            )
+            .with(
+                "/opt/rocm/bin/hipconfig",
+                &["--version"],
+                FakeRunner::success("HIP version: 7.0.1\n"),
+            )
+            .with(
+                "/opt/rocm/bin/hipconfig",
+                &["-R"],
+                FakeRunner::success("/opt/rocm\n"),
+            )
+            .with(
+                "/opt/rocm/bin/hipconfig",
+                &["-l"],
+                FakeRunner::success("/opt/rocm/llvm/bin\n"),
+            )
+            .with(
+                "rocminfo",
+                &[],
+                FakeRunner::success("Name:                    gfx942\n"),
+            );
+
+        assert_eq!(
+            detect_rocm(&runner).await,
+            RocmSupport {
+                available: true,
+                hipconfig_path: Some(PathBuf::from("/opt/rocm/bin/hipconfig")),
+                version: Some("7.0.1".to_string()),
+                hip_path: Some(PathBuf::from("/opt/rocm")),
+                hip_clang_path: Some(PathBuf::from("/opt/rocm/llvm/bin/clang")),
+                targets: vec!["gfx942".to_string()],
+                rocminfo_error: None,
+            }
+        );
+    }
+
+    #[test]
+    fn recommended_backend_prefers_cuda_then_metal_then_rocm_then_vulkan_then_cpu() {
         let mut profile = minimal_profile();
         profile.cuda = CudaCompatibility::Compatible {
             archs: vec!["sm_86"],
@@ -1478,6 +1689,19 @@ mod tests {
         assert_eq!(profile.recommended_backend(), BuildBackend::Metal);
 
         profile.metal.available = false;
+        profile.rocm = RocmSupport {
+            available: true,
+            targets: vec!["gfx1100".to_string()],
+            ..RocmSupport::default()
+        };
+        assert_eq!(
+            profile.recommended_backend(),
+            BuildBackend::Rocm {
+                targets: vec!["gfx1100".to_string()],
+            }
+        );
+
+        profile.rocm = RocmSupport::default();
         profile.vulkan.available = true;
         assert_eq!(profile.recommended_backend(), BuildBackend::Vulkan);
 
@@ -1714,6 +1938,7 @@ flags\t\t: fpu sse4_1 sse4_2 avx avx2 avx512f
                 meets_minimum: true,
             }),
             cuda: CudaCompatibility::NvccMissing,
+            rocm: RocmSupport::default(),
             gpus: Vec::new(),
             gpu_probe_error: None,
             nvidia_devices: NvidiaDeviceNodes {

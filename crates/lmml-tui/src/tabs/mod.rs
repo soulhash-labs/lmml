@@ -483,6 +483,7 @@ mod tests {
             cuda: CudaCompatibility::Compatible {
                 archs: vec!["sm_86"],
             },
+            rocm: lmml_detect::RocmSupport::default(),
             gpus: vec![GpuInfo {
                 name: "NVIDIA RTX 3090".to_string(),
                 memory_total_mb: 24_576,
@@ -536,6 +537,7 @@ mod tests {
             }),
             git: None,
             cuda: CudaCompatibility::NvccMissing,
+            rocm: lmml_detect::RocmSupport::default(),
             gpus: Vec::new(),
             gpu_probe_error: None,
             nvidia_devices: lmml_detect::NvidiaDeviceNodes::default(),

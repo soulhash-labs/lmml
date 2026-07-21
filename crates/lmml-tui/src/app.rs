@@ -349,6 +349,8 @@ impl App {
                         .iter()
                         .filter_map(|gpu| gpu.arch.map(ToOwned::to_owned))
                         .collect(),
+                    rocm_available: profile.rocm.available,
+                    rocm_targets: profile.rocm.targets.clone(),
                     vram_mb: profile.gpus.iter().map(|gpu| gpu.memory_total_mb).collect(),
                     sccache: profile.sccache.is_some(),
                 });
@@ -1200,10 +1202,8 @@ impl App {
         } else {
             backend_from_state(&self.state.build.backend, &self.state.build.archs)
         };
-        let requested_backend = refresh_cuda_backend_for_detected_profile(
-            requested_backend,
-            self.detect_profile.as_ref(),
-        );
+        let requested_backend =
+            refresh_backend_for_detected_profile(requested_backend, self.detect_profile.as_ref());
 
         let cuda_compiler = matches!(requested_backend, BuildBackend::Cuda { .. })
             .then(|| detect_cuda_compiler_preference(&requested_backend))
@@ -1229,6 +1229,16 @@ impl App {
                 cuda_glibc_compat_shim_needed(config.cuda_compiler.as_deref());
             config.cuda_host_compiler =
                 detect_cuda_host_compiler_workaround(config.cuda_compiler.as_deref());
+        }
+        if matches!(config.backend, BuildBackend::Rocm { .. }) {
+            config.rocm_hipcxx = self
+                .detect_profile
+                .as_ref()
+                .and_then(|profile| profile.rocm.hip_clang_path.clone());
+            config.rocm_hip_path = self
+                .detect_profile
+                .as_ref()
+                .and_then(|profile| profile.rocm.hip_path.clone());
         }
         if self.state.build.track_mode == lmml_state::TrackMode::Tag
             && !self.state.build.commit.is_empty()
@@ -1462,6 +1472,9 @@ fn backend_from_state(backend: &str, archs: &[String]) -> BuildBackend {
                 .collect(),
         },
         "Metal" => BuildBackend::Metal,
+        "Rocm" => BuildBackend::Rocm {
+            targets: archs.to_vec(),
+        },
         "Vulkan" => BuildBackend::Vulkan,
         "CpuAvx2" => BuildBackend::CpuAvx2,
         "CpuAvx" => BuildBackend::CpuAvx,
@@ -1474,6 +1487,7 @@ fn backend_name(backend: &BuildBackend) -> String {
     match backend {
         BuildBackend::Cuda { .. } => "Cuda",
         BuildBackend::Metal => "Metal",
+        BuildBackend::Rocm { .. } => "Rocm",
         BuildBackend::Vulkan => "Vulkan",
         BuildBackend::CpuAvx2 => "CpuAvx2",
         BuildBackend::CpuAvx => "CpuAvx",
@@ -1485,6 +1499,7 @@ fn backend_name(backend: &BuildBackend) -> String {
 fn backend_archs(backend: &BuildBackend) -> Vec<String> {
     match backend {
         BuildBackend::Cuda { archs } => archs.iter().map(|arch| (*arch).to_string()).collect(),
+        BuildBackend::Rocm { targets } => targets.clone(),
         BuildBackend::Metal
         | BuildBackend::Vulkan
         | BuildBackend::CpuAvx2
@@ -1493,22 +1508,37 @@ fn backend_archs(backend: &BuildBackend) -> Vec<String> {
     }
 }
 
-fn refresh_cuda_backend_for_detected_profile(
+fn refresh_backend_for_detected_profile(
     backend: BuildBackend,
     profile: Option<&SystemProfile>,
 ) -> BuildBackend {
-    let BuildBackend::Cuda { .. } = backend else {
-        return backend;
-    };
-    match profile.map(SystemProfile::recommended_backend) {
-        Some(BuildBackend::Cuda { archs }) if !archs.is_empty() => BuildBackend::Cuda { archs },
-        Some(BuildBackend::Cuda { .. })
-        | Some(BuildBackend::Metal)
-        | Some(BuildBackend::Vulkan)
-        | Some(BuildBackend::CpuAvx2)
-        | Some(BuildBackend::CpuAvx)
-        | Some(BuildBackend::CpuFallback)
-        | None => backend,
+    match backend {
+        backend @ BuildBackend::Cuda { .. } => {
+            match profile.map(SystemProfile::recommended_backend) {
+                Some(BuildBackend::Cuda { archs }) if !archs.is_empty() => {
+                    BuildBackend::Cuda { archs }
+                }
+                Some(BuildBackend::Cuda { .. })
+                | Some(BuildBackend::Metal)
+                | Some(BuildBackend::Rocm { .. })
+                | Some(BuildBackend::Vulkan)
+                | Some(BuildBackend::CpuAvx2)
+                | Some(BuildBackend::CpuAvx)
+                | Some(BuildBackend::CpuFallback)
+                | None => backend,
+            }
+        }
+        BuildBackend::Rocm { targets } if targets.is_empty() => {
+            if let Some(profile) = profile {
+                if profile.rocm.available && !profile.rocm.targets.is_empty() {
+                    return BuildBackend::Rocm {
+                        targets: profile.rocm.targets.clone(),
+                    };
+                }
+            }
+            BuildBackend::Rocm { targets }
+        }
+        backend => backend,
     }
 }
 
@@ -1524,6 +1554,11 @@ fn fallback_non_cuda_backend(profile: Option<&SystemProfile>) -> BuildBackend {
     if let Some(profile) = profile {
         if profile.metal.available {
             return BuildBackend::Metal;
+        }
+        if profile.rocm.available {
+            return BuildBackend::Rocm {
+                targets: profile.rocm.targets.clone(),
+            };
         }
         if profile.vulkan.available {
             return BuildBackend::Vulkan;
@@ -1541,7 +1576,10 @@ fn fallback_non_cuda_backend(profile: Option<&SystemProfile>) -> BuildBackend {
 fn next_backend(current: BuildBackend) -> BuildBackend {
     match current {
         BuildBackend::Cuda { .. } => BuildBackend::Metal,
-        BuildBackend::Metal => BuildBackend::Vulkan,
+        BuildBackend::Metal => BuildBackend::Rocm {
+            targets: Vec::new(),
+        },
+        BuildBackend::Rocm { .. } => BuildBackend::Vulkan,
         BuildBackend::Vulkan => BuildBackend::CpuAvx2,
         BuildBackend::CpuAvx2 => BuildBackend::CpuAvx,
         BuildBackend::CpuAvx => BuildBackend::CpuFallback,
@@ -1675,6 +1713,7 @@ fn cuda_backend_targets_legacy_archs(backend: &BuildBackend) -> bool {
                     .all(|arch| cuda_arch_number(arch).is_some_and(|number| number <= 75))
         }
         BuildBackend::Metal
+        | BuildBackend::Rocm { .. }
         | BuildBackend::Vulkan
         | BuildBackend::CpuAvx2
         | BuildBackend::CpuAvx
@@ -1712,6 +1751,7 @@ fn cuda_backend_targets_archs_dropped_by_cuda13(backend: &BuildBackend) -> bool 
             .iter()
             .any(|arch| cuda_arch_number(arch).is_some_and(|number| number <= 72)),
         BuildBackend::Metal
+        | BuildBackend::Rocm { .. }
         | BuildBackend::Vulkan
         | BuildBackend::CpuAvx2
         | BuildBackend::CpuAvx
@@ -2008,6 +2048,48 @@ mod tests {
     }
 
     #[test]
+    fn build_config_uses_rocm_targets_and_tool_paths() {
+        let mut app = App::default();
+        let mut profile = cuda_profile();
+        profile.cuda = lmml_detect::CudaCompatibility::NoGpu;
+        profile.gpus.clear();
+        profile.rocm = lmml_detect::RocmSupport {
+            available: true,
+            hip_clang_path: Some(PathBuf::from("/opt/rocm/llvm/bin/clang")),
+            hip_path: Some(PathBuf::from("/opt/rocm")),
+            targets: vec!["gfx1100".to_string()],
+            ..lmml_detect::RocmSupport::default()
+        };
+        app.detect_profile = Some(profile);
+        app.state.build.backend = "Auto".to_string();
+
+        let config = app.build_config(false);
+
+        assert_eq!(
+            config.backend,
+            BuildBackend::Rocm {
+                targets: vec!["gfx1100".to_string()],
+            }
+        );
+        assert_eq!(
+            config.rocm_hipcxx,
+            Some(PathBuf::from("/opt/rocm/llvm/bin/clang"))
+        );
+        assert_eq!(config.rocm_hip_path, Some(PathBuf::from("/opt/rocm")));
+
+        app.state.build.backend = "Rocm".to_string();
+        app.state.build.archs.clear();
+        let config = app.build_config(false);
+
+        assert_eq!(
+            config.backend,
+            BuildBackend::Rocm {
+                targets: vec!["gfx1100".to_string()],
+            }
+        );
+    }
+
+    #[test]
     fn startup_completion_clears_detect_and_scan_in_flight_state() {
         let mut app = App::default();
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -2036,6 +2118,7 @@ mod tests {
             cmake: None,
             git: None,
             cuda: lmml_detect::CudaCompatibility::NoGpu,
+            rocm: lmml_detect::RocmSupport::default(),
             gpus: Vec::new(),
             gpu_probe_error: None,
             nvidia_devices: lmml_detect::NvidiaDeviceNodes::default(),
@@ -2195,6 +2278,7 @@ mod tests {
             cmake: None,
             git: None,
             cuda: lmml_detect::CudaCompatibility::NoGpu,
+            rocm: lmml_detect::RocmSupport::default(),
             gpus: vec![lmml_detect::GpuInfo {
                 name: "RTX".to_string(),
                 memory_total_mb: 8_192,
@@ -2886,6 +2970,7 @@ mod tests {
             cuda: lmml_detect::CudaCompatibility::Compatible {
                 archs: vec!["sm_86"],
             },
+            rocm: lmml_detect::RocmSupport::default(),
             gpus: vec![lmml_detect::GpuInfo {
                 name: "RTX".to_string(),
                 memory_total_mb: 8_192,
