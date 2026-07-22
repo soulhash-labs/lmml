@@ -139,6 +139,31 @@ pub fn render_opencode_config(state: &AppState) -> Result<String, RuntimeCliErro
     serde_json::to_string_pretty(&value).map_err(RuntimeCliError::SerializeJson)
 }
 
+/// Render a Codex profile config that points Codex at lmml's Responses endpoint.
+pub fn render_codex_config(state: &AppState) -> Result<String, RuntimeCliError> {
+    let profile = state
+        .runtime
+        .profile("opencode")
+        .ok_or(RuntimeCliError::UnknownProfile)?;
+    let model = codex_model_name(profile);
+    let base_url = profile.api_base_url();
+    Ok(format!(
+        concat!(
+            "# ~/.codex/lmml.config.toml\n",
+            "# Run with: codex --profile lmml\n",
+            "model_provider = \"lmml\"\n",
+            "model = {model}\n",
+            "\n",
+            "[model_providers.lmml]\n",
+            "name = \"lmml\"\n",
+            "base_url = {base_url}\n",
+            "wire_api = \"responses\"\n"
+        ),
+        model = toml_string(&model),
+        base_url = toml_string(&base_url),
+    ))
+}
+
 /// Return warning lines for incomplete OpenCode runtime profiles.
 pub fn opencode_config_warnings(state: &AppState) -> Vec<String> {
     RuntimeConfig::profile_names()
@@ -859,6 +884,19 @@ fn opencode_model_name(profile: &RuntimeProfile, fallback: &str) -> String {
     }
 }
 
+fn codex_model_name(profile: &RuntimeProfile) -> String {
+    let model_name = profile.model_name();
+    if model_name.is_empty() {
+        "lmml-model-unset.gguf".to_string()
+    } else {
+        model_name
+    }
+}
+
+fn toml_string(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+}
+
 fn read_json_or_empty(path: &Path) -> Result<Value, RuntimeCliError> {
     if !path.exists() {
         return Ok(Value::Object(Map::new()));
@@ -1368,6 +1406,20 @@ mod tests {
         );
         assert_eq!(json["model"], "llamacpp/full.gguf");
         assert_eq!(json["small_model"], "llamacpp_fast/fast.gguf");
+    }
+
+    #[test]
+    fn codex_config_targets_responses_endpoint() {
+        let mut state = AppState::default();
+        state.runtime.opencode.model = PathBuf::from("/models/full.gguf");
+
+        let rendered = render_codex_config(&state).expect("render config");
+
+        assert!(rendered.contains("model_provider = \"lmml\""));
+        assert!(rendered.contains("model = \"full.gguf\""));
+        assert!(rendered.contains("base_url = \"http://127.0.0.1:1200/v1\""));
+        assert!(rendered.contains("wire_api = \"responses\""));
+        assert!(rendered.contains("codex --profile lmml"));
     }
 
     #[test]

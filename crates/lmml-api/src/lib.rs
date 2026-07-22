@@ -208,6 +208,9 @@ pub struct NodeCapabilities {
     pub supports_infer: bool,
     /// True when `/v1/chat/completions` proxy compatibility is supported.
     pub supports_chat_completions: bool,
+    /// True when `/v1/responses` proxy compatibility is supported.
+    #[serde(default)]
+    pub supports_responses: bool,
     /// True when `/v1/messages` Anthropic Messages compatibility is supported.
     #[serde(default)]
     pub supports_anthropic_messages: bool,
@@ -551,6 +554,7 @@ mod tests {
             max_context_tokens: None,
             supports_infer: true,
             supports_chat_completions: false,
+            supports_responses: true,
             supports_anthropic_messages: true,
             supports_embeddings: false,
             supports_server_control: false,
@@ -567,6 +571,7 @@ mod tests {
         assert_eq!(value["llama_cpp_commit"], "abc123");
         assert_eq!(value["auth_required"], true);
         assert_eq!(value["supports_anthropic_messages"], true);
+        assert_eq!(value["supports_responses"], true);
     }
 
     #[test]

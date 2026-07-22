@@ -30,7 +30,7 @@ GPU machines.
 
 ```mermaid
 flowchart LR
-    Human["🧑‍💻 Human / Developer"] --> Client["🔌 OpenCode, Claude Code, scripts, agents"]
+    Human["🧑‍💻 Human / Developer"] --> Client["🔌 Codex, OpenCode, Claude Code, scripts, agents"]
     Client --> API["🌐 OpenAI or Anthropic-compatible API"]
     API --> LMML["🧭 lmml"]
     LMML --> Llama["🦙 llama.cpp / llama-server"]
@@ -46,7 +46,7 @@ the whole path dependable:
 - choosing the right backend for CUDA, ROCm/HIP, Vulkan, Metal, Intel, or CPU;
 - compiling a recent `llama.cpp` build with the right flags;
 - matching GGUF models to VRAM, context, KV cache, draft heads, and chat format;
-- exposing a safe local endpoint for tools such as OpenCode, Claude Code,
+- exposing a safe local endpoint for tools such as Codex, OpenCode, Claude Code,
   Hermes-style clients, scripts, and agents;
 - using idle LAN GPUs without turning every workstation into a manual snowflake.
 
@@ -96,8 +96,8 @@ Implemented and tested today:
 - LAN routing binary: `lmml-router`.
 - Linux x86_64 LAN install/release flow for v0.1.0.
 - Source-build bootstrap for development and host-specific builds.
-- OpenAI-compatible `/v1/chat/completions`, `/v1/embeddings`, and `/v1/models`
-  pass-throughs.
+- OpenAI-compatible `/v1/responses`, `/v1/chat/completions`, `/v1/embeddings`,
+  and `/v1/models` pass-throughs.
 - Anthropic `/v1/messages` compatibility endpoint through `lmml-node` and
   `lmml-router`.
 - Model-family guidance for Qwen3.5, Qwen3.6, Gemma 4, and Hermes 4.
@@ -131,8 +131,9 @@ build, scan models, start/stop the server, inspect logs, and switch profiles.
 **🧠 GGUF model management:** Scans local model directories, tracks aliases, reads
 basic metadata, and maps known model families to safer runtime guidance.
 
-**🔌 Agent-ready serving:** Runs local `llama-server` endpoints for OpenCode,
-Claude Code, Hermes-style clients, shell scripts, and OpenAI-compatible tools.
+**🔌 Agent-ready serving:** Runs local `llama-server` endpoints for Codex,
+OpenCode, Claude Code, Hermes-style clients, shell scripts, and
+OpenAI-compatible tools.
 
 **💬 Anthropic compatibility:** Adds `/v1/messages` translation for clients that
 speak Anthropic-style Messages APIs while your backend remains `llama.cpp`.
@@ -262,6 +263,38 @@ Quick verification:
 curl -fsS http://127.0.0.1:1200/health
 curl -fsS http://127.0.0.1:1200/v1/models
 opencode models llamacpp
+```
+
+### Codex CLI
+
+Codex uses the OpenAI Responses API for custom model providers. Recent
+`llama.cpp` exposes `/v1/responses`, and `lmml-node` / `lmml-router` pass that
+route through to the managed `llama-server`.
+
+Print a Codex profile snippet:
+
+```sh
+lmml runtime print-config codex
+```
+
+Add the reviewed TOML to `~/.codex/lmml.config.toml`, then start Codex with:
+
+```sh
+codex --profile lmml
+```
+
+For LAN routing, keep the same profile shape but set the provider `base_url` to
+the router:
+
+```toml
+model_provider = "lmml"
+model = "Qwen3.5-4B-Q8_0.gguf"
+
+[model_providers.lmml]
+name = "lmml LAN router"
+base_url = "http://<router-ip>:8100/v1"
+wire_api = "responses"
+env_key = "LMML_ROUTER_API_KEY"
 ```
 
 ### Claude Code

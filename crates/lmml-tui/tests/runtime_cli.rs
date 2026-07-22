@@ -28,6 +28,15 @@ fn runtime_read_only_commands_do_not_create_state_file() {
 
     assert!(output.status.success());
     assert!(!state_path.exists());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_lmml"))
+        .env("XDG_CONFIG_HOME", tempdir.path())
+        .args(["runtime", "print-config", "codex"])
+        .output()
+        .expect("run runtime print-config codex");
+
+    assert!(output.status.success());
+    assert!(!state_path.exists());
 }
 
 #[test]

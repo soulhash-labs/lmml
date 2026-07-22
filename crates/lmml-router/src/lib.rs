@@ -289,6 +289,7 @@ pub fn router(state: RouterAppState) -> Router {
         .route("/v1/infer", post(infer))
         .route("/v1/messages", post(anthropic_messages))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/responses", post(responses))
         .route("/v1/embeddings", post(embeddings))
         .with_state(state)
 }
@@ -438,6 +439,13 @@ async fn chat_completions(
     request: AxumRequest<axum::body::Body>,
 ) -> Result<Response, ApiFailure> {
     proxy_json_route(&state, request, "/v1/chat/completions").await
+}
+
+async fn responses(
+    State(state): State<RouterAppState>,
+    request: AxumRequest<axum::body::Body>,
+) -> Result<Response, ApiFailure> {
+    proxy_json_route(&state, request, "/v1/responses").await
 }
 
 async fn anthropic_messages(
@@ -784,6 +792,7 @@ fn aggregate_capabilities(state: &RouterAppState, probes: &[UpstreamProbe]) -> N
     let mut max_context_tokens = None;
     let mut supports_infer = false;
     let mut supports_chat_completions = false;
+    let mut supports_responses = false;
     let mut supports_anthropic_messages = false;
     let mut supports_embeddings = false;
     let mut backends = BTreeSet::new();
@@ -802,6 +811,7 @@ fn aggregate_capabilities(state: &RouterAppState, probes: &[UpstreamProbe]) -> N
         max_context_tokens = max_context_tokens.max(capabilities.max_context_tokens);
         supports_infer |= capabilities.supports_infer;
         supports_chat_completions |= capabilities.supports_chat_completions;
+        supports_responses |= capabilities.supports_responses;
         supports_anthropic_messages |= capabilities.supports_anthropic_messages;
         supports_embeddings |= capabilities.supports_embeddings;
         backends.insert(format!("{:?}", capabilities.backend));
@@ -842,6 +852,7 @@ fn aggregate_capabilities(state: &RouterAppState, probes: &[UpstreamProbe]) -> N
         max_context_tokens,
         supports_infer,
         supports_chat_completions,
+        supports_responses,
         supports_anthropic_messages,
         supports_embeddings,
         supports_server_control: false,
@@ -941,6 +952,7 @@ fn route_supported(capabilities: &NodeCapabilities, path: &str) -> bool {
     match path {
         "/v1/infer" => capabilities.supports_infer,
         "/v1/chat/completions" => capabilities.supports_chat_completions,
+        "/v1/responses" => capabilities.supports_responses,
         "/v1/messages" => capabilities.supports_anthropic_messages,
         "/v1/embeddings" => capabilities.supports_embeddings,
         _ => false,
@@ -969,7 +981,11 @@ fn model_supported(capabilities: &NodeCapabilities, model: Option<&str>) -> bool
 
 fn requested_model(path: &str, value: &Value) -> Option<String> {
     match path {
-        "/v1/infer" | "/v1/chat/completions" | "/v1/messages" | "/v1/embeddings" => value
+        "/v1/infer"
+        | "/v1/chat/completions"
+        | "/v1/responses"
+        | "/v1/messages"
+        | "/v1/embeddings" => value
             .get("model")
             .and_then(Value::as_str)
             .filter(|model| !model.trim().is_empty())
@@ -1426,6 +1442,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn responses_choose_least_loaded_ready_node() {
+        let busy = spawn_upstream(mock_node(
+            "busy",
+            "shared-model",
+            BackendKind::Cuda,
+            9,
+            "/v1/responses",
+        ))
+        .await;
+        let idle = spawn_upstream(mock_node(
+            "idle",
+            "shared-model",
+            BackendKind::Vulkan,
+            1,
+            "/v1/responses",
+        ))
+        .await;
+        let app = test_router(RouterConfig {
+            api_key: Some("secret".to_string()),
+            upstreams: vec![
+                UpstreamNodeConfig::new("busy", busy),
+                UpstreamNodeConfig::new("idle", idle),
+            ],
+            ..RouterConfig::default()
+        });
+
+        let response = app
+            .oneshot(json_request(
+                "/v1/responses",
+                &json!({ "model": "shared-model", "input": "hello" }),
+                Some("secret"),
+            ))
+            .await
+            .expect("response");
+        let body = json_body(response).await;
+
+        assert_eq!(body["choices"][0]["message"]["content"], "idle");
+    }
+
+    #[tokio::test]
     async fn no_routable_upstream_returns_service_unavailable() {
         let app = test_router(RouterConfig {
             api_key: Some("secret".to_string()),
@@ -1801,6 +1857,7 @@ mod tests {
                             max_context_tokens: Some(4096),
                             supports_infer: true,
                             supports_chat_completions: true,
+                            supports_responses: true,
                             supports_anthropic_messages: true,
                             supports_embeddings: true,
                             supports_server_control: false,

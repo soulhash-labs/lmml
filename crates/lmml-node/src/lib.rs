@@ -261,6 +261,7 @@ impl NodeSnapshot {
             models,
             supports_infer: true,
             supports_chat_completions: true,
+            supports_responses: true,
             supports_anthropic_messages: true,
             supports_embeddings: true,
             supports_server_control: self.config.enable_server_control,
@@ -329,6 +330,7 @@ pub fn router(state: NodeAppState) -> Router {
         .route("/v1/infer", post(infer))
         .route("/v1/messages", post(anthropic_messages))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/responses", post(responses))
         .route("/v1/embeddings", post(embeddings))
         .route("/v1/server/control", post(server_control))
         .with_state(state)
@@ -386,6 +388,13 @@ async fn chat_completions(
     request: AxumRequest<axum::body::Body>,
 ) -> Result<Response, ApiFailure> {
     proxy_json_passthrough(&state, request, "/v1/chat/completions").await
+}
+
+async fn responses(
+    State(state): State<NodeAppState>,
+    request: AxumRequest<axum::body::Body>,
+) -> Result<Response, ApiFailure> {
+    proxy_json_passthrough(&state, request, "/v1/responses").await
 }
 
 async fn anthropic_messages(
@@ -1899,6 +1908,7 @@ mod tests {
 
         assert!(capabilities.supports_infer);
         assert!(capabilities.supports_chat_completions);
+        assert!(capabilities.supports_responses);
         assert!(capabilities.supports_anthropic_messages);
         assert!(capabilities.supports_embeddings);
         assert!(!capabilities.supports_server_control);
@@ -2642,6 +2652,40 @@ mod tests {
         let body = response_text(response).await;
         let echoed: Value = serde_json::from_str(&body).expect("echoed json");
         assert_eq!(echoed["messages"][0]["content"], "hello");
+    }
+
+    #[tokio::test]
+    async fn responses_preserves_upstream_success_status_and_body() {
+        let upstream = spawn_upstream(axum::Router::new().route(
+            "/v1/responses",
+            post(|body: String| async move {
+                (
+                    StatusCode::ACCEPTED,
+                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                    body,
+                )
+            }),
+        ))
+        .await;
+        let app = router(NodeAppState::new(test_snapshot(NodeConfig {
+            api_key: Some("secret".to_string()),
+            llama_base_url: upstream,
+            ..NodeConfig::default()
+        })));
+        let request_body = r#"{"model":"local","input":"hello"}"#;
+        let response = app
+            .oneshot(raw_json_request(
+                "/v1/responses",
+                request_body,
+                Some("secret"),
+            ))
+            .await
+            .expect("responses response");
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = response_text(response).await;
+        let echoed: Value = serde_json::from_str(&body).expect("echoed json");
+        assert_eq!(echoed["input"], "hello");
     }
 
     #[tokio::test]

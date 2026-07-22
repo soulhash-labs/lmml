@@ -137,6 +137,8 @@ enum RuntimeCommand {
 enum RuntimeConfigTarget {
     /// OpenCode provider config.
     Opencode,
+    /// Codex CLI profile config.
+    Codex,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -638,6 +640,16 @@ fn run_runtime_print_config(state: &lmml_state::AppState, target: RuntimeConfigT
                 }
             }
         }
+        RuntimeConfigTarget::Codex => match runtime_cli::render_codex_config(state) {
+            Ok(rendered) => {
+                println!("{rendered}");
+                0
+            }
+            Err(error) => {
+                eprintln!("failed to render Codex config: {error}");
+                1
+            }
+        },
     }
 }
 
@@ -705,6 +717,10 @@ fn run_runtime_configure(state: &lmml_state::AppState, args: RuntimeConfigureArg
                     1
                 }
             }
+        }
+        RuntimeConfigTarget::Codex => {
+            eprintln!("automatic Codex config writes are not supported; use `lmml runtime print-config codex` and review the TOML before adding it to ~/.codex/lmml.config.toml");
+            2
         }
     }
 }
