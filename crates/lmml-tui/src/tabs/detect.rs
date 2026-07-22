@@ -2,7 +2,7 @@
 
 use lmml_detect::{
     gpu_catalog, CmakeInfo, CompilerInfo, CudaCompatibility, GitInfo, GpuInfo, MissingPrerequisite,
-    RocmSupport, SystemProfile, VulkanSupport,
+    RocmGpuInfo, RocmSupport, SystemProfile, VulkanSupport,
 };
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -72,7 +72,7 @@ fn system_lines(app: &App) -> Vec<Line<'static>> {
     if let Some(line) = vulkan_line(&profile.vulkan) {
         lines.push(line);
     }
-    lines.extend(gpu_lines(&profile.gpus));
+    lines.extend(gpu_lines(profile));
     lines.push(badge_line(
         if profile.sccache.is_some() {
             Badge::Ok
@@ -259,24 +259,52 @@ fn rocm_line(rocm: &RocmSupport) -> Option<Line<'static>> {
     None
 }
 
-fn gpu_lines(gpus: &[GpuInfo]) -> Vec<Line<'static>> {
-    if gpus.is_empty() {
-        return vec![badge_line(Badge::Warn, "GPU: none detected".to_string())];
-    }
-    gpus.iter()
-        .map(|gpu| {
-            let arch = gpu.arch.unwrap_or("unknown");
+fn gpu_lines(profile: &SystemProfile) -> Vec<Line<'static>> {
+    let mut lines = profile.gpus.iter().map(cuda_gpu_line).collect::<Vec<_>>();
+    if profile.rocm.devices.is_empty() {
+        lines.extend(profile.rocm.targets.iter().map(|target| {
             badge_line(
                 Badge::Ok,
-                format!(
-                    "{} · {} · {} GB VRAM",
-                    gpu.name,
-                    arch,
-                    gpu.memory_total_mb / 1024
-                ),
+                format!("AMD ROCm GPU {target} · {target} · VRAM unknown"),
             )
-        })
-        .collect()
+        }));
+    } else {
+        lines.extend(profile.rocm.devices.iter().map(rocm_gpu_line));
+    }
+    if lines.is_empty() {
+        return vec![badge_line(Badge::Warn, "GPU: none detected".to_string())];
+    }
+    lines
+}
+
+fn cuda_gpu_line(gpu: &GpuInfo) -> Line<'static> {
+    let arch = gpu.arch.unwrap_or("unknown");
+    badge_line(
+        Badge::Ok,
+        format!(
+            "{} · {} · {}",
+            gpu.name,
+            arch,
+            format_vram(gpu.memory_total_mb, None)
+        ),
+    )
+}
+
+fn rocm_gpu_line(gpu: &RocmGpuInfo) -> Line<'static> {
+    let target = gpu.target.as_deref().unwrap_or("gfx unknown");
+    let vram = gpu
+        .vram
+        .map(|memory| format_vram(memory.total_mb, Some(memory.free_mb)))
+        .unwrap_or_else(|| "VRAM unknown".to_string());
+    badge_line(Badge::Ok, format!("{} · {} · {}", gpu.name, target, vram))
+}
+
+fn format_vram(total_mb: u64, free_mb: Option<u64>) -> String {
+    let total = total_mb / 1024;
+    match free_mb {
+        Some(free_mb) => format!("{total} GB VRAM ({} GB free)", free_mb / 1024),
+        None => format!("{total} GB VRAM"),
+    }
 }
 
 fn ai_catalog_lines(profile: &SystemProfile) -> Vec<Line<'static>> {
@@ -399,6 +427,67 @@ mod tests {
                 archs: vec!["sm_86"]
             }
         )));
+    }
+
+    #[test]
+    fn system_lines_show_rocm_gpu_vram_without_cuda() {
+        let mut app = App::default();
+        app.detect_profile = Some(SystemProfile {
+            compiler: None,
+            cmake: None,
+            git: None,
+            cuda: CudaCompatibility::NoGpu,
+            rocm: lmml_detect::RocmSupport {
+                available: true,
+                targets: vec!["gfx1100".to_string()],
+                devices: vec![RocmGpuInfo {
+                    name: "AMD Radeon RX 7900 XTX".to_string(),
+                    target: Some("gfx1100".to_string()),
+                    vram: Some(lmml_detect::GpuVramInfo {
+                        total_mb: 24_576,
+                        used_mb: 1_024,
+                        free_mb: 23_552,
+                    }),
+                }],
+                ..lmml_detect::RocmSupport::default()
+            },
+            gpus: Vec::new(),
+            gpu_probe_error: None,
+            nvidia_devices: lmml_detect::NvidiaDeviceNodes::default(),
+            sccache: None,
+            metal: MetalSupport {
+                available: false,
+                displays: Vec::new(),
+            },
+            vulkan: VulkanSupport {
+                available: false,
+                devices: Vec::new(),
+            },
+            cpu: CpuFeatures {
+                model: "CPU".to_string(),
+                cores: 8,
+                threads: 16,
+                avx: true,
+                avx2: true,
+                avx512: false,
+                neon: false,
+                features: Vec::new(),
+            },
+            memory: MemInfo {
+                total_mb: 65_536,
+                available_mb: 32_768,
+            },
+            disk: DiskInfo {
+                available_bytes: 8 * 1024 * 1024 * 1024,
+                path: PathBuf::from("/tmp"),
+            },
+        });
+
+        let text = flatten_lines(system_lines(&app));
+        assert!(text.contains("AMD Radeon RX 7900 XTX"));
+        assert!(text.contains("gfx1100"));
+        assert!(text.contains("24 GB VRAM (23 GB free)"));
+        assert!(!text.contains("GPU: none detected"));
     }
 
     #[test]

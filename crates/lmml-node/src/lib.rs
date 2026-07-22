@@ -23,7 +23,9 @@ use lmml_api::{
     API_VERSION, HEADER_REQUEST_ID, LAN_DISCOVERY_DEFAULT_INTERVAL_MS,
     LAN_DISCOVERY_MULTICAST_ADDR,
 };
-use lmml_detect::{BuildBackend, GpuInfo, SystemProfile};
+use lmml_detect::{
+    detect_rocm_vram, BuildBackend, GpuInfo, GpuVramInfo, RocmGpuInfo, SystemProfile,
+};
 use lmml_models::{ModelEntry, ModelRegistry};
 use lmml_state::ModelState;
 use serde_json::{json, Value};
@@ -48,6 +50,7 @@ pub const DEFAULT_INFER_TIMEOUT_MS: u64 = 7_200_000;
 pub const MAX_PROXY_BODY_BYTES: usize = 1024 * 1024;
 
 const HEALTH_CHECK_TIMEOUT_MS: u64 = 500;
+const ROCM_VRAM_PROBE_TIMEOUT_MS: u64 = 750;
 
 /// Runtime configuration for an LMML node API server.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -256,7 +259,7 @@ impl NodeSnapshot {
             tags: self.config.tags.clone(),
             privacy: privacy_tier(&self.config),
             backend: backend_kind(&self.system.recommended_backend()),
-            gpus: gpu_descriptors(&self.system.gpus),
+            gpus: gpu_descriptors(&self.system, None),
             max_context_tokens: models.iter().filter_map(|model| model.context_length).max(),
             models,
             supports_infer: true,
@@ -274,6 +277,10 @@ impl NodeSnapshot {
 
     /// Build the load DTO for the current snapshot.
     pub fn load(&self, llama_healthy: bool) -> LoadResponse {
+        self.load_with_gpus(llama_healthy, gpu_descriptors(&self.system, None))
+    }
+
+    fn load_with_gpus(&self, llama_healthy: bool, gpus: Vec<GpuDescriptor>) -> LoadResponse {
         LoadResponse {
             node_id: self.config.node_id.clone(),
             status: if llama_healthy {
@@ -288,7 +295,7 @@ impl NodeSnapshot {
                 .memory
                 .total_mb
                 .saturating_sub(self.system.memory.available_mb),
-            gpus: gpu_descriptors(&self.system.gpus),
+            gpus,
             running_requests: 0,
             completed_requests: 0,
             failed_requests: 0,
@@ -355,7 +362,8 @@ async fn load(
 ) -> Result<Json<LoadResponse>, ApiFailure> {
     authorize(&state.snapshot.config, &headers)?;
     let llama_healthy = upstream_llama_healthy(&state).await;
-    Ok(Json(state.snapshot.load(llama_healthy)))
+    let gpus = live_gpu_descriptors(&state.snapshot.system).await;
+    Ok(Json(state.snapshot.load_with_gpus(llama_healthy, gpus)))
 }
 
 async fn models(
@@ -1382,6 +1390,19 @@ async fn upstream_llama_healthy(state: &NodeAppState) -> bool {
     false
 }
 
+async fn live_gpu_descriptors(system: &SystemProfile) -> Vec<GpuDescriptor> {
+    if !system.rocm.available {
+        return gpu_descriptors(system, None);
+    }
+
+    let timeout = Duration::from_millis(ROCM_VRAM_PROBE_TIMEOUT_MS);
+    let live_vram = tokio::time::timeout(timeout, detect_rocm_vram())
+        .await
+        .ok()
+        .and_then(|probe| (!probe.devices.is_empty()).then_some(probe.devices));
+    gpu_descriptors(system, live_vram.as_deref())
+}
+
 fn is_local_bind(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
@@ -1586,16 +1607,64 @@ fn map_upstream_chat_response(
     })
 }
 
-fn gpu_descriptors(gpus: &[GpuInfo]) -> Vec<GpuDescriptor> {
-    gpus.iter()
-        .map(|gpu| GpuDescriptor {
-            name: gpu.name.clone(),
-            backend: BackendKind::Cuda,
-            arch: gpu.arch.map(str::to_string),
-            vram_total_mb: gpu.memory_total_mb,
-            vram_free_mb: None,
-        })
-        .collect()
+fn gpu_descriptors(
+    system: &SystemProfile,
+    live_rocm_vram: Option<&[GpuVramInfo]>,
+) -> Vec<GpuDescriptor> {
+    let mut descriptors = system
+        .gpus
+        .iter()
+        .map(cuda_gpu_descriptor)
+        .collect::<Vec<_>>();
+
+    for (index, device) in system.rocm.devices.iter().enumerate() {
+        let vram = live_rocm_vram
+            .and_then(|devices| devices.get(index).copied())
+            .or(device.vram);
+        descriptors.push(rocm_gpu_descriptor(device, vram));
+    }
+
+    if system.rocm.devices.is_empty() {
+        let live_rocm_vram = live_rocm_vram.unwrap_or_default();
+        let fallback_count = system.rocm.targets.len().max(live_rocm_vram.len());
+        for index in 0..fallback_count {
+            let vram = live_rocm_vram.get(index).copied();
+            let target = system.rocm.targets.get(index).cloned();
+            descriptors.push(rocm_gpu_descriptor(
+                &RocmGpuInfo {
+                    name: target
+                        .as_ref()
+                        .map(|target| format!("AMD ROCm GPU {target}"))
+                        .unwrap_or_else(|| format!("AMD ROCm GPU {index}")),
+                    target,
+                    vram,
+                },
+                vram,
+            ));
+        }
+    }
+
+    descriptors
+}
+
+fn cuda_gpu_descriptor(gpu: &GpuInfo) -> GpuDescriptor {
+    GpuDescriptor {
+        name: gpu.name.clone(),
+        backend: BackendKind::Cuda,
+        arch: gpu.arch.map(str::to_string),
+        vram_total_mb: gpu.memory_total_mb,
+        vram_free_mb: None,
+    }
+}
+
+fn rocm_gpu_descriptor(device: &RocmGpuInfo, vram: Option<GpuVramInfo>) -> GpuDescriptor {
+    GpuDescriptor {
+        name: device.name.clone(),
+        backend: BackendKind::Hip,
+        arch: device.target.clone(),
+        vram_total_mb: vram.map(|memory| memory.total_mb).unwrap_or_default(),
+        vram_free_mb: vram.map(|memory| memory.free_mb),
+    }
 }
 
 fn model_descriptors(models: &[ModelEntry], include_paths: bool) -> Vec<ModelDescriptor> {
@@ -2955,6 +3024,75 @@ mod tests {
     #[test]
     fn default_model_dir_matches_lmml_state() {
         assert_eq!(default_model_dir(), ModelState::default().models_dir);
+    }
+
+    #[test]
+    fn rocm_gpu_descriptors_include_snapshot_and_live_vram() {
+        let mut profile = test_system_profile();
+        profile.rocm = RocmSupport {
+            available: true,
+            targets: vec!["gfx1100".to_string()],
+            devices: vec![RocmGpuInfo {
+                name: "AMD Radeon RX 7900 XTX".to_string(),
+                target: Some("gfx1100".to_string()),
+                vram: Some(GpuVramInfo {
+                    total_mb: 24_576,
+                    used_mb: 1_024,
+                    free_mb: 23_552,
+                }),
+            }],
+            ..RocmSupport::default()
+        };
+
+        assert_eq!(
+            gpu_descriptors(&profile, None),
+            vec![GpuDescriptor {
+                name: "AMD Radeon RX 7900 XTX".to_string(),
+                backend: BackendKind::Hip,
+                arch: Some("gfx1100".to_string()),
+                vram_total_mb: 24_576,
+                vram_free_mb: Some(23_552),
+            }]
+        );
+        assert_eq!(
+            gpu_descriptors(
+                &profile,
+                Some(&[GpuVramInfo {
+                    total_mb: 24_576,
+                    used_mb: 4_096,
+                    free_mb: 20_480,
+                }])
+            ),
+            vec![GpuDescriptor {
+                name: "AMD Radeon RX 7900 XTX".to_string(),
+                backend: BackendKind::Hip,
+                arch: Some("gfx1100".to_string()),
+                vram_total_mb: 24_576,
+                vram_free_mb: Some(20_480),
+            }]
+        );
+    }
+
+    #[test]
+    fn rocm_gpu_descriptors_fall_back_to_targets() {
+        let mut profile = test_system_profile();
+        profile.rocm = RocmSupport {
+            available: true,
+            targets: vec!["gfx1201".to_string()],
+            devices: Vec::new(),
+            ..RocmSupport::default()
+        };
+
+        assert_eq!(
+            gpu_descriptors(&profile, None),
+            vec![GpuDescriptor {
+                name: "AMD ROCm GPU gfx1201".to_string(),
+                backend: BackendKind::Hip,
+                arch: Some("gfx1201".to_string()),
+                vram_total_mb: 0,
+                vram_free_mb: None,
+            }]
+        );
     }
 
     fn test_snapshot(config: NodeConfig) -> NodeSnapshot {

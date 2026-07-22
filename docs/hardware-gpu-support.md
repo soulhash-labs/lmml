@@ -23,7 +23,9 @@ second constraint.
 Current lmml ROCm/HIP support is conservative: `lmml-detect` probes
 `hipconfig` and `rocminfo`, auto-selects HIP only when at least one `gfx*` target
 is visible, and `lmml-build` emits upstream llama.cpp flags
-`-DGGML_HIP=ON -DGPU_TARGETS=...`. Operators can still force Vulkan for AMD
+`-DGGML_HIP=ON -DGPU_TARGETS=...`. When `rocm-smi` is available, LMML parses
+`rocm-smi --showmeminfo vram --csv` to report ROCm total/free VRAM in detect
+summaries and node load responses. Operators can still force Vulkan for AMD
 cards that have Mesa/RADV support but do not have a clean ROCm stack.
 
 ## NVIDIA CUDA
@@ -78,6 +80,7 @@ split, Mesa version, cooling, and power limits are validated.
 
 - Displays matched accelerator guidance in the Detect tab.
 - Matches raw CUDA names from `nvidia-smi`.
+- Matches raw ROCm names from `rocminfo`.
 - Matches Vulkan summary device names for non-NVIDIA GPUs when available.
 - Matches Intel Core Ultra CPU model strings for integrated NPU guidance.
 - Keeps backend support advisory: ROCm, oneAPI/OpenVINO, Gaudi, and Vulkan still

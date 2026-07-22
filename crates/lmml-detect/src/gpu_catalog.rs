@@ -138,6 +138,8 @@ impl KnownGpu {
 pub enum GpuCatalogSource {
     /// CUDA device enumeration from `nvidia-smi`.
     Cuda,
+    /// ROCm/HIP device enumeration from `rocminfo`.
+    Rocm,
     /// Vulkan summary device lines.
     Vulkan,
     /// CPU model string for integrated accelerators.
@@ -178,6 +180,15 @@ pub fn matches_from_system_profile(profile: &SystemProfile) -> Vec<GpuCatalogMat
 
     for gpu in &profile.gpus {
         push_match(&mut matches, &mut seen, &gpu.name, GpuCatalogSource::Cuda);
+    }
+
+    for device in &profile.rocm.devices {
+        push_match(
+            &mut matches,
+            &mut seen,
+            &device.name,
+            GpuCatalogSource::Rocm,
+        );
     }
 
     for device in &profile.vulkan.devices {
@@ -504,7 +515,7 @@ mod tests {
 
     use crate::{
         CmakeInfo, CompilerInfo, CpuFeatures, CudaCompatibility, DiskInfo, GitInfo, GpuInfo,
-        MemInfo, MetalSupport, NvidiaDeviceNodes, SystemProfile, VulkanSupport,
+        MemInfo, MetalSupport, NvidiaDeviceNodes, RocmGpuInfo, SystemProfile, VulkanSupport,
     };
 
     use super::*;
@@ -577,7 +588,16 @@ mod tests {
             cuda: CudaCompatibility::Compatible {
                 archs: vec!["sm_89"],
             },
-            rocm: crate::RocmSupport::default(),
+            rocm: crate::RocmSupport {
+                available: true,
+                targets: vec!["gfx1100".to_string()],
+                devices: vec![RocmGpuInfo {
+                    name: "AMD Radeon RX 7900 XTX".to_string(),
+                    target: Some("gfx1100".to_string()),
+                    vram: None,
+                }],
+                ..crate::RocmSupport::default()
+            },
             gpus: vec![GpuInfo {
                 name: "NVIDIA GeForce RTX 4090".to_string(),
                 memory_total_mb: 24_576,
@@ -634,10 +654,12 @@ mod tests {
             names,
             vec![
                 "NVIDIA GeForce RTX 4090",
+                "AMD Radeon RX 7900 XTX",
                 "Intel Arc B580",
                 "AMD BC-250 / Cyan Skillfish",
                 "Intel Core Ultra NPU"
             ]
         );
+        assert_eq!(matches[1].source, GpuCatalogSource::Rocm);
     }
 }

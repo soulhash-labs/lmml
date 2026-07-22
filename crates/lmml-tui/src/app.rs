@@ -343,7 +343,7 @@ impl App {
                         lmml_detect::CudaCompatibility::NoGpu
                         | lmml_detect::CudaCompatibility::NvccMissing => None,
                     },
-                    gpu_names: profile.gpus.iter().map(|gpu| gpu.name.clone()).collect(),
+                    gpu_names: detected_gpu_names(&profile),
                     gpu_archs: profile
                         .gpus
                         .iter()
@@ -351,7 +351,7 @@ impl App {
                         .collect(),
                     rocm_available: profile.rocm.available,
                     rocm_targets: profile.rocm.targets.clone(),
-                    vram_mb: profile.gpus.iter().map(|gpu| gpu.memory_total_mb).collect(),
+                    vram_mb: detected_vram_mb(&profile),
                     sccache: profile.sccache.is_some(),
                 });
                 self.sync_build_backend_after_detection(&profile);
@@ -1550,6 +1550,36 @@ fn format_arch_list(archs: &[String]) -> String {
     }
 }
 
+fn detected_gpu_names(profile: &SystemProfile) -> Vec<String> {
+    profile
+        .gpus
+        .iter()
+        .map(|gpu| gpu.name.clone())
+        .chain(
+            profile
+                .rocm
+                .devices
+                .iter()
+                .map(|device| device.name.clone()),
+        )
+        .collect()
+}
+
+fn detected_vram_mb(profile: &SystemProfile) -> Vec<u64> {
+    profile
+        .gpus
+        .iter()
+        .map(|gpu| gpu.memory_total_mb)
+        .chain(
+            profile
+                .rocm
+                .devices
+                .iter()
+                .filter_map(|device| device.vram.map(|memory| memory.total_mb)),
+        )
+        .collect()
+}
+
 fn fallback_non_cuda_backend(profile: Option<&SystemProfile>) -> BuildBackend {
     if let Some(profile) = profile {
         if profile.metal.available {
@@ -2011,6 +2041,36 @@ mod tests {
                 archs: vec!["sm_120"]
             }
         );
+    }
+
+    #[test]
+    fn detect_complete_caches_rocm_gpu_names_and_vram() {
+        let mut app = App::default();
+        let mut profile = cuda_profile();
+        profile.cuda = lmml_detect::CudaCompatibility::NoGpu;
+        profile.gpus.clear();
+        profile.rocm = lmml_detect::RocmSupport {
+            available: true,
+            targets: vec!["gfx1100".to_string()],
+            devices: vec![lmml_detect::RocmGpuInfo {
+                name: "AMD Radeon RX 7900 XTX".to_string(),
+                target: Some("gfx1100".to_string()),
+                vram: Some(lmml_detect::GpuVramInfo {
+                    total_mb: 24_576,
+                    used_mb: 1_024,
+                    free_mb: 23_552,
+                }),
+            }],
+            ..lmml_detect::RocmSupport::default()
+        };
+
+        app.handle_event(AppEvent::DetectComplete(Box::new(profile)));
+
+        let cached = app.state.system_profile.expect("cached system profile");
+        assert_eq!(cached.gpu_names, vec!["AMD Radeon RX 7900 XTX".to_string()]);
+        assert_eq!(cached.gpu_archs, Vec::<String>::new());
+        assert_eq!(cached.rocm_targets, vec!["gfx1100".to_string()]);
+        assert_eq!(cached.vram_mb, vec![24_576]);
     }
 
     #[test]
