@@ -64,8 +64,10 @@ fn system_lines(app: &App) -> Vec<Line<'static>> {
         compiler_line(profile.compiler.as_ref()),
         cmake_line(profile.cmake.as_ref()),
         git_line(profile.git.as_ref()),
-        cuda_line(&profile.cuda),
     ];
+    if let Some(line) = cuda_line(profile) {
+        lines.push(line);
+    }
     if let Some(line) = rocm_line(&profile.rocm) {
         lines.push(line);
     }
@@ -195,36 +197,52 @@ fn git_line(git: Option<&GitInfo>) -> Line<'static> {
     }
 }
 
-fn cuda_line(cuda: &CudaCompatibility) -> Line<'static> {
-    match cuda {
-        CudaCompatibility::Compatible { archs } => {
-            badge_line(Badge::Ok, format!("CUDA compatible: {}", archs.join(";")))
-        }
+fn cuda_line(profile: &SystemProfile) -> Option<Line<'static>> {
+    let non_cuda_backend_available =
+        profile.rocm.available || profile.vulkan.available || profile.metal.available;
+    match &profile.cuda {
+        CudaCompatibility::Compatible { archs } => Some(badge_line(
+            Badge::Ok,
+            format!("CUDA compatible: {}", archs.join(";")),
+        )),
         CudaCompatibility::ToolkitTooOld {
             gpu_arch,
             minimum_toolkit,
             found_toolkit,
-        } => badge_line(
+        } => Some(badge_line(
             Badge::Warn,
             format!("{gpu_arch} requires CUDA >= {minimum_toolkit}; found {found_toolkit}"),
-        ),
+        )),
         CudaCompatibility::ToolkitTooNew {
             gpu_arch,
             maximum_toolkit,
             found_toolkit,
-        } => badge_line(
+        } => Some(badge_line(
             Badge::Warn,
             format!(
                 "{gpu_arch} is not supported by CUDA {found_toolkit}; use CUDA {maximum_toolkit}"
             ),
-        ),
+        )),
         CudaCompatibility::NoGpu => {
-            badge_line(Badge::Warn, "nvcc found, no CUDA GPUs detected".to_string())
+            if non_cuda_backend_available {
+                None
+            } else {
+                Some(badge_line(
+                    Badge::Warn,
+                    "nvcc found, no CUDA GPUs detected".to_string(),
+                ))
+            }
         }
-        CudaCompatibility::NvccMissing => badge_line(
-            Badge::Warn,
-            "nvcc not found; CUDA backend unavailable".to_string(),
-        ),
+        CudaCompatibility::NvccMissing => {
+            if non_cuda_backend_available {
+                None
+            } else {
+                Some(badge_line(
+                    Badge::Warn,
+                    "nvcc not found; CUDA backend unavailable".to_string(),
+                ))
+            }
+        }
     }
 }
 
@@ -487,6 +505,7 @@ mod tests {
         assert!(text.contains("AMD Radeon RX 7900 XTX"));
         assert!(text.contains("gfx1100"));
         assert!(text.contains("24 GB VRAM (23 GB free)"));
+        assert!(!text.contains("nvcc found, no CUDA GPUs detected"));
         assert!(!text.contains("GPU: none detected"));
     }
 
@@ -541,23 +560,32 @@ mod tests {
 
     #[test]
     fn cuda_toolkit_too_new_warning_is_rendered() {
-        let line = cuda_line(&CudaCompatibility::ToolkitTooNew {
+        let profile = profile_with_cuda(CudaCompatibility::ToolkitTooNew {
             gpu_arch: "sm_61",
             maximum_toolkit: "12.x",
             found_toolkit: CudaVersion::new(13, 1).raw,
         });
+        let line = cuda_line(&profile).expect("CUDA toolkit warning");
         assert!(flatten_lines(vec![line])
             .contains("sm_61 is not supported by CUDA 13.1; use CUDA 12.x"));
     }
 
     #[test]
     fn cuda_toolkit_warning_is_rendered() {
-        let line = cuda_line(&CudaCompatibility::ToolkitTooOld {
+        let profile = profile_with_cuda(CudaCompatibility::ToolkitTooOld {
             gpu_arch: "sm_89",
             minimum_toolkit: "11.8",
             found_toolkit: CudaVersion::new(11, 0).raw,
         });
+        let line = cuda_line(&profile).expect("CUDA toolkit warning");
         assert!(flatten_lines(vec![line]).contains("sm_89 requires CUDA >= 11.8"));
+    }
+
+    fn profile_with_cuda(cuda: CudaCompatibility) -> SystemProfile {
+        SystemProfile {
+            cuda,
+            ..SystemProfile::skipped_probe()
+        }
     }
 
     fn flatten_lines(lines: Vec<Line<'static>>) -> String {
