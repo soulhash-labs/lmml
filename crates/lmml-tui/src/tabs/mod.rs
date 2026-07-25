@@ -332,6 +332,23 @@ mod tests {
         app.detect_profile = Some(healthy_profile());
         insta::assert_snapshot!("models_vram_fit_badges", render_app(&app));
 
+        app.detect_profile = None;
+        app.state.system_profile = Some(lmml_state::SystemProfile {
+            cuda_toolkit: None,
+            gpu_names: vec!["AMD Radeon AI PRO R9700".to_string()],
+            gpu_archs: Vec::new(),
+            rocm_available: true,
+            rocm_targets: vec!["gfx1201".to_string()],
+            vram_mb: vec![32_624],
+            sccache: true,
+        });
+        let rendered = render_app(&app);
+        assert!(rendered.contains("fits ("));
+        assert!(rendered.contains("Recommended ngl: -1"));
+        assert!(!rendered.contains("CPU only"));
+
+        app.detect_profile = Some(healthy_profile());
+        app.state.system_profile = None;
         app.models = vec![model_entry("gemma-4-12b-it-qat-q4_0.gguf", 7_200_000_000)];
         app.selected_model = 0;
         insta::assert_snapshot!("models_known_family_details", render_app(&app));

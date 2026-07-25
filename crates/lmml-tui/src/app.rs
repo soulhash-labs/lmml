@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use lmml_build::{BuildEvent, UpdateCheck};
 use lmml_compat::LlamaBinaryCapabilities;
 use lmml_detect::{BuildBackend, SystemProfile};
-use lmml_models::{DownloadProgress, HfModelResult, HfSearchQuery, ModelEntry, QuantTier};
+use lmml_models::{DownloadProgress, HfModelResult, HfSearchQuery, ModelEntry, QuantTier, VramFit};
 use lmml_server::ServerHandle;
 pub use lmml_server::ServerStatus;
 use lmml_state::AppState as PersistentState;
@@ -1296,6 +1296,27 @@ impl App {
         config
     }
 
+    /// Estimate model VRAM fit using live detection first, then cached detection.
+    pub fn model_vram_fit(&self, model: &ModelEntry) -> VramFit {
+        if let Some(vram_mb) = self.detect_profile.as_ref().and_then(max_detected_vram_mb) {
+            return model.vram_fit_for_vram_mb(vram_mb);
+        }
+        if let Some(vram_mb) = self
+            .state
+            .system_profile
+            .as_ref()
+            .and_then(max_cached_vram_mb)
+        {
+            return model.vram_fit_for_vram_mb(vram_mb);
+        }
+        VramFit::CpuOnly
+    }
+
+    /// Return the model's recommended `llama-server -ngl` value for this host.
+    pub fn model_recommended_ngl(&self, model: &ModelEntry) -> i32 {
+        recommended_ngl_from_fit(&self.model_vram_fit(model))
+    }
+
     /// Return the GPU layer setting as it will be passed to `llama-server`.
     pub fn server_gpu_layers_label(&self, model: Option<&ModelEntry>) -> String {
         let Some(model) = model else {
@@ -1447,6 +1468,16 @@ fn explicit_or_auto_gpu_layers_label(n_gpu_layers: i32) -> String {
         "auto -> -1".to_string()
     } else {
         n_gpu_layers.to_string()
+    }
+}
+
+fn recommended_ngl_from_fit(fit: &VramFit) -> i32 {
+    match fit {
+        VramFit::Full { .. } => -1,
+        VramFit::Partial {
+            recommended_ngl, ..
+        } => *recommended_ngl,
+        VramFit::TooLarge { .. } | VramFit::CpuOnly => 0,
     }
 }
 
@@ -2522,6 +2553,31 @@ mod tests {
             app.server_gpu_layers_label(Some(&model)),
             "auto -> -1 (cached VRAM)"
         );
+    }
+
+    #[test]
+    fn model_vram_fit_uses_cached_rocm_vram() {
+        let mut app = App::default();
+        app.state.system_profile = Some(lmml_state::SystemProfile {
+            cuda_toolkit: None,
+            gpu_names: vec!["AMD Radeon AI PRO R9700".to_string()],
+            gpu_archs: Vec::new(),
+            rocm_available: true,
+            rocm_targets: vec!["gfx1201".to_string()],
+            vram_mb: vec![32_624],
+            sccache: true,
+        });
+        let model = ModelEntry {
+            size_bytes: 10 * 1024 * 1024 * 1024,
+            quant: "Q8_0".to_string(),
+            ..model_entry("Qwen3.5-9B-Q8_0.gguf")
+        };
+
+        assert!(matches!(
+            app.model_vram_fit(&model),
+            lmml_models::VramFit::Full { .. }
+        ));
+        assert_eq!(app.model_recommended_ngl(&model), -1);
     }
 
     #[test]

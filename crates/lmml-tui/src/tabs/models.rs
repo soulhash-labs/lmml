@@ -26,14 +26,7 @@ pub fn render(area: Rect, app: &App, frame: &mut Frame) {
         for (index, model) in app.models.iter().enumerate() {
             let selected = index == app.selected_model;
             let marker = if selected { "> " } else { "  " };
-            let fit = model
-                .vram_fit(
-                    &app.detect_profile
-                        .as_ref()
-                        .map(|profile| profile.gpus.clone())
-                        .unwrap_or_default(),
-                )
-                .label();
+            let fit = app.model_vram_fit(model).label();
             left.push(Line::from(vec![
                 Span::styled(
                     marker,
@@ -114,12 +107,7 @@ fn selected_model_lines(app: &App) -> Vec<Line<'static>> {
             app.state.model.last_used.display()
         ))];
     };
-    let gpus = app
-        .detect_profile
-        .as_ref()
-        .map(|profile| profile.gpus.clone())
-        .unwrap_or_default();
-    let fit = model.vram_fit(&gpus);
+    let fit = app.model_vram_fit(model);
     let mut lines = vec![
         Line::from(format!("Name: {}", model.name)),
         Line::from(format!("Path: {}", model.path.display())),
@@ -149,7 +137,10 @@ fn selected_model_lines(app: &App) -> Vec<Line<'static>> {
         )),
         Line::from(format!("Alias: {}", model.aliased)),
         Line::from(format!("VRAM: {}", fit.label())),
-        Line::from(format!("Recommended ngl: {}", model.recommended_ngl(&gpus))),
+        Line::from(format!(
+            "Recommended ngl: {}",
+            app.model_recommended_ngl(model)
+        )),
     ];
 
     let catalog_match = lmml_models::catalog::match_known_model_name(&model.name).or_else(|| {
