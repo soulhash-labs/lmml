@@ -1,6 +1,5 @@
 ---
 source: crates/lmml-tui/src/tabs/mod.rs
-assertion_line: 359
 expression: render_app(&app)
 ---
 "┌lmml────────────────────────────────────────────────────────────────────────────────────────────────────────┐"
@@ -16,7 +15,7 @@ expression: render_app(&app)
 "│Host: 127.0.0.1                                 ││                                                          │"
 "│Port: 8080                                      ││                                                          │"
 "│Context: 4096                                   ││                                                          │"
-"│GPU layers: -1                                  ││                                                          │"
+"│GPU layers: auto -> -1                          ││                                                          │"
 "│Batch: 512                                      ││                                                          │"
 "│Threads: 8                                      ││                                                          │"
 "│                                                ││                                                          │"

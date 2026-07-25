@@ -40,6 +40,11 @@ impl ModelEntry {
         let Some(total_vram_mb) = gpus.iter().map(|gpu| gpu.memory_total_mb).max() else {
             return VramFit::CpuOnly;
         };
+        self.vram_fit_for_vram_mb(total_vram_mb)
+    }
+
+    /// Estimate whether this model fits in a GPU with the given VRAM.
+    pub fn vram_fit_for_vram_mb(&self, total_vram_mb: u64) -> VramFit {
         let model_mb = bytes_to_mib(self.size_bytes);
         let overhead_mb = 768;
         let estimated_mb = model_mb.saturating_add(overhead_mb);
@@ -70,6 +75,17 @@ impl ModelEntry {
     /// Returns the recommended `-ngl` for this model on the detected GPUs.
     pub fn recommended_ngl(&self, gpus: &[GpuInfo]) -> i32 {
         match self.vram_fit(gpus) {
+            VramFit::Full { .. } => -1,
+            VramFit::Partial {
+                recommended_ngl, ..
+            } => recommended_ngl,
+            VramFit::TooLarge { .. } | VramFit::CpuOnly => 0,
+        }
+    }
+
+    /// Returns the recommended `-ngl` for this model on a GPU with the given VRAM.
+    pub fn recommended_ngl_for_vram_mb(&self, total_vram_mb: u64) -> i32 {
+        match self.vram_fit_for_vram_mb(total_vram_mb) {
             VramFit::Full { .. } => -1,
             VramFit::Partial {
                 recommended_ngl, ..
@@ -930,6 +946,11 @@ mod tests {
         };
         assert!(matches!(
             model.vram_fit(&[small_gpu]),
+            VramFit::Partial { .. }
+        ));
+        assert_eq!(model.recommended_ngl_for_vram_mb(8192), -1);
+        assert!(matches!(
+            model.vram_fit_for_vram_mb(2048),
             VramFit::Partial { .. }
         ));
         assert_eq!(model.vram_fit(&[]), VramFit::CpuOnly);

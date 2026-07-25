@@ -1274,20 +1274,8 @@ impl App {
 
     /// Build a compat server config from persisted settings and model fit.
     pub fn server_config(&self, model: &ModelEntry) -> lmml_compat::ServerConfig {
-        let server = self
-            .state
-            .model
-            .runtime_profile_for_path(&model.path)
-            .map(|profile| resolved_profile_server(&model.path, profile))
-            .unwrap_or_else(|| self.state.server.clone());
-        let mut n_gpu_layers = server.n_gpu_layers;
-        if n_gpu_layers == -1 {
-            n_gpu_layers = self
-                .detect_profile
-                .as_ref()
-                .map(|profile| model.recommended_ngl(&profile.gpus))
-                .unwrap_or(0);
-        }
+        let server = self.server_settings_for_model(model);
+        let n_gpu_layers = self.resolve_server_gpu_layers(model, &server).launch;
         let mut config = lmml_compat::ServerConfig {
             model: model.path.clone(),
             port: server.port,
@@ -1306,6 +1294,60 @@ impl App {
         };
         apply_qwen_server_safeguards(model, &mut config);
         config
+    }
+
+    /// Return the GPU layer setting as it will be passed to `llama-server`.
+    pub fn server_gpu_layers_label(&self, model: Option<&ModelEntry>) -> String {
+        let Some(model) = model else {
+            return explicit_or_auto_gpu_layers_label(self.state.server.n_gpu_layers);
+        };
+        let server = self.server_settings_for_model(model);
+        self.resolve_server_gpu_layers(model, &server).label()
+    }
+
+    fn server_settings_for_model(&self, model: &ModelEntry) -> lmml_state::ServerConfig {
+        self.state
+            .model
+            .runtime_profile_for_path(&model.path)
+            .map(|profile| resolved_profile_server(&model.path, profile))
+            .unwrap_or_else(|| self.state.server.clone())
+    }
+
+    fn resolve_server_gpu_layers(
+        &self,
+        model: &ModelEntry,
+        server: &lmml_state::ServerConfig,
+    ) -> ResolvedGpuLayers {
+        if server.n_gpu_layers != -1 {
+            return ResolvedGpuLayers {
+                launch: server.n_gpu_layers,
+                source: GpuLayerResolutionSource::Explicit,
+            };
+        }
+
+        if let Some(vram_mb) = self.detect_profile.as_ref().and_then(max_detected_vram_mb) {
+            return ResolvedGpuLayers {
+                launch: model.recommended_ngl_for_vram_mb(vram_mb),
+                source: GpuLayerResolutionSource::LiveProbe,
+            };
+        }
+
+        if let Some(vram_mb) = self
+            .state
+            .system_profile
+            .as_ref()
+            .and_then(max_cached_vram_mb)
+        {
+            return ResolvedGpuLayers {
+                launch: model.recommended_ngl_for_vram_mb(vram_mb),
+                source: GpuLayerResolutionSource::CachedProbe,
+            };
+        }
+
+        ResolvedGpuLayers {
+            launch: -1,
+            source: GpuLayerResolutionSource::LlamaAuto,
+        }
     }
 
     fn select_model_path(&mut self, path: PathBuf) -> bool {
@@ -1370,6 +1412,41 @@ impl App {
         } else {
             Some((self.selected_model + 1).min(self.models.len() - 1))
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResolvedGpuLayers {
+    launch: i32,
+    source: GpuLayerResolutionSource,
+}
+
+impl ResolvedGpuLayers {
+    fn label(self) -> String {
+        match self.source {
+            GpuLayerResolutionSource::Explicit => self.launch.to_string(),
+            GpuLayerResolutionSource::LiveProbe => format!("auto -> {}", self.launch),
+            GpuLayerResolutionSource::CachedProbe => {
+                format!("auto -> {} (cached VRAM)", self.launch)
+            }
+            GpuLayerResolutionSource::LlamaAuto => "auto -> -1".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GpuLayerResolutionSource {
+    Explicit,
+    LiveProbe,
+    CachedProbe,
+    LlamaAuto,
+}
+
+fn explicit_or_auto_gpu_layers_label(n_gpu_layers: i32) -> String {
+    if n_gpu_layers == -1 {
+        "auto -> -1".to_string()
+    } else {
+        n_gpu_layers.to_string()
     }
 }
 
@@ -1578,6 +1655,14 @@ fn detected_vram_mb(profile: &SystemProfile) -> Vec<u64> {
                 .filter_map(|device| device.vram.map(|memory| memory.total_mb)),
         )
         .collect()
+}
+
+fn max_detected_vram_mb(profile: &SystemProfile) -> Option<u64> {
+    detected_vram_mb(profile).into_iter().max()
+}
+
+fn max_cached_vram_mb(profile: &lmml_state::SystemProfile) -> Option<u64> {
+    profile.vram_mb.iter().copied().max()
 }
 
 fn fallback_non_cuda_backend(profile: Option<&SystemProfile>) -> BuildBackend {
@@ -2381,6 +2466,75 @@ mod tests {
         };
 
         assert_eq!(app.server_config(&model).n_gpu_layers, -1);
+    }
+
+    #[test]
+    fn server_config_auto_ngl_uses_live_rocm_vram_fit() {
+        let mut app = App::default();
+        let mut profile = cuda_profile();
+        profile.cuda = lmml_detect::CudaCompatibility::NoGpu;
+        profile.gpus.clear();
+        profile.rocm = lmml_detect::RocmSupport {
+            available: true,
+            targets: vec!["gfx1201".to_string()],
+            devices: vec![lmml_detect::RocmGpuInfo {
+                name: "AMD Radeon AI PRO R9700".to_string(),
+                target: Some("gfx1201".to_string()),
+                vram: Some(lmml_detect::GpuVramInfo {
+                    total_mb: 32_624,
+                    used_mb: 2_931,
+                    free_mb: 29_693,
+                }),
+            }],
+            ..lmml_detect::RocmSupport::default()
+        };
+        app.detect_profile = Some(profile);
+        let model = ModelEntry {
+            size_bytes: 10 * 1024 * 1024 * 1024,
+            quant: "Q8_0".to_string(),
+            ..model_entry("Qwen3.5-9B-Q8_0.gguf")
+        };
+
+        assert_eq!(app.server_config(&model).n_gpu_layers, -1);
+        assert_eq!(app.server_gpu_layers_label(Some(&model)), "auto -> -1");
+    }
+
+    #[test]
+    fn server_config_auto_ngl_uses_cached_rocm_vram_fit() {
+        let mut app = App::default();
+        app.state.system_profile = Some(lmml_state::SystemProfile {
+            cuda_toolkit: None,
+            gpu_names: vec!["AMD Radeon AI PRO R9700".to_string()],
+            gpu_archs: Vec::new(),
+            rocm_available: true,
+            rocm_targets: vec!["gfx1201".to_string()],
+            vram_mb: vec![32_624],
+            sccache: true,
+        });
+        let model = ModelEntry {
+            size_bytes: 10 * 1024 * 1024 * 1024,
+            quant: "Q8_0".to_string(),
+            ..model_entry("Qwen3.5-9B-Q8_0.gguf")
+        };
+
+        assert_eq!(app.server_config(&model).n_gpu_layers, -1);
+        assert_eq!(
+            app.server_gpu_layers_label(Some(&model)),
+            "auto -> -1 (cached VRAM)"
+        );
+    }
+
+    #[test]
+    fn server_config_auto_ngl_preserves_llama_auto_without_probe_data() {
+        let app = App::default();
+        let model = ModelEntry {
+            size_bytes: 10 * 1024 * 1024 * 1024,
+            quant: "Q8_0".to_string(),
+            ..model_entry("Qwen3.5-9B-Q8_0.gguf")
+        };
+
+        assert_eq!(app.server_config(&model).n_gpu_layers, -1);
+        assert_eq!(app.server_gpu_layers_label(Some(&model)), "auto -> -1");
     }
 
     #[test]

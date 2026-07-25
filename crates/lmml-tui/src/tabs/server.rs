@@ -12,12 +12,13 @@ pub fn render(area: Rect, app: &App, frame: &mut Frame) {
         ServerStatus::Stopped | ServerStatus::Failed { .. } => "Press s to start server.",
         ServerStatus::Starting { .. } | ServerStatus::Ready { .. } => "Press s to stop server.",
     };
-    let model = app
-        .selected_server_model()
+    let selected_model = app.selected_server_model();
+    let model = selected_model
+        .as_ref()
         .map(|model| model.path.display().to_string())
         .unwrap_or_else(|| "No model selected".to_string());
-    let profile = app
-        .selected_server_model()
+    let profile = selected_model
+        .as_ref()
         .and_then(|model| {
             app.state
                 .model
@@ -25,6 +26,7 @@ pub fn render(area: Rect, app: &App, frame: &mut Frame) {
                 .map(|profile| profile.name.clone())
         })
         .unwrap_or_else(|| "custom/global".to_string());
+    let gpu_layers = app.server_gpu_layers_label(selected_model.as_ref());
     let left = vec![
         Line::from(action),
         Line::from("Press p to switch runtime profile."),
@@ -35,7 +37,7 @@ pub fn render(area: Rect, app: &App, frame: &mut Frame) {
         Line::from(format!("Host: {}", app.state.server.host)),
         Line::from(format!("Port: {}", app.state.server.port)),
         Line::from(format!("Context: {}", app.state.server.ctx_size)),
-        Line::from(format!("GPU layers: {}", app.state.server.n_gpu_layers)),
+        Line::from(format!("GPU layers: {gpu_layers}")),
         Line::from(format!("Batch: {}", app.state.server.batch_size)),
         Line::from(format!("Threads: {}", app.state.server.threads)),
     ];
