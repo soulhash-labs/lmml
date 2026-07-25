@@ -238,6 +238,7 @@ trusted LAN hosts. Production/public release flows should require a signed
 
 ### Future Public Release Follow-up
 
+- [ ] For release-quality internal LAN serving, publish `SHA256SUMS.minisig` next to `SHA256SUMS` and validate one install with `LMML_CHECKSUM_VERIFY=required` plus the internal minisign public key.
 - [ ] Before publishing outside the local/LAN environment, generate and verify a real minisign release keypair and publish the public key with release instructions.
 
 ---

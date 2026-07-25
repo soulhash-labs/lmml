@@ -96,6 +96,12 @@ For LAN testing, the installer defaults to `LMML_CHECKSUM_VERIFY=optional`.
 That mode verifies `SHA256SUMS.minisig` when a signature and public key are
 configured, otherwise it warns and falls back to SHA256 integrity only.
 
+Release-hardening item: before treating a LAN release server as release-quality,
+serve `SHA256SUMS.minisig` next to `SHA256SUMS` and run at least one client
+install with `LMML_CHECKSUM_VERIFY=required` plus the internal minisign public
+key. This keeps ad hoc trusted-LAN bootstrap available while giving internal
+installs authenticity verification beyond unsigned hashes.
+
 ## Reproducibility Check
 
 `scripts/package-release.sh` requires GNU tar and writes archives with sorted
