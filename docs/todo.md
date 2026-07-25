@@ -48,9 +48,9 @@ through an explicit `LMML_GPU_MODE=cpu-only` setting.
 ROCm/HIP is now implemented as a conservative v2 source-build path:
 `lmml-detect` probes `hipconfig`/`rocminfo`, maps `gfx*` targets, `lmml-build`
 emits `-DGGML_HIP=ON -DGPU_TARGETS=...`, and backend settings/tests cover the
-mapping. ROCm-specific VRAM telemetry is wired through `rocm-smi` for detect
-summaries and LMML node load reports, with target-hardware validation still
-required before making broader AMD production claims.
+mapping. ROCm-specific VRAM telemetry is wired through `rocm-smi` and
+`amd-smi` for detect summaries and LMML node load reports, with target-hardware
+validation still required before making broader AMD production claims.
 
 Vulkan backend selection/build support is current v2 functionality: the detect
 crate probes `vulkaninfo --summary`, the build crate emits `-DGGML_VULKAN=ON`,
@@ -128,7 +128,7 @@ release claims.
 ### 🟡 Medium Priority
 
 - [x] v2 ROCm/HIP build support — `hipconfig`/`rocminfo` probe, `gfx*` target mapping, `GGML_HIP` CMake flags, backend settings, and tests.
-- [x] ROCm-specific VRAM telemetry for dashboard/load reporting — `rocm-smi` CSV parsing feeds detect summaries and `/v1/load` free-VRAM descriptors.
+- [x] ROCm-specific VRAM telemetry for dashboard/load reporting — `rocm-smi`/`amd-smi` CSV parsing feeds detect summaries and `/v1/load` free-VRAM descriptors.
 - [ ] Vulkan-specific GPU heap polling for VRAM-style dashboard telemetry
 
 ### 🟢 Minor
@@ -140,7 +140,7 @@ release claims.
 ## Phase 2 — GPU Backend Expansion (Historical / Partially Superseded)
 
 - [x] Apple Metal support (probe + build flags)
-- [x] AMD ROCm support (probe + build flags) — current v2 support covers conservative source builds and `rocm-smi` VRAM telemetry
+- [x] AMD ROCm support (probe + build flags) — current v2 support covers conservative source builds and SMI VRAM telemetry
 - [x] Vulkan backend support (probe + build flags) — current v2 support is covered by `lmml-detect`, `lmml-build`, and `lmml-tui` tests
 - [x] Multi-GPU detection and flag generation
 - [x] BLAS backend detection (OpenBLAS baseline)

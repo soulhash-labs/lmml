@@ -1058,7 +1058,7 @@ mod tests {
         let config = BuildConfig::new(
             PathBuf::from("/tmp/llama.cpp"),
             BuildBackend::Rocm {
-                targets: vec!["gfx1100".to_string(), "gfx942".to_string()],
+                targets: vec!["gfx1201".to_string(), "gfx1100".to_string()],
             },
         );
 
@@ -1072,7 +1072,7 @@ mod tests {
                 "-DCMAKE_BUILD_TYPE=Release",
                 "-DLLAMA_BUILD_SERVER=ON",
                 "-DGGML_HIP=ON",
-                "-DGPU_TARGETS=gfx1100;gfx942",
+                "-DGPU_TARGETS=gfx1201;gfx1100",
             ]
         );
     }

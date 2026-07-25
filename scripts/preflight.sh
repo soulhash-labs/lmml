@@ -279,7 +279,7 @@ if command -v hipconfig >/dev/null 2>&1; then
   fi
   if command -v rocminfo >/dev/null 2>&1; then
     if ROCMINFO_OUTPUT=$(rocminfo 2>&1); then
-      ROCM_TARGETS=$(printf '%s\n' "$ROCMINFO_OUTPUT" | grep -Eo 'gfx[0-9a-z]+' | grep -v '^gfx000$' | sed 's/^gfx1035$/gfx1030/' | sort -u | tr '\n' ' ' | sed 's/[[:space:]]*$//' || true)
+      ROCM_TARGETS=$(printf '%s\n' "$ROCMINFO_OUTPUT" | grep -Eo 'gfx[0-9][0-9][0-9a-z]+' | grep -v '^gfx000$' | sed 's/^gfx1035$/gfx1030/' | sort -u | tr '\n' ' ' | sed 's/[[:space:]]*$//' || true)
       if [[ -n "$ROCM_TARGETS" ]]; then
         ok "ROCm gfx targets: $ROCM_TARGETS"
         ROCM_OK=1

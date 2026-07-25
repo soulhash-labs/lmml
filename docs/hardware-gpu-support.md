@@ -23,10 +23,11 @@ second constraint.
 Current lmml ROCm/HIP support is conservative: `lmml-detect` probes
 `hipconfig` and `rocminfo`, auto-selects HIP only when at least one `gfx*` target
 is visible, and `lmml-build` emits upstream llama.cpp flags
-`-DGGML_HIP=ON -DGPU_TARGETS=...`. When `rocm-smi` is available, LMML parses
-`rocm-smi --showmeminfo vram --csv` to report ROCm total/free VRAM in detect
-summaries and node load responses. Operators can still force Vulkan for AMD
-cards that have Mesa/RADV support but do not have a clean ROCm stack.
+`-DGGML_HIP=ON -DGPU_TARGETS=...`. When ROCm SMI tooling is available, LMML
+parses `rocm-smi --showmeminfo vram --csv` or `amd-smi monitor --vram-usage
+--csv` to report ROCm total/free VRAM in detect summaries and node load
+responses. Operators can still force Vulkan for AMD cards that have Mesa/RADV
+support but do not have a clean ROCm stack.
 
 ## NVIDIA CUDA
 
@@ -51,7 +52,7 @@ cards that have Mesa/RADV support but do not have a clean ROCm stack.
 | --- | --- | ---: | --- |
 | Datacenter | Instinct MI355X | 288GB HBM3E | massive ROCm memory capacity |
 | Datacenter | Instinct MI300X | 192GB HBM3 | large-memory ROCm datacenter tier |
-| Workstation | Radeon AI PRO R9700 | 32GB GDDR6 | 32GB workstation ROCm card |
+| Workstation | Radeon AI PRO R9700 | 32GB GDDR6 | 32GB workstation ROCm card (`gfx1201`) |
 | Prosumer | Radeon RX 7900 XTX | 24GB GDDR6 | 24GB VRAM-per-dollar ROCm card |
 | Mid-range | Radeon RX 9070 XT | 16GB GDDR6 | current-gen 16GB ROCm option |
 | Mid-range | Radeon RX 9060 XT 16GB | 16GB GDDR6 | affordable 16GB RDNA 4 option |
@@ -100,6 +101,12 @@ split, Mesa version, cooling, and power limits are validated.
   <https://www.amd.com/en/products/accelerators/instinct/mi350/mi355x.html>
 - AMD Radeon AI PRO:
   <https://www.amd.com/en/products/graphics/workstations/radeon-ai-pro.html>
+- AMD ROCm Radeon installer:
+  <https://rocm.docs.amd.com/en/latest/install/rocm.html?fam=radeon&w=graphics&os=ubuntu&ubuntu-ver=26.04>
+- AMD SMI CLI:
+  <https://rocm.docs.amd.com/projects/amdsmi/en/latest/how-to/amdsmi-cli-tool.html>
+- AMD ROCm GPU specifications:
+  <https://rocm.docs.amd.com/en/latest/reference/gpu-specs.html>
 - AMD Radeon RX 9070 XT:
   <https://www.amd.com/en/products/graphics/desktops/radeon/9000-series/amd-radeon-rx-9070xt.html>
 - AMD Radeon RX 9060 XT:

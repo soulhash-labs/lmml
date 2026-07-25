@@ -542,6 +542,16 @@ mod tests {
     }
 
     #[test]
+    fn matches_radeon_ai_pro_r9700_as_rocm_workstation_card() {
+        let gpu = known_gpu("AMD Radeon AI PRO R9700").expect("known Radeon AI PRO R9700");
+
+        assert_eq!(gpu.canonical_name, "AMD Radeon AI PRO R9700");
+        assert_eq!(gpu.memory_gb, Some(32));
+        assert_eq!(gpu.backend, AiBackend::Rocm);
+        assert_eq!(gpu.use_case, GpuUseCase::Workstation);
+    }
+
+    #[test]
     fn matches_bc250_as_vulkan_headless_appliance() {
         let gpu = known_gpu("deviceName = AMD Radeon Graphics (RADV GFX1013)")
             .expect("known BC-250 Vulkan device");

@@ -103,8 +103,9 @@ ROCm/HIP support is intentionally conservative:
 - auto-select HIP only when a real `gfx*` target is visible;
 - normalize known target aliases such as `gfx1035` to `gfx1030`;
 - pass `HIPCXX` and `HIP_PATH` hints when detected;
-- parse `rocm-smi --showmeminfo vram --csv` for ROCm total/free VRAM in
-  detect summaries and LMML node load reports;
+- parse `rocm-smi --showmeminfo vram --csv` or `amd-smi monitor --vram-usage
+  --csv` for ROCm total/free VRAM in detect summaries and LMML node load
+  reports;
 - allow operators to use Vulkan instead when Mesa/RADV is the better local path.
 
 Open follow-up: ROCm-specific VRAM telemetry still needs validation on target

@@ -520,14 +520,14 @@ pub struct GpuVramInfo {
     pub free_mb: u64,
 }
 
-/// ROCm/HIP GPU detected through `rocminfo`, optionally enriched by `rocm-smi`.
+/// ROCm/HIP GPU detected through `rocminfo`, optionally enriched by ROCm SMI tools.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RocmGpuInfo {
     /// Human-readable GPU name.
     pub name: String,
     /// Normalized HIP target, such as `gfx1100`.
     pub target: Option<String>,
-    /// VRAM counters when `rocm-smi` can report them.
+    /// VRAM counters when `rocm-smi` or `amd-smi` can report them.
     pub vram: Option<GpuVramInfo>,
 }
 
@@ -618,9 +618,11 @@ pub struct RocmSupport {
     pub devices: Vec<RocmGpuInfo>,
     /// `rocm-smi` executable path, if detected.
     pub rocm_smi_path: Option<PathBuf>,
+    /// `amd-smi` executable path, if detected.
+    pub amd_smi_path: Option<PathBuf>,
     /// Error returned by `rocminfo` when target detection failed.
     pub rocminfo_error: Option<String>,
-    /// Error returned by `rocm-smi` when VRAM telemetry failed.
+    /// Error returned by ROCm VRAM telemetry when `rocm-smi` and `amd-smi` fail.
     pub rocm_smi_error: Option<String>,
 }
 
@@ -992,23 +994,26 @@ where
         targets,
         devices,
         rocm_smi_path: vram_probe.rocm_smi_path,
+        amd_smi_path: vram_probe.amd_smi_path,
         rocminfo_error,
         rocm_smi_error: vram_probe.error,
     }
 }
 
-/// Result of probing ROCm VRAM counters with `rocm-smi`.
+/// Result of probing ROCm VRAM counters with ROCm SMI tooling.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RocmVramProbe {
     /// `rocm-smi` executable path, if detected.
     pub rocm_smi_path: Option<PathBuf>,
-    /// One VRAM counter set per ROCm GPU, in `rocm-smi` device order.
+    /// `amd-smi` executable path, if detected.
+    pub amd_smi_path: Option<PathBuf>,
+    /// One VRAM counter set per ROCm GPU, in SMI device order.
     pub devices: Vec<GpuVramInfo>,
-    /// Probe failure reason when `rocm-smi` was unavailable or unusable.
+    /// Probe failure reason when `rocm-smi` and `amd-smi` were unavailable or unusable.
     pub error: Option<String>,
 }
 
-/// Probe current ROCm VRAM counters using the host `rocm-smi` command.
+/// Probe current ROCm VRAM counters using host `rocm-smi` or `amd-smi` commands.
 pub async fn detect_rocm_vram() -> RocmVramProbe {
     let runner = RealCommandRunner;
     detect_rocm_vram_with_runner(&runner).await
@@ -1019,32 +1024,48 @@ pub async fn detect_rocm_vram_with_runner<R>(runner: &R) -> RocmVramProbe
 where
     R: CommandRunner + Sync,
 {
-    let Some(rocm_smi_path) = which(runner, "rocm-smi").await else {
-        return RocmVramProbe {
-            error: Some("rocm-smi not found".to_string()),
-            ..RocmVramProbe::default()
-        };
-    };
-    let program = rocm_smi_path.to_string_lossy();
-    let output = runner
-        .run(&program, &["--showmeminfo", "vram", "--csv"], None)
-        .await;
-    if !output.success {
-        let reason = first_line(&output.stderr, &output.stdout);
-        return RocmVramProbe {
-            rocm_smi_path: Some(rocm_smi_path),
-            devices: Vec::new(),
-            error: (!reason.is_empty()).then_some(reason),
-        };
+    let rocm_smi_path = which(runner, "rocm-smi").await;
+    if let Some(path) = &rocm_smi_path {
+        let program = path.to_string_lossy();
+        let output = runner
+            .run(&program, &["--showmeminfo", "vram", "--csv"], None)
+            .await;
+        if output.success {
+            let devices = parse_rocm_smi_vram_csv(&output.stdout);
+            if !devices.is_empty() {
+                return RocmVramProbe {
+                    rocm_smi_path,
+                    devices,
+                    ..RocmVramProbe::default()
+                };
+            }
+        }
     }
-    let devices = parse_rocm_smi_vram_csv(&output.stdout);
-    let error = devices
-        .is_empty()
-        .then(|| "rocm-smi did not report VRAM totals".to_string());
+
+    let amd_smi_path = which(runner, "amd-smi").await;
+    if let Some(path) = &amd_smi_path {
+        let program = path.to_string_lossy();
+        let output = runner
+            .run(&program, &["monitor", "--vram-usage", "--csv"], None)
+            .await;
+        if output.success {
+            let devices = parse_amd_smi_monitor_vram(&output.stdout);
+            if !devices.is_empty() {
+                return RocmVramProbe {
+                    rocm_smi_path,
+                    amd_smi_path,
+                    devices,
+                    error: None,
+                };
+            }
+        }
+    }
+
     RocmVramProbe {
-        rocm_smi_path: Some(rocm_smi_path),
-        devices,
-        error,
+        rocm_smi_path,
+        amd_smi_path,
+        devices: Vec::new(),
+        error: Some("rocm-smi and amd-smi did not report VRAM totals".to_string()),
     }
 }
 
@@ -1373,7 +1394,7 @@ pub fn parse_rocm_targets(output: &str) -> Vec<String> {
 fn normalize_rocm_target(token: &str) -> Option<String> {
     let token = token.trim();
     let suffix = token.strip_prefix("gfx")?;
-    if suffix.is_empty() || !suffix.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+    if suffix.len() < 3 || !suffix.chars().all(|ch| ch.is_ascii_alphanumeric()) {
         return None;
     }
     if !suffix.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
@@ -1469,6 +1490,80 @@ pub fn parse_rocm_smi_vram_csv(output: &str) -> Vec<GpuVramInfo> {
             let used_cell = row.get(used_index)?;
             let total_mb = parse_memory_mb(total_cell, &header[total_index])?;
             let used_mb = parse_memory_mb(used_cell, &header[used_index])?;
+            Some(GpuVramInfo {
+                total_mb,
+                used_mb,
+                free_mb: total_mb.saturating_sub(used_mb),
+            })
+        })
+        .collect()
+}
+
+/// Parse `amd-smi monitor --vram-usage --csv` or table output into MiB counters.
+pub fn parse_amd_smi_monitor_vram(output: &str) -> Vec<GpuVramInfo> {
+    let csv = parse_amd_smi_monitor_vram_csv(output);
+    if !csv.is_empty() {
+        return csv;
+    }
+    parse_amd_smi_monitor_vram_table(output)
+}
+
+fn parse_amd_smi_monitor_vram_csv(output: &str) -> Vec<GpuVramInfo> {
+    let rows = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('='))
+        .map(split_csv_row)
+        .collect::<Vec<_>>();
+    let Some(header) = rows.first() else {
+        return Vec::new();
+    };
+    let used_index = header.iter().position(|column| {
+        let column = column.to_ascii_lowercase();
+        column.contains("vram") && column.contains("used")
+    });
+    let total_index = header.iter().position(|column| {
+        let column = column.to_ascii_lowercase();
+        column.contains("vram") && column.contains("total")
+    });
+    let Some(used_index) = used_index else {
+        return Vec::new();
+    };
+    let Some(total_index) = total_index else {
+        return Vec::new();
+    };
+    if used_index == total_index {
+        return Vec::new();
+    }
+
+    rows.iter()
+        .skip(1)
+        .filter_map(|row| {
+            let used_cell = row.get(used_index)?;
+            let total_cell = row.get(total_index)?;
+            let used_mb = parse_memory_mb(used_cell, &header[used_index])?;
+            let total_mb = parse_memory_mb(total_cell, &header[total_index])?;
+            Some(GpuVramInfo {
+                total_mb,
+                used_mb,
+                free_mb: total_mb.saturating_sub(used_mb),
+            })
+        })
+        .collect()
+}
+
+fn parse_amd_smi_monitor_vram_table(output: &str) -> Vec<GpuVramInfo> {
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
+        .filter_map(|line| {
+            let tokens = line.split_whitespace().collect::<Vec<_>>();
+            let [.., used_value, used_unit, total_value, total_unit] = tokens.as_slice() else {
+                return None;
+            };
+            let used_mb = parse_memory_mb(used_value, used_unit)?;
+            let total_mb = parse_memory_mb(total_value, total_unit)?;
             Some(GpuVramInfo {
                 total_mb,
                 used_mb,
@@ -1861,13 +1956,23 @@ Agent 2
   Name:                    gfx1100
   Marketing Name:          AMD Radeon RX 7900 XTX
 Agent 3
-  Name:                    gfx1035
+  Name:                    gfx1201
+  Marketing Name:          AMD Radeon AI PRO R9700
+  ISA Info:
+    ISA 2
+      Name:                    amdgcn-amd-amdhsa--gfx12-generic
 Agent 4
+  Name:                    gfx1035
+Agent 5
   Name:                    gfx000
 ";
         assert_eq!(
             parse_rocm_targets(output),
-            vec!["gfx1030".to_string(), "gfx1100".to_string()]
+            vec![
+                "gfx1030".to_string(),
+                "gfx1100".to_string(),
+                "gfx1201".to_string()
+            ]
         );
     }
 
@@ -1880,6 +1985,9 @@ Agent 2
   Name:                    gfx1100
   Marketing Name:          AMD Radeon RX 7900 XTX
 Agent 3
+  Name:                    gfx1201
+  Marketing Name:          AMD Radeon AI PRO R9700
+Agent 4
   Name:                    gfx1035
 ";
         assert_eq!(
@@ -1888,6 +1996,11 @@ Agent 3
                 RocmGpuInfo {
                     name: "AMD Radeon RX 7900 XTX".to_string(),
                     target: Some("gfx1100".to_string()),
+                    vram: None,
+                },
+                RocmGpuInfo {
+                    name: "AMD Radeon AI PRO R9700".to_string(),
+                    target: Some("gfx1201".to_string()),
                     vram: None,
                 },
                 RocmGpuInfo {
@@ -1920,6 +2033,35 @@ card1,34359738368,2147483648
                     free_mb: 30_720,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn parses_amd_smi_monitor_vram_output() {
+        let csv = "\
+GPU,VRAM_USED,VRAM_TOTAL
+0,14 MB,33406976 KB
+";
+        assert_eq!(
+            parse_amd_smi_monitor_vram(csv),
+            vec![GpuVramInfo {
+                total_mb: 32_624,
+                used_mb: 14,
+                free_mb: 32_610,
+            }]
+        );
+
+        let table = "\
+GPU  XCP    POWER    GPU_T    MEM_T   GFX_CLK    GFX%    MEM%   ENC%   DEC%   VRAM_USED   VRAM_TOTAL
+  0    0    110 W    47 C     39 C    210 MHz    0 %     0 %    N/A    0 %      14 MB      32624 MB
+";
+        assert_eq!(
+            parse_amd_smi_monitor_vram(table),
+            vec![GpuVramInfo {
+                total_mb: 32_624,
+                used_mb: 14,
+                free_mb: 32_610,
+            }]
         );
     }
 
@@ -1985,6 +2127,7 @@ card1,34359738368,2147483648
                     }),
                 }],
                 rocm_smi_path: Some(PathBuf::from("/opt/rocm/bin/rocm-smi")),
+                amd_smi_path: None,
                 rocminfo_error: None,
                 rocm_smi_error: None,
             }
@@ -1992,15 +2135,45 @@ card1,34359738368,2147483648
     }
 
     #[tokio::test]
-    async fn rocm_vram_probe_reports_missing_rocm_smi() {
+    async fn rocm_vram_probe_falls_back_to_amd_smi() {
+        let runner = FakeRunner::default()
+            .with(
+                "which",
+                &["amd-smi"],
+                FakeRunner::success("/opt/rocm/bin/amd-smi\n"),
+            )
+            .with(
+                "/opt/rocm/bin/amd-smi",
+                &["monitor", "--vram-usage", "--csv"],
+                FakeRunner::success("GPU,VRAM_USED,VRAM_TOTAL\n0,14 MB,32624 MB\n"),
+            );
+
+        assert_eq!(
+            detect_rocm_vram_with_runner(&runner).await,
+            RocmVramProbe {
+                rocm_smi_path: None,
+                amd_smi_path: Some(PathBuf::from("/opt/rocm/bin/amd-smi")),
+                devices: vec![GpuVramInfo {
+                    total_mb: 32_624,
+                    used_mb: 14,
+                    free_mb: 32_610,
+                }],
+                error: None,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn rocm_vram_probe_reports_missing_smi_tools() {
         let runner = FakeRunner::default();
 
         assert_eq!(
             detect_rocm_vram_with_runner(&runner).await,
             RocmVramProbe {
                 rocm_smi_path: None,
+                amd_smi_path: None,
                 devices: Vec::new(),
-                error: Some("rocm-smi not found".to_string()),
+                error: Some("rocm-smi and amd-smi did not report VRAM totals".to_string()),
             }
         );
     }
