@@ -300,19 +300,34 @@ install_binary_and_uninstaller() {
   node_binary=${3:-}
   router_binary=${4:-}
   mkdir -p "$install_dir"
-  cp "$binary" "$install_dir/lmml"
-  chmod 755 "$install_dir/lmml"
+  install_file "$binary" "$install_dir/lmml"
   if [ -n "$node_binary" ]; then
-    cp "$node_binary" "$install_dir/lmml-node"
-    chmod 755 "$install_dir/lmml-node"
+    install_file "$node_binary" "$install_dir/lmml-node"
   fi
   if [ -n "$router_binary" ]; then
-    cp "$router_binary" "$install_dir/lmml-router"
-    chmod 755 "$install_dir/lmml-router"
+    install_file "$router_binary" "$install_dir/lmml-router"
   fi
   if [ -n "$uninstaller" ]; then
-    cp "$uninstaller" "$install_dir/lmml-uninstall"
-    chmod 755 "$install_dir/lmml-uninstall"
+    install_file "$uninstaller" "$install_dir/lmml-uninstall"
+  fi
+}
+
+install_file() {
+  src=$1
+  dest=$2
+  tmp="$dest.tmp.$$"
+  rm -f "$tmp"
+  if ! cp "$src" "$tmp"; then
+    rm -f "$tmp"
+    fail "failed to stage $(basename "$dest") for install"
+  fi
+  if ! chmod 755 "$tmp"; then
+    rm -f "$tmp"
+    fail "failed to mark $(basename "$dest") executable"
+  fi
+  if ! mv -f "$tmp" "$dest"; then
+    rm -f "$tmp"
+    fail "failed to install $(basename "$dest")" "Close running permission-sensitive processes or check write access to $install_dir."
   fi
 }
 
