@@ -17,7 +17,7 @@ CUDA_DRIVER_OK=0
 CUDA_TOOLKIT_OK=0
 CUDA_OK=0
 ROCM_OK=0
-ROCM_HIP_CMAKE_OK=0
+ROCM_CMAKE_OK=0
 VULKAN_OK=0
 METAL_OK=0
 
@@ -53,7 +53,7 @@ need_apt() {
   esac
 }
 
-rocm_runtime_dev_package() {
+rocm_version_suffix() {
   local hip_root=${1:-}
   local hip_version=${2:-}
   local suffix
@@ -61,6 +61,12 @@ rocm_runtime_dev_package() {
   if [[ -z "$suffix" && -n "$hip_root" ]]; then
     suffix=$(basename "$hip_root" | sed -n 's/^core-\([0-9][0-9]*\.[0-9][0-9]*\)$/\1/p')
   fi
+  printf '%s\n' "$suffix"
+}
+
+rocm_runtime_dev_package() {
+  local suffix
+  suffix=$(rocm_version_suffix "${1:-}" "${2:-}")
   if [[ -n "$suffix" ]]; then
     printf 'amdrocm-runtime-dev%s\n' "$suffix"
   else
@@ -68,37 +74,84 @@ rocm_runtime_dev_package() {
   fi
 }
 
-hip_cmake_config_exists() {
+rocm_blas_dev_package() {
+  local suffix
+  suffix=$(rocm_version_suffix "${1:-}" "${2:-}")
+  if [[ -n "$suffix" ]]; then
+    printf 'amdrocm-blas-dev%s\n' "$suffix"
+  else
+    printf 'matching amdrocm-blas-dev package\n'
+  fi
+}
+
+rocm_hipblas_common_dev_package() {
+  local suffix
+  suffix=$(rocm_version_suffix "${1:-}" "${2:-}")
+  if [[ -n "$suffix" ]]; then
+    printf 'amdrocm-hipblas-common-dev%s\n' "$suffix"
+  else
+    printf 'matching amdrocm-hipblas-common-dev package\n'
+  fi
+}
+
+rocm_cmake_config_exists() {
   local hip_root=${1:-}
+  local package_dir=${2:?}
+  shift 2
   local candidates=()
+  local roots=()
   if [[ -n "$hip_root" ]]; then
-    candidates+=(
-      "$hip_root/lib/cmake/hip-lang/hip-lang-config.cmake"
-      "$hip_root/lib64/cmake/hip-lang/hip-lang-config.cmake"
-      "$hip_root/lib/x86_64-linux-gnu/cmake/hip-lang/hip-lang-config.cmake"
-      "$hip_root/lib/x86_64-unknown-linux-gnu/cmake/hip-lang/hip-lang-config.cmake"
-      "$hip_root/share/hip/cmake/hip-lang-config.cmake"
-      "$hip_root/share/hip/hip-lang-config.cmake"
-    )
-    if [[ "$hip_root" != "/opt/rocm" ]]; then
-      candidates+=(
-        "/opt/rocm/lib/cmake/hip-lang/hip-lang-config.cmake"
-        "/opt/rocm/lib64/cmake/hip-lang/hip-lang-config.cmake"
-      )
+    roots+=("$hip_root")
+    if [[ "$hip_root" == /opt/rocm/* && "$hip_root" != "/opt/rocm" ]]; then
+      roots+=("/opt/rocm")
     fi
+  else
+    roots+=("/opt/rocm")
   fi
   if [[ -z "$hip_root" || "$hip_root" != /opt/rocm* ]]; then
-    candidates+=(
-      "/usr/lib/x86_64-linux-gnu/cmake/hip-lang/hip-lang-config.cmake"
-      "/usr/lib/cmake/hip-lang/hip-lang-config.cmake"
-    )
+    roots+=("/usr")
   fi
+  local root
+  local name
+  for root in "${roots[@]}"; do
+    for name in "$@"; do
+      candidates+=(
+        "$root/lib/cmake/$package_dir/$name"
+        "$root/lib64/cmake/$package_dir/$name"
+        "$root/lib/x86_64-linux-gnu/cmake/$package_dir/$name"
+        "$root/lib/x86_64-unknown-linux-gnu/cmake/$package_dir/$name"
+        "$root/share/$package_dir/cmake/$name"
+        "$root/share/$package_dir/$name"
+      )
+    done
+  done
   for candidate in "${candidates[@]}"; do
     if [[ -f "$candidate" ]]; then
       printf '%s\n' "$candidate"
       return 0
     fi
   done
+  return 1
+}
+
+check_rocm_cmake_package() {
+  local label=${1:?}
+  local apt_package=${2:?}
+  local package_dir=${3:?}
+  shift 3
+  local config_path
+  if config_path=$(rocm_cmake_config_exists "${HIP_ROOT:-}" "$package_dir" "$@"); then
+    ok "$label CMake package $config_path"
+    return 0
+  fi
+  if [[ "$GPU_MODE" == "rocm" ]]; then
+    gpu_fail "$label CMake package not found for ${HIP_ROOT:-unknown ROCm root}; install $apt_package from the AMD ROCm repository"
+  else
+    warn "$label CMake package not found for ${HIP_ROOT:-unknown ROCm root}; install $apt_package for ROCm source builds"
+  fi
+  if [[ "$apt_package" != matching* ]]; then
+    need_apt "$apt_package"
+  fi
   return 1
 }
 
@@ -324,19 +377,19 @@ if command -v hipconfig >/dev/null 2>&1; then
     [[ -n "$HIP_ROOT" ]] && ok "HIP_PATH $HIP_ROOT"
   fi
   HIP_DEV_PACKAGE=$(rocm_runtime_dev_package "$HIP_ROOT" "${HIP_VERSION:-}")
-  if HIP_CMAKE_CONFIG=$(hip_cmake_config_exists "$HIP_ROOT"); then
-    ok "HIP CMake package $HIP_CMAKE_CONFIG"
-    ROCM_HIP_CMAKE_OK=1
-  else
-    if [[ "$GPU_MODE" == "rocm" ]]; then
-      gpu_fail "HIP CMake package hip-lang-config.cmake not found for ${HIP_ROOT:-unknown ROCm root}; install $HIP_DEV_PACKAGE from the AMD ROCm repository"
-    else
-      warn "HIP CMake package hip-lang-config.cmake not found for ${HIP_ROOT:-unknown ROCm root}; install $HIP_DEV_PACKAGE for ROCm source builds"
-    fi
-    if [[ "$HIP_DEV_PACKAGE" != matching* ]]; then
-      need_apt "$HIP_DEV_PACKAGE"
-    fi
-  fi
+  BLAS_DEV_PACKAGE=$(rocm_blas_dev_package "$HIP_ROOT" "${HIP_VERSION:-}")
+  HIPBLAS_COMMON_DEV_PACKAGE=$(rocm_hipblas_common_dev_package "$HIP_ROOT" "${HIP_VERSION:-}")
+  ROCM_CMAKE_OK=1
+  check_rocm_cmake_package "HIP language" "$HIP_DEV_PACKAGE" "hip-lang" \
+    "hip-lang-config.cmake" || ROCM_CMAKE_OK=0
+  check_rocm_cmake_package "HIP" "$HIP_DEV_PACKAGE" "hip" \
+    "hip-config.cmake" || ROCM_CMAKE_OK=0
+  check_rocm_cmake_package "hipBLAS" "$BLAS_DEV_PACKAGE" "hipblas" \
+    "hipblas-config.cmake" "hipblasConfig.cmake" || ROCM_CMAKE_OK=0
+  check_rocm_cmake_package "hipBLAS common" "$HIPBLAS_COMMON_DEV_PACKAGE" "hipblas-common" \
+    "hipblas-common-config.cmake" "hipblas-commonConfig.cmake" || ROCM_CMAKE_OK=0
+  check_rocm_cmake_package "rocBLAS" "$BLAS_DEV_PACKAGE" "rocblas" \
+    "rocblas-config.cmake" "rocblasConfig.cmake" || ROCM_CMAKE_OK=0
   if HIP_LLVM=$(hipconfig -l 2>/dev/null | first_line); then
     if [[ -n "$HIP_LLVM" && -x "$HIP_LLVM/clang" ]]; then
       ok "HIP clang $HIP_LLVM/clang"
@@ -349,7 +402,7 @@ if command -v hipconfig >/dev/null 2>&1; then
       ROCM_TARGETS=$(printf '%s\n' "$ROCMINFO_OUTPUT" | grep -Eo 'gfx[0-9][0-9][0-9a-z]+' | grep -v '^gfx000$' | sed 's/^gfx1035$/gfx1030/' | sort -u | tr '\n' ' ' | sed 's/[[:space:]]*$//' || true)
       if [[ -n "$ROCM_TARGETS" ]]; then
         ok "ROCm gfx targets: $ROCM_TARGETS"
-        if [[ "$ROCM_HIP_CMAKE_OK" == "1" ]]; then
+        if [[ "$ROCM_CMAKE_OK" == "1" ]]; then
           ROCM_OK=1
         fi
       else
@@ -439,7 +492,7 @@ fi
 
 if (( HARD_FAILURES > 0 || GPU_FAILURES > 0 )); then
   printf '\n%bPreflight failed:%b %d hard prerequisite failure(s), %d first-class GPU acceleration failure(s).\n' "$RED" "$NC" "$HARD_FAILURES" "$GPU_FAILURES"
-  printf '  For ROCm/HIP nodes, install matching AMD ROCm development packages such as amdrocm-runtime-dev7.14, then re-run with LMML_GPU_MODE=rocm.\n'
+  printf '  For ROCm/HIP nodes, install matching AMD ROCm development packages such as amdrocm-runtime-dev7.14, amdrocm-blas-dev7.14, and amdrocm-hipblas-common-dev7.14, then re-run with LMML_GPU_MODE=rocm.\n'
   printf '  For Vulkan-only nodes, re-run with LMML_GPU_MODE=vulkan.\n'
   printf '  For intentional CPU-only nodes, re-run with LMML_GPU_MODE=cpu-only.\n'
   exit 1

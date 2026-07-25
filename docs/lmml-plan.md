@@ -100,9 +100,11 @@ install-time environment variables.
 ROCm/HIP support is intentionally conservative:
 
 - use `hipconfig` and `rocminfo`;
-- auto-select HIP only when a real `gfx*` target is visible;
+- auto-select HIP only when a real `gfx*` target is visible and llama.cpp's
+  required ROCm CMake packages (`hip-lang`, `hip`, `hipblas`,
+  `hipblas-common`, `rocblas`) are present under the matching ROCm root;
 - normalize known target aliases such as `gfx1035` to `gfx1030`;
-- pass `HIPCXX` and `HIP_PATH` hints when detected;
+- pass `HIPCXX`, `HIP_PATH`, and `ROCM_PATH` hints when detected;
 - parse `rocm-smi --showmeminfo vram --csv` or `amd-smi monitor --vram-usage
   --csv` for ROCm total/free VRAM in detect summaries and LMML node load
   reports;

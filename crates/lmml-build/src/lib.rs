@@ -38,7 +38,7 @@ pub struct BuildConfig {
     pub cuda_glibc_compat_shim: bool,
     /// Optional HIP clang executable used by ROCm/HIP CMake builds.
     pub rocm_hipcxx: Option<PathBuf>,
-    /// Optional ROCm root exported as `HIP_PATH` for ROCm/HIP CMake builds.
+    /// Optional ROCm root exported for ROCm/HIP CMake builds.
     pub rocm_hip_path: Option<PathBuf>,
     /// Extra CMake flags appended after generated flags.
     pub extra_cmake_flags: Vec<String>,
@@ -263,6 +263,13 @@ pub fn cmake_configure_args(config: &BuildConfig) -> Vec<String> {
             if !targets.is_empty() {
                 args.push(format!("-DGPU_TARGETS={}", targets.join(";")));
             }
+            if let Some(hip_path) = &config.rocm_hip_path {
+                let rpath = rocm_library_rpath(hip_path);
+                if !rpath.is_empty() {
+                    args.push(format!("-DCMAKE_BUILD_RPATH={rpath}"));
+                    args.push(format!("-DCMAKE_INSTALL_RPATH={rpath}"));
+                }
+            }
         }
         BuildBackend::Vulkan => args.push("-DGGML_VULKAN=ON".to_string()),
         BuildBackend::CpuAvx2 => args.push("-DGGML_AVX2=ON".to_string()),
@@ -301,6 +308,16 @@ fn cuda_cmake_flags(config: &BuildConfig) -> Vec<String> {
     flags
 }
 
+fn rocm_library_rpath(hip_path: &Path) -> String {
+    ["lib", "lib64"]
+        .into_iter()
+        .map(|dir| hip_path.join(dir))
+        .filter(|path| path.is_dir())
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
 fn cuda_glibc_compat_shim_path(config: &BuildConfig) -> PathBuf {
     config
         .source_dir
@@ -326,10 +343,9 @@ fn cmake_configure_env(config: &BuildConfig) -> Vec<(String, String)> {
         env.push(("HIPCXX".to_string(), hipcxx.to_string_lossy().into_owned()));
     }
     if let Some(hip_path) = &config.rocm_hip_path {
-        env.push((
-            "HIP_PATH".to_string(),
-            hip_path.to_string_lossy().into_owned(),
-        ));
+        let hip_path = hip_path.to_string_lossy().into_owned();
+        env.push(("HIP_PATH".to_string(), hip_path.clone()));
+        env.push(("ROCM_PATH".to_string(), hip_path));
     }
     env
 }
@@ -1018,7 +1034,8 @@ mod tests {
                 ),
                 ("CUDAHOSTCXX".to_string(), "/usr/bin/g++-11".to_string()),
                 ("HIPCXX".to_string(), "/opt/rocm/llvm/bin/clang".to_string()),
-                ("HIP_PATH".to_string(), "/opt/rocm".to_string())
+                ("HIP_PATH".to_string(), "/opt/rocm".to_string()),
+                ("ROCM_PATH".to_string(), "/opt/rocm".to_string())
             ]
         );
     }
@@ -1075,6 +1092,30 @@ mod tests {
                 "-DGPU_TARGETS=gfx1201;gfx1100",
             ]
         );
+    }
+
+    #[test]
+    fn assembles_rocm_runtime_rpath_for_detected_root() {
+        let rocm_root = tempfile::tempdir().expect("temp ROCm root");
+        std::fs::create_dir(rocm_root.path().join("lib")).expect("rocm lib dir");
+        std::fs::create_dir(rocm_root.path().join("lib64")).expect("rocm lib64 dir");
+        let mut config = BuildConfig::new(
+            PathBuf::from("/tmp/llama.cpp"),
+            BuildBackend::Rocm {
+                targets: vec!["gfx1201".to_string()],
+            },
+        );
+        config.rocm_hip_path = Some(rocm_root.path().to_path_buf());
+        let rpath = format!(
+            "{};{}",
+            rocm_root.path().join("lib").display(),
+            rocm_root.path().join("lib64").display()
+        );
+
+        let args = cmake_configure_args(&config);
+
+        assert!(args.contains(&format!("-DCMAKE_BUILD_RPATH={rpath}")));
+        assert!(args.contains(&format!("-DCMAKE_INSTALL_RPATH={rpath}")));
     }
 
     #[test]

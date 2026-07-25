@@ -976,7 +976,11 @@ where
 
     let hip_path = rocm_hip_path_from_hipconfig(runner, &program).await;
     let hip_clang_path = rocm_hip_clang_from_hipconfig(runner, &program).await;
-    let hip_cmake_config_path = find_hip_cmake_config(hip_path.as_deref());
+    let cmake_requirements = rocm_cmake_requirements(hip_path.as_deref());
+    let hip_cmake_config_path = cmake_requirements
+        .iter()
+        .find(|requirement| requirement.label == "hip-lang")
+        .and_then(|requirement| requirement.config_path.clone());
     let rocminfo = runner.run("rocminfo", &[], None).await;
     let mut devices = if rocminfo.success {
         parse_rocm_devices(&rocminfo.stdout)
@@ -1000,11 +1004,16 @@ where
     let rocminfo_error = (!rocminfo.success)
         .then(|| first_line(&rocminfo.stderr, &rocminfo.stdout))
         .filter(|message| !message.is_empty());
-    let hip_cmake_error = (!targets.is_empty() && hip_cmake_config_path.is_none())
-        .then(|| missing_hip_cmake_message(hip_path.as_deref(), version.as_deref()));
+    let hip_cmake_error = (!targets.is_empty()
+        && cmake_requirements
+            .iter()
+            .any(|requirement| requirement.config_path.is_none()))
+    .then(|| {
+        missing_rocm_cmake_message(hip_path.as_deref(), version.as_deref(), &cmake_requirements)
+    });
 
     RocmSupport {
-        available: !targets.is_empty() && hip_cmake_config_path.is_some(),
+        available: !targets.is_empty() && hip_cmake_error.is_none(),
         hipconfig_path: Some(hipconfig_path),
         version: version.filter(|value| !value.is_empty()),
         hip_path,
@@ -1127,11 +1136,71 @@ where
         .map(|path| PathBuf::from(path).join("clang"))
 }
 
-fn find_hip_cmake_config(hip_root: Option<&Path>) -> Option<PathBuf> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RocmDevPackage {
+    Runtime,
+    Blas,
+    HipblasCommon,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RocmCmakeRequirement {
+    label: &'static str,
+    package: RocmDevPackage,
+    config_path: Option<PathBuf>,
+}
+
+fn rocm_cmake_requirements(hip_root: Option<&Path>) -> Vec<RocmCmakeRequirement> {
+    vec![
+        RocmCmakeRequirement {
+            label: "hip-lang",
+            package: RocmDevPackage::Runtime,
+            config_path: find_rocm_cmake_config(hip_root, "hip-lang", &["hip-lang-config.cmake"]),
+        },
+        RocmCmakeRequirement {
+            label: "hip",
+            package: RocmDevPackage::Runtime,
+            config_path: find_rocm_cmake_config(hip_root, "hip", &["hip-config.cmake"]),
+        },
+        RocmCmakeRequirement {
+            label: "hipblas",
+            package: RocmDevPackage::Blas,
+            config_path: find_rocm_cmake_config(
+                hip_root,
+                "hipblas",
+                &["hipblas-config.cmake", "hipblasConfig.cmake"],
+            ),
+        },
+        RocmCmakeRequirement {
+            label: "hipblas-common",
+            package: RocmDevPackage::HipblasCommon,
+            config_path: find_rocm_cmake_config(
+                hip_root,
+                "hipblas-common",
+                &["hipblas-common-config.cmake", "hipblas-commonConfig.cmake"],
+            ),
+        },
+        RocmCmakeRequirement {
+            label: "rocblas",
+            package: RocmDevPackage::Blas,
+            config_path: find_rocm_cmake_config(
+                hip_root,
+                "rocblas",
+                &["rocblas-config.cmake", "rocblasConfig.cmake"],
+            ),
+        },
+    ]
+}
+
+fn find_rocm_cmake_config(
+    hip_root: Option<&Path>,
+    package_dir: &str,
+    config_names: &[&str],
+) -> Option<PathBuf> {
     let mut roots = Vec::new();
     if let Some(root) = hip_root {
         roots.push(root.to_path_buf());
-        if root != Path::new("/opt/rocm") {
+        if root.starts_with("/opt/rocm") && root != Path::new("/opt/rocm") {
             roots.push(PathBuf::from("/opt/rocm"));
         }
     } else {
@@ -1140,32 +1209,65 @@ fn find_hip_cmake_config(hip_root: Option<&Path>) -> Option<PathBuf> {
 
     roots
         .into_iter()
-        .flat_map(|root| hip_cmake_config_candidates(&root))
+        .flat_map(|root| rocm_cmake_config_candidates(&root, package_dir, config_names))
         .find(|path| path.is_file())
 }
 
-fn hip_cmake_config_candidates(root: &Path) -> Vec<PathBuf> {
-    vec![
-        root.join("lib/cmake/hip-lang/hip-lang-config.cmake"),
-        root.join("lib64/cmake/hip-lang/hip-lang-config.cmake"),
-        root.join("lib/x86_64-linux-gnu/cmake/hip-lang/hip-lang-config.cmake"),
-        root.join("lib/x86_64-unknown-linux-gnu/cmake/hip-lang/hip-lang-config.cmake"),
-        root.join("share/hip/cmake/hip-lang-config.cmake"),
-        root.join("share/hip/hip-lang-config.cmake"),
-    ]
+fn rocm_cmake_config_candidates(
+    root: &Path,
+    package_dir: &str,
+    config_names: &[&str],
+) -> Vec<PathBuf> {
+    let cmake_dirs = [
+        root.join("lib/cmake").join(package_dir),
+        root.join("lib64/cmake").join(package_dir),
+        root.join("lib/x86_64-linux-gnu/cmake").join(package_dir),
+        root.join("lib/x86_64-unknown-linux-gnu/cmake")
+            .join(package_dir),
+        root.join("share").join(package_dir).join("cmake"),
+        root.join("share").join(package_dir),
+    ];
+    cmake_dirs
+        .into_iter()
+        .flat_map(|dir| config_names.iter().map(move |name| dir.join(name)))
+        .collect()
 }
 
-fn missing_hip_cmake_message(hip_root: Option<&Path>, version: Option<&str>) -> String {
+fn missing_rocm_cmake_message(
+    hip_root: Option<&Path>,
+    version: Option<&str>,
+    requirements: &[RocmCmakeRequirement],
+) -> String {
     let root = hip_root
         .map(|path| path.display().to_string())
         .unwrap_or_else(|| "unknown ROCm root".to_string());
-    let package = rocm_runtime_dev_package(hip_root, version);
+    let missing = requirements
+        .iter()
+        .filter(|requirement| requirement.config_path.is_none())
+        .map(|requirement| requirement.label)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut packages = Vec::new();
+    for requirement in requirements
+        .iter()
+        .filter(|requirement| requirement.config_path.is_none())
+    {
+        let package = rocm_dev_package(requirement.package, hip_root, version);
+        if !packages.contains(&package) {
+            packages.push(package);
+        }
+    }
+    let packages = packages.join(" ");
     format!(
-        "HIP CMake package hip-lang-config.cmake not found for {root}; install {package} from the AMD ROCm repository, not the Ubuntu libamdhip64-dev fallback"
+        "ROCm CMake package(s) {missing} not found for {root}; install {packages} from the AMD ROCm repository, not Ubuntu ROCm packages from a different minor version"
     )
 }
 
-fn rocm_runtime_dev_package(hip_root: Option<&Path>, version: Option<&str>) -> String {
+fn rocm_dev_package(
+    package: RocmDevPackage,
+    hip_root: Option<&Path>,
+    version: Option<&str>,
+) -> String {
     rocm_major_minor(version)
         .or_else(|| {
             hip_root.and_then(|root| {
@@ -1180,8 +1282,20 @@ fn rocm_runtime_dev_package(hip_root: Option<&Path>, version: Option<&str>) -> S
                 })
             })
         })
-        .map(|suffix| format!("amdrocm-runtime-dev{suffix}"))
-        .unwrap_or_else(|| "the matching amdrocm-runtime-dev package".to_string())
+        .map(|suffix| match package {
+            RocmDevPackage::Runtime => format!("amdrocm-runtime-dev{suffix}"),
+            RocmDevPackage::Blas => format!("amdrocm-blas-dev{suffix}"),
+            RocmDevPackage::HipblasCommon => {
+                format!("amdrocm-hipblas-common-dev{suffix}")
+            }
+        })
+        .unwrap_or_else(|| match package {
+            RocmDevPackage::Runtime => "the matching amdrocm-runtime-dev package".to_string(),
+            RocmDevPackage::Blas => "the matching amdrocm-blas-dev package".to_string(),
+            RocmDevPackage::HipblasCommon => {
+                "the matching amdrocm-hipblas-common-dev package".to_string()
+            }
+        })
 }
 
 fn rocm_major_minor(version: Option<&str>) -> Option<String> {
@@ -2153,12 +2267,16 @@ GPU  XCP    POWER    GPU_T    MEM_T   GFX_CLK    GFX%    MEM%   ENC%   DEC%   VR
     #[tokio::test]
     async fn rocm_probe_detects_hipconfig_and_gfx_targets() {
         let rocm_root = tempfile::tempdir().expect("temp ROCm root");
-        let hip_cmake_config = rocm_root
-            .path()
-            .join("lib/cmake/hip-lang/hip-lang-config.cmake");
-        std::fs::create_dir_all(hip_cmake_config.parent().expect("hip-lang parent"))
-            .expect("hip-lang dir");
-        std::fs::write(&hip_cmake_config, "# fake hip-lang config\n").expect("hip-lang config");
+        let hip_cmake_config =
+            write_rocm_cmake_config(rocm_root.path(), "hip-lang", "hip-lang-config.cmake");
+        write_rocm_cmake_config(rocm_root.path(), "hip", "hip-config.cmake");
+        write_rocm_cmake_config(rocm_root.path(), "hipblas", "hipblas-config.cmake");
+        write_rocm_cmake_config(
+            rocm_root.path(),
+            "hipblas-common",
+            "hipblas-common-config.cmake",
+        );
+        write_rocm_cmake_config(rocm_root.path(), "rocblas", "rocblas-config.cmake");
         let rocm_root_text = rocm_root.path().display().to_string();
         let hipconfig = rocm_root.path().join("bin/hipconfig");
         let hipconfig_text = hipconfig.display().to_string();
@@ -2235,7 +2353,7 @@ GPU  XCP    POWER    GPU_T    MEM_T   GFX_CLK    GFX%    MEM%   ENC%   DEC%   VR
     }
 
     #[tokio::test]
-    async fn rocm_probe_requires_matching_hip_cmake_package() {
+    async fn rocm_probe_requires_matching_rocm_cmake_packages() {
         let rocm_root = tempfile::tempdir().expect("temp ROCm root");
         let rocm_root_text = rocm_root.path().display().to_string();
         let hipconfig = rocm_root.path().join("bin/hipconfig");
@@ -2280,6 +2398,74 @@ GPU  XCP    POWER    GPU_T    MEM_T   GFX_CLK    GFX%    MEM%   ENC%   DEC%   VR
             .as_deref()
             .expect("hip cmake error")
             .contains("amdrocm-runtime-dev7.14"));
+        assert!(rocm
+            .hip_cmake_error
+            .as_deref()
+            .expect("hip cmake error")
+            .contains("amdrocm-blas-dev7.14"));
+        assert!(rocm
+            .hip_cmake_error
+            .as_deref()
+            .expect("hip cmake error")
+            .contains("amdrocm-hipblas-common-dev7.14"));
+    }
+
+    #[tokio::test]
+    async fn rocm_probe_requires_blas_cmake_packages_after_runtime_dev() {
+        let rocm_root = tempfile::tempdir().expect("temp ROCm root");
+        write_rocm_cmake_config(rocm_root.path(), "hip-lang", "hip-lang-config.cmake");
+        write_rocm_cmake_config(rocm_root.path(), "hip", "hip-config.cmake");
+        let rocm_root_text = rocm_root.path().display().to_string();
+        let hipconfig = rocm_root.path().join("bin/hipconfig");
+        let hipconfig_text = hipconfig.display().to_string();
+
+        let runner = FakeRunner::default()
+            .with(
+                "which",
+                &["hipconfig"],
+                FakeRunner::success(&format!("{hipconfig_text}\n")),
+            )
+            .with(
+                &hipconfig_text,
+                &["--version"],
+                FakeRunner::success("HIP version: 7.14.60850\n"),
+            )
+            .with(
+                &hipconfig_text,
+                &["-R"],
+                FakeRunner::success(&format!("{rocm_root_text}\n")),
+            )
+            .with(
+                &hipconfig_text,
+                &["-l"],
+                FakeRunner::success(&format!("{rocm_root_text}/llvm/bin\n")),
+            )
+            .with(
+                "rocminfo",
+                &[],
+                FakeRunner::success(
+                    "Agent 2\n  Name: gfx1201\n  Marketing Name: AMD Radeon AI PRO R9700\n",
+                ),
+            );
+
+        let rocm = detect_rocm(&runner).await;
+        let error = rocm.hip_cmake_error.as_deref().expect("rocm cmake error");
+
+        assert!(!rocm.available);
+        assert_eq!(rocm.targets, vec!["gfx1201".to_string()]);
+        assert!(error.contains("hipblas"));
+        assert!(error.contains("hipblas-common"));
+        assert!(error.contains("rocblas"));
+        assert!(error.contains("amdrocm-blas-dev7.14"));
+        assert!(error.contains("amdrocm-hipblas-common-dev7.14"));
+    }
+
+    fn write_rocm_cmake_config(root: &Path, package: &str, file_name: &str) -> PathBuf {
+        let path = root.join("lib/cmake").join(package).join(file_name);
+        std::fs::create_dir_all(path.parent().expect("cmake config parent"))
+            .expect("cmake config dir");
+        std::fs::write(&path, "# fake ROCm cmake config\n").expect("cmake config");
+        path
     }
 
     #[tokio::test]

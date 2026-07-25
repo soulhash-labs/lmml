@@ -21,9 +21,10 @@ VRAM remains the first sizing constraint for local AI. Ecosystem support is the
 second constraint.
 
 Current lmml ROCm/HIP support is conservative: `lmml-detect` probes
-`hipconfig`, `rocminfo`, and the HIP CMake package used by CMake's HIP language
-support, auto-selects HIP only when at least one `gfx*` target is visible and
-the matching ROCm development package is installed, and `lmml-build` emits
+`hipconfig`, `rocminfo`, and the ROCm CMake packages used by llama.cpp's HIP
+backend (`hip-lang`, `hip`, `hipblas`, `hipblas-common`, and `rocblas`),
+auto-selects HIP only when at least one `gfx*` target is visible and the
+matching ROCm development packages are installed, and `lmml-build` emits
 upstream llama.cpp flags
 `-DGGML_HIP=ON -DGPU_TARGETS=...`. When ROCm SMI tooling is available, LMML
 parses `rocm-smi --showmeminfo vram --csv` or `amd-smi monitor --vram-usage

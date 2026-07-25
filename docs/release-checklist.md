@@ -123,11 +123,12 @@ diff -u /tmp/lmml-SHA256SUMS.first dist/SHA256SUMS
 ## ROCm Scope
 
 ROCm/HIP is implemented as a conservative source-build backend. Release checks
-must verify `hipconfig`/`rocminfo` probing, matching HIP CMake package
-detection, `gfx*` target mapping, `-DGGML_HIP=ON -DGPU_TARGETS=...` CMake
-flags, settings persistence, `rocm-smi`/`amd-smi` VRAM polling, and tests. Do
-not claim complete AMD production telemetry until ROCm VRAM polling is
-validated on target AMD GPU hosts.
+must verify `hipconfig`/`rocminfo` probing, matching ROCm CMake package
+detection for `hip-lang`, `hip`, `hipblas`, `hipblas-common`, and `rocblas`,
+`gfx*` target mapping, `-DGGML_HIP=ON -DGPU_TARGETS=...` CMake flags, settings
+persistence, `rocm-smi`/`amd-smi` VRAM polling, and tests. Do not claim
+complete AMD production telemetry until ROCm VRAM polling is validated on
+target AMD GPU hosts.
 
 ## Debian-Family Linux Cross-Target Validation
 
