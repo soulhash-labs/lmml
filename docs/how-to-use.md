@@ -50,6 +50,7 @@ Optional profile hints print recommended settings after install:
 ```sh
 curl -fsSL http://192.168.1.101:8000/install.sh | BASE_URL=http://192.168.1.101:8000 LMML_PROFILE_HINT=orion-qwen35-4b-q8 sh
 curl -fsSL http://192.168.1.101:8000/install.sh | BASE_URL=http://192.168.1.101:8000 LMML_PROFILE_HINT=quadro-m6000-qwen35-9b-q8 sh
+curl -fsSL http://192.168.1.101:8000/install.sh | BASE_URL=http://192.168.1.101:8000 LMML_PROFILE_HINT=radeon-r9700-qwen35-9b-q8 sh
 ```
 
 ### 2. Run preflight checks
@@ -180,6 +181,7 @@ Use these for long, single-agent sessions:
 ```text
 orion-qwen-q8-deep       4B Q8, 262144 ctx, parallel 1, q8 KV
 m6000-qwen9b-deep        9B Q8, 262144 ctx, parallel 1, q8 KV
+r9700-qwen9b-deep        9B Q8, 262144 ctx, parallel 1, q8 KV, ROCm/HIP gfx1201
 5060ti-qwen9b-deep       9B Q8, 196608 ctx, parallel 1, q8 KV
 5070ti-qwen9b-deep       9B Q8, 196608 ctx, parallel 1, q8 KV
 ```

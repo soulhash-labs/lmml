@@ -87,6 +87,13 @@ Notes:
 Status: **validated pattern**, hardware-specific values still require local
 validation.
 
+Concrete built-in deep profiles:
+
+| Profile | Hardware target | Model filename | Context | Status |
+|---|---|---|---:|---|
+| `r9700-qwen9b-deep` | AMD Radeon AI PRO R9700 / ROCm `gfx1201` | `Qwen3.5-9B-Q8_0.gguf` | 262144 | Proposed until target load validation |
+| `r9700-qwen35-crown11-aw-q8-deep` | AMD Radeon AI PRO R9700 / ROCm `gfx1201` | `qwen35-crown11-aw-Q8_0.gguf` | 262144 | Proposed until target load validation |
+
 ### 2. Balanced Fanout Worker
 
 Purpose: a GPU worker that handles multiple agent/subagent requests with bounded

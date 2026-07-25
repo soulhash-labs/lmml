@@ -210,8 +210,8 @@ case "$INSTALL_MODE" in
 esac
 
 case "$LMML_PROFILE_HINT" in
-  ""|orion-qwen35-4b-q8|quadro-m6000-qwen35-9b-q8|qwen36-27b-q4|qwen36-35b-a3b-q4|gemma4-12b-mtp-q4km|bc250-qwen35-9b-q4km-vulkan) ;;
-  *) fail "Unsupported LMML_PROFILE_HINT=$LMML_PROFILE_HINT" "Supported hints: orion-qwen35-4b-q8, quadro-m6000-qwen35-9b-q8, qwen36-27b-q4, qwen36-35b-a3b-q4, gemma4-12b-mtp-q4km, bc250-qwen35-9b-q4km-vulkan." ;;
+  ""|orion-qwen35-4b-q8|quadro-m6000-qwen35-9b-q8|radeon-r9700-qwen35-9b-q8|qwen36-27b-q4|qwen36-35b-a3b-q4|gemma4-12b-mtp-q4km|bc250-qwen35-9b-q4km-vulkan) ;;
+  *) fail "Unsupported LMML_PROFILE_HINT=$LMML_PROFILE_HINT" "Supported hints: orion-qwen35-4b-q8, quadro-m6000-qwen35-9b-q8, radeon-r9700-qwen35-9b-q8, qwen36-27b-q4, qwen36-35b-a3b-q4, gemma4-12b-mtp-q4km, bc250-qwen35-9b-q4km-vulkan." ;;
 esac
 
 case "$LMML_CHECKSUM_VERIFY" in
@@ -504,6 +504,35 @@ if [ "$LMML_PROFILE_HINT" = "quadro-m6000-qwen35-9b-q8" ]; then
   echo "  Fallback ladder if runtime memory pressure appears:"
   echo "    ctx_size 196608, reserved 65536, parallel 1, practical 131072"
   echo "    ctx_size 131072, reserved 32768, parallel 1, practical 98304"
+fi
+
+if [ "$LMML_PROFILE_HINT" = "radeon-r9700-qwen35-9b-q8" ]; then
+  echo
+  echo "  Radeon AI PRO R9700 32GB + Qwen3.5 9B Q8 profile target:"
+  echo "    llama-server ctx_size:              262144 tokens"
+  echo "    OpenCode compaction.reserved:       65536 tokens"
+  echo "    OpenCode usable input limit:        196608 tokens"
+  echo "    OpenCode output limit:              18000 tokens"
+  echo "    operator compact target:            90000-120000 live prompt tokens"
+  echo "    operator red zone:                  120000-170000 live prompt tokens"
+  echo "    operator hard compress/reject:      170000-190000 live prompt tokens"
+  echo "    OpenCode provider timeout:          7200 seconds"
+  echo "    OpenCode stream chunk timeout:      2400 seconds"
+  echo "    llama-server parallel slots:        1"
+  echo "    ROCm target:                        gfx1201"
+  echo "    recommended source mode:            LMML_GPU_MODE=rocm INSTALL_MODE=source"
+  echo "    recommended extra_args:             [\"--parallel\", \"1\", \"--slot-save-path\", \"\$HOME/.local/share/lmml/llama-slots\"]"
+  echo "    recommended KV/cache args:          [\"-ctk\", \"q8_0\", \"-ctv\", \"q8_0\", \"--cache-ram\", \"4096\"]"
+  echo
+  echo "  TUI runtime profiles:"
+  echo "    r9700-qwen9b-deep:                  Qwen3.5-9B-Q8_0.gguf, ctx 262144, parallel 1"
+  echo "    r9700-qwen35-crown11-aw-q8-deep:    qwen35-crown11-aw-Q8_0.gguf, ctx 262144, parallel 1"
+  echo "    TUI switch key:                     p on Models or Server tab"
+  echo
+  echo "  Notes:"
+  echo "    Keep ROCm packages from the same AMD 7.14 tree."
+  echo "    Use embedded GGUF chat templates by leaving lmml chat_template empty unless a per-model override is proven."
+  echo "    This is a single-slot deep profile; route background agents to another worker or a fanout profile."
 fi
 
 if [ "$LMML_PROFILE_HINT" = "qwen36-27b-q4" ] || [ "$LMML_PROFILE_HINT" = "qwen36-35b-a3b-q4" ]; then

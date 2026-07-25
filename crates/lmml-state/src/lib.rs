@@ -494,6 +494,16 @@ fn builtin_model_profiles(slot_save_path: String) -> Vec<ModelRuntimeProfile> {
             server: qwen_kv_unified_server_config(73_728, 8, 64, 6_144, &slot_save_path),
         },
         ModelRuntimeProfile {
+            name: "r9700-qwen9b-deep".to_string(),
+            model: PathBuf::from("Qwen3.5-9B-Q8_0.gguf"),
+            server: r9700_qwen_server_config(&slot_save_path),
+        },
+        ModelRuntimeProfile {
+            name: "r9700-qwen35-crown11-aw-q8-deep".to_string(),
+            model: PathBuf::from("qwen35-crown11-aw-Q8_0.gguf"),
+            server: r9700_qwen_server_config(&slot_save_path),
+        },
+        ModelRuntimeProfile {
             name: "bc250-qwen9b-q4km-vulkan".to_string(),
             model: PathBuf::from("Qwen3.5-9B-Q4_K_M.gguf"),
             server: bc250_qwen9b_vulkan_server_config(&slot_save_path),
@@ -619,6 +629,10 @@ fn m6000_qwen_server_config(
     );
     server.flash_attn = false;
     server
+}
+
+fn r9700_qwen_server_config(slot_save_path: &str) -> ServerConfig {
+    qwen_server_config(262_144, 1, 128, 4_096, slot_save_path)
 }
 
 fn qwen_kv_unified_server_config(
@@ -1270,7 +1284,7 @@ mod tests {
             model_state.runtime_profiles_for_path(Path::new("/models/Qwen3.5-4B-Q8_0.gguf"));
         assert_eq!(qwen_profiles.len(), 15);
         assert_eq!(model_state.active_profile, "orion-qwen-q8-deep");
-        assert_eq!(model_state.profiles.len(), 39);
+        assert_eq!(model_state.profiles.len(), 41);
     }
 
     #[test]
@@ -1432,7 +1446,8 @@ mod tests {
                 "5070ti-qwen9b-balanced2",
                 "5070ti-qwen9b-kvu-fanout4",
                 "5070ti-qwen9b-kvu-fanout6",
-                "5070ti-qwen9b-kvu-fanout8"
+                "5070ti-qwen9b-kvu-fanout8",
+                "r9700-qwen9b-deep"
             ]
         );
         assert_eq!(profiles[1].server.ctx_size, 262_144);
@@ -1487,6 +1502,48 @@ mod tests {
         assert_eq!(&profiles[17].server.extra_args[0..2], ["--parallel", "2"]);
         assert_eq!(profiles[18].server.ctx_size, 73_728);
         assert_eq!(&profiles[20].server.extra_args[0..2], ["--parallel", "8"]);
+        assert_eq!(profiles[21].server.ctx_size, 262_144);
+        assert_eq!(&profiles[21].server.extra_args[0..2], ["--parallel", "1"]);
+        assert_eq!(profiles[21].server.ubatch_size, 128);
+        assert!(profiles[21].server.flash_attn);
+        assert_eq!(
+            &profiles[21].server.extra_args[4..],
+            ["-ctk", "q8_0", "-ctv", "q8_0", "--cache-ram", "4096"]
+        );
+    }
+
+    #[test]
+    fn r9700_crown11_qwen_profile_is_available() {
+        let mut model_state = ModelState::default();
+        let model = Path::new("/home/angelo/.local/share/lmml/models/qwen35-crown11-aw-Q8_0.gguf");
+        model_state.ensure_builtin_profiles();
+
+        let profile = model_state
+            .runtime_profile_for_path(model)
+            .expect("R9700 CROWN11 Qwen profile");
+
+        assert_eq!(profile.name, "r9700-qwen35-crown11-aw-q8-deep");
+        assert_eq!(profile.server.ctx_size, 262_144);
+        assert_eq!(profile.server.n_gpu_layers, -1);
+        assert_eq!(profile.server.ubatch_size, 128);
+        assert!(profile.server.flash_attn);
+        assert!(profile.server.jinja);
+        assert_eq!(
+            profile.server.extra_args,
+            vec![
+                "--parallel",
+                "1",
+                "--slot-save-path",
+                profile.server.extra_args[3].as_str(),
+                "-ctk",
+                "q8_0",
+                "-ctv",
+                "q8_0",
+                "--cache-ram",
+                "4096",
+            ]
+        );
+        assert!(profile.server.extra_args[3].ends_with("lmml/llama-slots"));
     }
 
     #[test]

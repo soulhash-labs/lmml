@@ -65,6 +65,12 @@ curl -fsSL http://192.168.1.100:8000/install.sh | BASE_URL=http://192.168.1.100:
 curl -fsSL http://192.168.1.100:8000/install.sh | BASE_URL=http://192.168.1.100:8000 LMML_PROFILE_HINT=quadro-m6000-qwen35-9b-q8 sh
 ```
 
+### Radeon AI PRO R9700 Qwen3.5 9B Q8
+
+```sh
+curl -fsSL http://192.168.1.100:8000/install.sh | BASE_URL=http://192.168.1.100:8000 LMML_PROFILE_HINT=radeon-r9700-qwen35-9b-q8 sh
+```
+
 ### Gemma4 12B QAT Q4_K_M with MTP
 
 ```sh
