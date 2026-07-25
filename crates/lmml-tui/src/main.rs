@@ -858,50 +858,10 @@ async fn run_doctor() -> i32 {
         }
     }
 
-    match &profile.cuda {
-        lmml_detect::CudaCompatibility::Compatible { archs } => {
-            let gpu = profile
-                .gpus
-                .first()
-                .map(|gpu| gpu.name.as_str())
-                .unwrap_or("CUDA GPU");
-            println!("  ✓  CUDA available  ·  {gpu}  ·  {}", archs.join(", "));
-        }
-        lmml_detect::CudaCompatibility::ToolkitTooOld {
-            gpu_arch,
-            minimum_toolkit,
-            found_toolkit,
-        } => {
-            soft_issues += 1;
-            println!("  ⚠  CUDA toolkit {found_toolkit} too old for {gpu_arch}");
-            println!("     → install CUDA >= {minimum_toolkit}");
-        }
-        lmml_detect::CudaCompatibility::ToolkitTooNew {
-            gpu_arch,
-            maximum_toolkit,
-            found_toolkit,
-        } => {
-            soft_issues += 1;
-            println!("  ⚠  CUDA toolkit {found_toolkit} no longer supports {gpu_arch}");
-            println!("     → install CUDA {maximum_toolkit} alongside CUDA 13");
-            println!("     → then run: LMML_CUDA_COMPILER=/usr/local/cuda-12.4/bin/nvcc lmml");
-        }
-        lmml_detect::CudaCompatibility::NoGpu => {
-            soft_issues += 1;
-            if let Some(error) = &profile.gpu_probe_error {
-                println!("  ⚠  NVIDIA driver/GPU probe failed");
-                println!("     → nvidia-smi: {error}");
-                println!("     → check that the NVIDIA driver is installed, loaded, and matches the running kernel");
-            } else {
-                println!("  ⚠  CUDA GPU not detected");
-                println!("     → run `lmml` to proceed in CPU-only mode");
-            }
-        }
-        lmml_detect::CudaCompatibility::NvccMissing => {
-            soft_issues += 1;
-            println!("  ⚠  nvcc not found");
-            println!("     → install the CUDA toolkit only if you want NVIDIA GPU acceleration");
-        }
+    let cuda_block = cuda_doctor_block(&profile);
+    soft_issues += cuda_block.soft_issues;
+    for line in cuda_block.lines {
+        println!("{line}");
     }
 
     if profile.rocm.available {
@@ -942,6 +902,111 @@ async fn run_doctor() -> i32 {
         println!("  Fix the issues above before first use.");
         1
     }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct DoctorBlock {
+    soft_issues: i32,
+    lines: Vec<String>,
+}
+
+fn cuda_doctor_block(profile: &lmml_detect::SystemProfile) -> DoctorBlock {
+    let mut block = DoctorBlock::default();
+    let non_cuda_backend_available =
+        profile.rocm.available || profile.vulkan.available || profile.metal.available;
+
+    match &profile.cuda {
+        lmml_detect::CudaCompatibility::Compatible { archs } => {
+            let gpu = profile
+                .gpus
+                .first()
+                .map(|gpu| gpu.name.as_str())
+                .unwrap_or("CUDA GPU");
+            block.lines.push(format!(
+                "  ✓  CUDA available  ·  {gpu}  ·  {}",
+                archs.join(", ")
+            ));
+        }
+        lmml_detect::CudaCompatibility::ToolkitTooOld {
+            gpu_arch,
+            minimum_toolkit,
+            found_toolkit,
+        } => {
+            block.soft_issues += 1;
+            block.lines.push(format!(
+                "  ⚠  CUDA toolkit {found_toolkit} too old for {gpu_arch}"
+            ));
+            block
+                .lines
+                .push(format!("     → install CUDA >= {minimum_toolkit}"));
+        }
+        lmml_detect::CudaCompatibility::ToolkitTooNew {
+            gpu_arch,
+            maximum_toolkit,
+            found_toolkit,
+        } => {
+            block.soft_issues += 1;
+            block.lines.push(format!(
+                "  ⚠  CUDA toolkit {found_toolkit} no longer supports {gpu_arch}"
+            ));
+            block.lines.push(format!(
+                "     → install CUDA {maximum_toolkit} alongside CUDA 13"
+            ));
+            block.lines.push(
+                "     → then run: LMML_CUDA_COMPILER=/usr/local/cuda-12.4/bin/nvcc lmml"
+                    .to_string(),
+            );
+        }
+        lmml_detect::CudaCompatibility::NoGpu => {
+            if non_cuda_backend_available {
+                return block;
+            }
+            block.soft_issues += 1;
+            block
+                .lines
+                .push("  ⚠  GPU acceleration backend not confirmed".to_string());
+            if let Some(error) = &profile.gpu_probe_error {
+                block
+                    .lines
+                    .push(format!("     → CUDA probe: nvidia-smi: {error}"));
+            } else {
+                block
+                    .lines
+                    .push("     → CUDA probe: no NVIDIA GPU reported by nvidia-smi".to_string());
+            }
+            block.lines.push(
+                "     → configure CUDA, ROCm/HIP, Vulkan, or run CPU-only mode intentionally"
+                    .to_string(),
+            );
+        }
+        lmml_detect::CudaCompatibility::NvccMissing => {
+            if non_cuda_backend_available {
+                return block;
+            }
+            block.soft_issues += 1;
+            if profile.gpus.is_empty() {
+                block
+                    .lines
+                    .push("  ⚠  GPU acceleration backend not confirmed".to_string());
+                block.lines.push(
+                    "     → CUDA toolkit not found and no ROCm/HIP, Vulkan, or Metal backend was detected"
+                        .to_string(),
+                );
+                block.lines.push(
+                    "     → configure a GPU backend or run CPU-only mode intentionally".to_string(),
+                );
+            } else {
+                block
+                    .lines
+                    .push("  ⚠  NVIDIA GPU detected but nvcc not found".to_string());
+                block.lines.push(
+                    "     → install the CUDA toolkit for NVIDIA GPU acceleration".to_string(),
+                );
+            }
+        }
+    }
+
+    block
 }
 
 fn concise_tool_line(fallback: &str, version: &str) -> String {
@@ -1039,6 +1104,52 @@ fn init_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
 fn restore_terminal() -> io::Result<()> {
     disable_raw_mode()?;
     execute!(stdout(), LeaveAlternateScreen)
+}
+
+#[cfg(test)]
+mod doctor_tests {
+    use super::*;
+
+    fn profile_without_gpu_backend() -> lmml_detect::SystemProfile {
+        let mut profile = lmml_detect::SystemProfile::skipped_probe();
+        profile.cuda = lmml_detect::CudaCompatibility::NoGpu;
+        profile.gpu_probe_error = Some("No such file or directory (os error 2)".to_string());
+        profile
+    }
+
+    #[test]
+    fn cuda_no_gpu_is_silent_when_rocm_is_available() {
+        let mut profile = profile_without_gpu_backend();
+        profile.rocm.available = true;
+        profile.rocm.targets = vec!["gfx1201".to_string()];
+
+        assert_eq!(cuda_doctor_block(&profile), DoctorBlock::default());
+    }
+
+    #[test]
+    fn cuda_no_gpu_reports_generic_warning_without_any_gpu_backend() {
+        let profile = profile_without_gpu_backend();
+        let block = cuda_doctor_block(&profile);
+
+        assert_eq!(block.soft_issues, 1);
+        assert!(block
+            .lines
+            .iter()
+            .any(|line| line.contains("GPU acceleration backend not confirmed")));
+        assert!(!block
+            .lines
+            .iter()
+            .any(|line| line.contains("NVIDIA driver/GPU probe failed")));
+    }
+
+    #[test]
+    fn missing_nvcc_is_silent_when_vulkan_is_available() {
+        let mut profile = lmml_detect::SystemProfile::skipped_probe();
+        profile.vulkan.available = true;
+        profile.vulkan.devices = vec!["AMD Radeon AI PRO R9700".to_string()];
+
+        assert_eq!(cuda_doctor_block(&profile), DoctorBlock::default());
+    }
 }
 
 #[cfg(test)]
