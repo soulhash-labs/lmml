@@ -330,15 +330,26 @@ impl SystemProfile {
         if self.rocm.hipconfig_path.is_some() && !self.rocm.available {
             let detail = self
                 .rocm
-                .rocminfo_error
+                .hip_cmake_error
                 .as_deref()
                 .filter(|message| !message.is_empty())
+                .or(self
+                    .rocm
+                    .rocminfo_error
+                    .as_deref()
+                    .filter(|message| !message.is_empty()))
                 .unwrap_or("rocminfo did not report a supported gfx target");
             warnings.push(DetectionWarning {
                 message: format!(
                     "ROCm/HIP tooling found, but HIP backend is not auto-selected: {detail}"
                 ),
             });
+        } else if self.rocm.available {
+            if let Some(error) = &self.rocm.hip_cmake_error {
+                warnings.push(DetectionWarning {
+                    message: format!("ROCm/HIP CMake package unavailable: {error}"),
+                });
+            }
         }
         if self.rocm.available {
             if let Some(error) = &self.rocm.rocm_smi_error {
@@ -612,6 +623,8 @@ pub struct RocmSupport {
     pub hip_path: Option<PathBuf>,
     /// HIP clang executable inferred from `hipconfig -l`, if available.
     pub hip_clang_path: Option<PathBuf>,
+    /// HIP CMake package required by CMake's HIP language support.
+    pub hip_cmake_config_path: Option<PathBuf>,
     /// Normalized AMD GPU targets, such as `gfx1100`.
     pub targets: Vec<String>,
     /// ROCm/HIP GPUs matched from `rocminfo`, enriched with VRAM where available.
@@ -622,6 +635,8 @@ pub struct RocmSupport {
     pub amd_smi_path: Option<PathBuf>,
     /// Error returned by `rocminfo` when target detection failed.
     pub rocminfo_error: Option<String>,
+    /// Error returned when ROCm lacks the HIP CMake package required for source builds.
+    pub hip_cmake_error: Option<String>,
     /// Error returned by ROCm VRAM telemetry when `rocm-smi` and `amd-smi` fail.
     pub rocm_smi_error: Option<String>,
 }
@@ -961,6 +976,7 @@ where
 
     let hip_path = rocm_hip_path_from_hipconfig(runner, &program).await;
     let hip_clang_path = rocm_hip_clang_from_hipconfig(runner, &program).await;
+    let hip_cmake_config_path = find_hip_cmake_config(hip_path.as_deref());
     let rocminfo = runner.run("rocminfo", &[], None).await;
     let mut devices = if rocminfo.success {
         parse_rocm_devices(&rocminfo.stdout)
@@ -984,18 +1000,22 @@ where
     let rocminfo_error = (!rocminfo.success)
         .then(|| first_line(&rocminfo.stderr, &rocminfo.stdout))
         .filter(|message| !message.is_empty());
+    let hip_cmake_error = (!targets.is_empty() && hip_cmake_config_path.is_none())
+        .then(|| missing_hip_cmake_message(hip_path.as_deref(), version.as_deref()));
 
     RocmSupport {
-        available: !targets.is_empty(),
+        available: !targets.is_empty() && hip_cmake_config_path.is_some(),
         hipconfig_path: Some(hipconfig_path),
         version: version.filter(|value| !value.is_empty()),
         hip_path,
         hip_clang_path,
+        hip_cmake_config_path,
         targets,
         devices,
         rocm_smi_path: vram_probe.rocm_smi_path,
         amd_smi_path: vram_probe.amd_smi_path,
         rocminfo_error,
+        hip_cmake_error,
         rocm_smi_error: vram_probe.error,
     }
 }
@@ -1105,6 +1125,71 @@ where
         })
         .filter(|path| !path.is_empty())
         .map(|path| PathBuf::from(path).join("clang"))
+}
+
+fn find_hip_cmake_config(hip_root: Option<&Path>) -> Option<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(root) = hip_root {
+        roots.push(root.to_path_buf());
+        if root != Path::new("/opt/rocm") {
+            roots.push(PathBuf::from("/opt/rocm"));
+        }
+    } else {
+        roots.push(PathBuf::from("/opt/rocm"));
+    }
+
+    roots
+        .into_iter()
+        .flat_map(|root| hip_cmake_config_candidates(&root))
+        .find(|path| path.is_file())
+}
+
+fn hip_cmake_config_candidates(root: &Path) -> Vec<PathBuf> {
+    vec![
+        root.join("lib/cmake/hip-lang/hip-lang-config.cmake"),
+        root.join("lib64/cmake/hip-lang/hip-lang-config.cmake"),
+        root.join("lib/x86_64-linux-gnu/cmake/hip-lang/hip-lang-config.cmake"),
+        root.join("lib/x86_64-unknown-linux-gnu/cmake/hip-lang/hip-lang-config.cmake"),
+        root.join("share/hip/cmake/hip-lang-config.cmake"),
+        root.join("share/hip/hip-lang-config.cmake"),
+    ]
+}
+
+fn missing_hip_cmake_message(hip_root: Option<&Path>, version: Option<&str>) -> String {
+    let root = hip_root
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "unknown ROCm root".to_string());
+    let package = rocm_runtime_dev_package(hip_root, version);
+    format!(
+        "HIP CMake package hip-lang-config.cmake not found for {root}; install {package} from the AMD ROCm repository, not the Ubuntu libamdhip64-dev fallback"
+    )
+}
+
+fn rocm_runtime_dev_package(hip_root: Option<&Path>, version: Option<&str>) -> String {
+    rocm_major_minor(version)
+        .or_else(|| {
+            hip_root.and_then(|root| {
+                root.components().rev().find_map(|component| {
+                    let value = component.as_os_str().to_string_lossy();
+                    value
+                        .strip_prefix("core-")
+                        .filter(|suffix| {
+                            suffix.chars().next().is_some_and(|ch| ch.is_ascii_digit())
+                        })
+                        .map(ToOwned::to_owned)
+                })
+            })
+        })
+        .map(|suffix| format!("amdrocm-runtime-dev{suffix}"))
+        .unwrap_or_else(|| "the matching amdrocm-runtime-dev package".to_string())
+}
+
+fn rocm_major_minor(version: Option<&str>) -> Option<String> {
+    let version = version?;
+    let mut parts = version.split(|ch: char| !ch.is_ascii_digit());
+    let major = parts.find(|part| !part.is_empty())?;
+    let minor = parts.find(|part| !part.is_empty())?;
+    Some(format!("{major}.{minor}"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2067,26 +2152,39 @@ GPU  XCP    POWER    GPU_T    MEM_T   GFX_CLK    GFX%    MEM%   ENC%   DEC%   VR
 
     #[tokio::test]
     async fn rocm_probe_detects_hipconfig_and_gfx_targets() {
+        let rocm_root = tempfile::tempdir().expect("temp ROCm root");
+        let hip_cmake_config = rocm_root
+            .path()
+            .join("lib/cmake/hip-lang/hip-lang-config.cmake");
+        std::fs::create_dir_all(hip_cmake_config.parent().expect("hip-lang parent"))
+            .expect("hip-lang dir");
+        std::fs::write(&hip_cmake_config, "# fake hip-lang config\n").expect("hip-lang config");
+        let rocm_root_text = rocm_root.path().display().to_string();
+        let hipconfig = rocm_root.path().join("bin/hipconfig");
+        let hipconfig_text = hipconfig.display().to_string();
+        let hip_clang = rocm_root.path().join("llvm/bin/clang");
+        let hip_clang_dir_text = hip_clang.parent().expect("clang dir").display().to_string();
+
         let runner = FakeRunner::default()
             .with(
                 "which",
                 &["hipconfig"],
-                FakeRunner::success("/opt/rocm/bin/hipconfig\n"),
+                FakeRunner::success(&format!("{hipconfig_text}\n")),
             )
             .with(
-                "/opt/rocm/bin/hipconfig",
+                &hipconfig_text,
                 &["--version"],
                 FakeRunner::success("HIP version: 7.0.1\n"),
             )
             .with(
-                "/opt/rocm/bin/hipconfig",
+                &hipconfig_text,
                 &["-R"],
-                FakeRunner::success("/opt/rocm\n"),
+                FakeRunner::success(&format!("{rocm_root_text}\n")),
             )
             .with(
-                "/opt/rocm/bin/hipconfig",
+                &hipconfig_text,
                 &["-l"],
-                FakeRunner::success("/opt/rocm/llvm/bin\n"),
+                FakeRunner::success(&format!("{hip_clang_dir_text}\n")),
             )
             .with(
                 "rocminfo",
@@ -2112,10 +2210,11 @@ GPU  XCP    POWER    GPU_T    MEM_T   GFX_CLK    GFX%    MEM%   ENC%   DEC%   VR
             detect_rocm(&runner).await,
             RocmSupport {
                 available: true,
-                hipconfig_path: Some(PathBuf::from("/opt/rocm/bin/hipconfig")),
+                hipconfig_path: Some(hipconfig),
                 version: Some("7.0.1".to_string()),
-                hip_path: Some(PathBuf::from("/opt/rocm")),
-                hip_clang_path: Some(PathBuf::from("/opt/rocm/llvm/bin/clang")),
+                hip_path: Some(rocm_root.path().to_path_buf()),
+                hip_clang_path: Some(hip_clang),
+                hip_cmake_config_path: Some(hip_cmake_config),
                 targets: vec!["gfx942".to_string()],
                 devices: vec![RocmGpuInfo {
                     name: "AMD Instinct MI300X".to_string(),
@@ -2129,9 +2228,58 @@ GPU  XCP    POWER    GPU_T    MEM_T   GFX_CLK    GFX%    MEM%   ENC%   DEC%   VR
                 rocm_smi_path: Some(PathBuf::from("/opt/rocm/bin/rocm-smi")),
                 amd_smi_path: None,
                 rocminfo_error: None,
+                hip_cmake_error: None,
                 rocm_smi_error: None,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn rocm_probe_requires_matching_hip_cmake_package() {
+        let rocm_root = tempfile::tempdir().expect("temp ROCm root");
+        let rocm_root_text = rocm_root.path().display().to_string();
+        let hipconfig = rocm_root.path().join("bin/hipconfig");
+        let hipconfig_text = hipconfig.display().to_string();
+
+        let runner = FakeRunner::default()
+            .with(
+                "which",
+                &["hipconfig"],
+                FakeRunner::success(&format!("{hipconfig_text}\n")),
+            )
+            .with(
+                &hipconfig_text,
+                &["--version"],
+                FakeRunner::success("HIP version: 7.14.60850\n"),
+            )
+            .with(
+                &hipconfig_text,
+                &["-R"],
+                FakeRunner::success(&format!("{rocm_root_text}\n")),
+            )
+            .with(
+                &hipconfig_text,
+                &["-l"],
+                FakeRunner::success(&format!("{rocm_root_text}/llvm/bin\n")),
+            )
+            .with(
+                "rocminfo",
+                &[],
+                FakeRunner::success(
+                    "Agent 2\n  Name: gfx1201\n  Marketing Name: AMD Radeon AI PRO R9700\n",
+                ),
+            );
+
+        let rocm = detect_rocm(&runner).await;
+
+        assert!(!rocm.available);
+        assert_eq!(rocm.targets, vec!["gfx1201".to_string()]);
+        assert!(rocm.hip_cmake_config_path.is_none());
+        assert!(rocm
+            .hip_cmake_error
+            .as_deref()
+            .expect("hip cmake error")
+            .contains("amdrocm-runtime-dev7.14"));
     }
 
     #[tokio::test]

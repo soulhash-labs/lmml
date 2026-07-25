@@ -232,7 +232,10 @@ routing requests.
 ## AMD ROCm/HIP Source Nodes
 
 Use ROCm/HIP mode on supported AMD cards when `hipconfig` and `rocminfo` both
-work and `rocminfo` reports a real `gfx*` target. lmml passes
+work, `rocminfo` reports a real `gfx*` target, and the matching HIP CMake
+development package is installed. For the AMD ROCm 7.14 Radeon installer path,
+install `amdrocm-runtime-dev7.14`; do not mix in Ubuntu's generic
+`libamdhip64-dev` package from a different ROCm minor version. lmml passes
 `-DGGML_HIP=ON -DGPU_TARGETS=...` to the upstream llama.cpp CMake build.
 
 ```sh

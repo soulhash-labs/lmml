@@ -269,10 +269,11 @@ fn rocm_line(rocm: &RocmSupport) -> Option<Line<'static>> {
         return Some(badge_line(Badge::Ok, format!("ROCm/HIP: {targets}")));
     }
     if rocm.hipconfig_path.is_some() {
-        return Some(badge_line(
-            Badge::Warn,
-            "ROCm/HIP tooling found; no gfx target detected".to_string(),
-        ));
+        let message = rocm
+            .hip_cmake_error
+            .clone()
+            .unwrap_or_else(|| "ROCm/HIP tooling found; no gfx target detected".to_string());
+        return Some(badge_line(Badge::Warn, message));
     }
     None
 }

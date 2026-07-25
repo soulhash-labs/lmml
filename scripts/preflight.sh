@@ -17,6 +17,7 @@ CUDA_DRIVER_OK=0
 CUDA_TOOLKIT_OK=0
 CUDA_OK=0
 ROCM_OK=0
+ROCM_HIP_CMAKE_OK=0
 VULKAN_OK=0
 METAL_OK=0
 
@@ -50,6 +51,55 @@ need_apt() {
       fi
       ;;
   esac
+}
+
+rocm_runtime_dev_package() {
+  local hip_root=${1:-}
+  local hip_version=${2:-}
+  local suffix
+  suffix=$(printf '%s\n' "$hip_version" | sed -n 's/[^0-9]*\([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -n 1)
+  if [[ -z "$suffix" && -n "$hip_root" ]]; then
+    suffix=$(basename "$hip_root" | sed -n 's/^core-\([0-9][0-9]*\.[0-9][0-9]*\)$/\1/p')
+  fi
+  if [[ -n "$suffix" ]]; then
+    printf 'amdrocm-runtime-dev%s\n' "$suffix"
+  else
+    printf 'matching amdrocm-runtime-dev package\n'
+  fi
+}
+
+hip_cmake_config_exists() {
+  local hip_root=${1:-}
+  local candidates=()
+  if [[ -n "$hip_root" ]]; then
+    candidates+=(
+      "$hip_root/lib/cmake/hip-lang/hip-lang-config.cmake"
+      "$hip_root/lib64/cmake/hip-lang/hip-lang-config.cmake"
+      "$hip_root/lib/x86_64-linux-gnu/cmake/hip-lang/hip-lang-config.cmake"
+      "$hip_root/lib/x86_64-unknown-linux-gnu/cmake/hip-lang/hip-lang-config.cmake"
+      "$hip_root/share/hip/cmake/hip-lang-config.cmake"
+      "$hip_root/share/hip/hip-lang-config.cmake"
+    )
+    if [[ "$hip_root" != "/opt/rocm" ]]; then
+      candidates+=(
+        "/opt/rocm/lib/cmake/hip-lang/hip-lang-config.cmake"
+        "/opt/rocm/lib64/cmake/hip-lang/hip-lang-config.cmake"
+      )
+    fi
+  fi
+  if [[ -z "$hip_root" || "$hip_root" != /opt/rocm* ]]; then
+    candidates+=(
+      "/usr/lib/x86_64-linux-gnu/cmake/hip-lang/hip-lang-config.cmake"
+      "/usr/lib/cmake/hip-lang/hip-lang-config.cmake"
+    )
+  fi
+  for candidate in "${candidates[@]}"; do
+    if [[ -f "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
 }
 
 first_version() {
@@ -223,38 +273,40 @@ else
   printf 'GPU acceleration is primary and first-class for lmml preflight.\n'
 fi
 
-if command -v nvidia-smi >/dev/null 2>&1; then
-  if NVIDIA_SMI_OUTPUT=$(nvidia-smi --query-gpu=name,memory.total,compute_cap --format=csv,noheader 2>&1); then
-    ok "NVIDIA driver/GPU probe succeeded"
-    CUDA_DRIVER_OK=1
-    printf '%s\n' "$NVIDIA_SMI_OUTPUT" | sed 's/^/    /'
-  else
-    warn "nvidia-smi failed: $NVIDIA_SMI_OUTPUT"
-  fi
-else
-  warn "nvidia-smi not found"
-fi
-
-if command -v nvcc >/dev/null 2>&1; then
-  NVCC_VERSION=$(nvcc --version | sed -n 's/.*release \([^,]*\).*/\1/p' | head -n 1)
-  ok "nvcc ${NVCC_VERSION:-found}"
-  CUDA_TOOLKIT_OK=1
-  GCC_MAJOR=""
-  if command -v g++ >/dev/null 2>&1; then
-    GCC_MAJOR=$(major_version "$(g++ -dumpfullversion -dumpversion)")
-  fi
-  NVCC_MAJOR=$(major_version "$NVCC_VERSION")
-  if [[ ( "$NVCC_MAJOR" == "11" || "${NVCC_MAJOR:-0}" -ge 13 ) && "${GCC_MAJOR:-0}" -ge 13 ]]; then
-    if command -v g++-11 >/dev/null 2>&1; then
-      ok "g++-11 found — CUDA ${NVCC_VERSION} host compiler workaround available"
+if [[ "$GPU_MODE" != "rocm" && "$GPU_MODE" != "vulkan" ]]; then
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    if NVIDIA_SMI_OUTPUT=$(nvidia-smi --query-gpu=name,memory.total,compute_cap --format=csv,noheader 2>&1); then
+      ok "NVIDIA driver/GPU probe succeeded"
+      CUDA_DRIVER_OK=1
+      printf '%s\n' "$NVIDIA_SMI_OUTPUT" | sed 's/^/    /'
     else
-      warn "CUDA ${NVCC_VERSION} with GCC ${GCC_MAJOR} can fail on CUDA/glibc math headers"
-      warn "Install g++-11 so lmml can pass -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-11"
-      need_apt g++-11
+      warn "nvidia-smi failed: $NVIDIA_SMI_OUTPUT"
     fi
+  else
+    warn "nvidia-smi not found"
   fi
-else
-  warn "nvcc not found"
+
+  if command -v nvcc >/dev/null 2>&1; then
+    NVCC_VERSION=$(nvcc --version | sed -n 's/.*release \([^,]*\).*/\1/p' | head -n 1)
+    ok "nvcc ${NVCC_VERSION:-found}"
+    CUDA_TOOLKIT_OK=1
+    GCC_MAJOR=""
+    if command -v g++ >/dev/null 2>&1; then
+      GCC_MAJOR=$(major_version "$(g++ -dumpfullversion -dumpversion)")
+    fi
+    NVCC_MAJOR=$(major_version "$NVCC_VERSION")
+    if [[ ( "$NVCC_MAJOR" == "11" || "${NVCC_MAJOR:-0}" -ge 13 ) && "${GCC_MAJOR:-0}" -ge 13 ]]; then
+      if command -v g++-11 >/dev/null 2>&1; then
+        ok "g++-11 found — CUDA ${NVCC_VERSION} host compiler workaround available"
+      else
+        warn "CUDA ${NVCC_VERSION} with GCC ${GCC_MAJOR} can fail on CUDA/glibc math headers"
+        warn "Install g++-11 so lmml can pass -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-11"
+        need_apt g++-11
+      fi
+    fi
+  else
+    warn "nvcc not found"
+  fi
 fi
 
 if (( CUDA_DRIVER_OK == 1 && CUDA_TOOLKIT_OK == 1 )); then
@@ -262,6 +314,7 @@ if (( CUDA_DRIVER_OK == 1 && CUDA_TOOLKIT_OK == 1 )); then
 fi
 
 if command -v hipconfig >/dev/null 2>&1; then
+  HIP_ROOT=""
   if HIP_VERSION=$(hipconfig --version 2>&1 | first_line); then
     ok "hipconfig ${HIP_VERSION:-found}"
   else
@@ -269,6 +322,20 @@ if command -v hipconfig >/dev/null 2>&1; then
   fi
   if HIP_ROOT=$(hipconfig -R 2>/dev/null | first_line); then
     [[ -n "$HIP_ROOT" ]] && ok "HIP_PATH $HIP_ROOT"
+  fi
+  HIP_DEV_PACKAGE=$(rocm_runtime_dev_package "$HIP_ROOT" "${HIP_VERSION:-}")
+  if HIP_CMAKE_CONFIG=$(hip_cmake_config_exists "$HIP_ROOT"); then
+    ok "HIP CMake package $HIP_CMAKE_CONFIG"
+    ROCM_HIP_CMAKE_OK=1
+  else
+    if [[ "$GPU_MODE" == "rocm" ]]; then
+      gpu_fail "HIP CMake package hip-lang-config.cmake not found for ${HIP_ROOT:-unknown ROCm root}; install $HIP_DEV_PACKAGE from the AMD ROCm repository"
+    else
+      warn "HIP CMake package hip-lang-config.cmake not found for ${HIP_ROOT:-unknown ROCm root}; install $HIP_DEV_PACKAGE for ROCm source builds"
+    fi
+    if [[ "$HIP_DEV_PACKAGE" != matching* ]]; then
+      need_apt "$HIP_DEV_PACKAGE"
+    fi
   fi
   if HIP_LLVM=$(hipconfig -l 2>/dev/null | first_line); then
     if [[ -n "$HIP_LLVM" && -x "$HIP_LLVM/clang" ]]; then
@@ -282,7 +349,9 @@ if command -v hipconfig >/dev/null 2>&1; then
       ROCM_TARGETS=$(printf '%s\n' "$ROCMINFO_OUTPUT" | grep -Eo 'gfx[0-9][0-9][0-9a-z]+' | grep -v '^gfx000$' | sed 's/^gfx1035$/gfx1030/' | sort -u | tr '\n' ' ' | sed 's/[[:space:]]*$//' || true)
       if [[ -n "$ROCM_TARGETS" ]]; then
         ok "ROCm gfx targets: $ROCM_TARGETS"
-        ROCM_OK=1
+        if [[ "$ROCM_HIP_CMAKE_OK" == "1" ]]; then
+          ROCM_OK=1
+        fi
       else
         warn "rocminfo succeeded but no supported gfx target was reported"
       fi
@@ -308,25 +377,27 @@ else
   fi
 fi
 
-if command -v vulkaninfo >/dev/null 2>&1; then
-  if vulkaninfo --summary >/dev/null 2>&1; then
-    ok "Vulkan runtime available"
+if [[ "$GPU_MODE" != "rocm" ]]; then
+  if command -v vulkaninfo >/dev/null 2>&1; then
+    if vulkaninfo --summary >/dev/null 2>&1; then
+      ok "Vulkan runtime available"
+      VULKAN_OK=1
+    else
+      if [[ "$GPU_MODE" == "vulkan" ]]; then
+        gpu_fail "vulkaninfo found but summary probe failed"
+      else
+        warn "vulkaninfo found but summary probe failed"
+      fi
+    fi
+  elif command -v ldconfig >/dev/null 2>&1 && ldconfig -p 2>/dev/null | grep -q 'libvulkan'; then
+    ok "libvulkan found"
     VULKAN_OK=1
   else
     if [[ "$GPU_MODE" == "vulkan" ]]; then
-      gpu_fail "vulkaninfo found but summary probe failed"
+      gpu_fail "Vulkan runtime not detected"
     else
-      warn "vulkaninfo found but summary probe failed"
+      warn "Vulkan runtime not detected"
     fi
-  fi
-elif command -v ldconfig >/dev/null 2>&1 && ldconfig -p 2>/dev/null | grep -q 'libvulkan'; then
-  ok "libvulkan found"
-  VULKAN_OK=1
-else
-  if [[ "$GPU_MODE" == "vulkan" ]]; then
-    gpu_fail "Vulkan runtime not detected"
-  else
-    warn "Vulkan runtime not detected"
   fi
 fi
 
@@ -362,13 +433,13 @@ if (( ${#APT_PACKAGES[@]} > 0 )); then
     sudo apt-get install -y "${UNIQUE_APT_PACKAGES[@]}"
   else
     warn "apt packages may fix hard or recommended prerequisites: ${UNIQUE_APT_PACKAGES[*]}"
-    printf '  Re-run with LMML_FIX_DEPS=1 to install compiler/cmake/git/curl/sccache/g++-11 via apt.\n'
+    printf '  Re-run with LMML_FIX_DEPS=1 to install compiler/cmake/git/curl/sccache/GPU development packages via apt.\n'
   fi
 fi
 
 if (( HARD_FAILURES > 0 || GPU_FAILURES > 0 )); then
   printf '\n%bPreflight failed:%b %d hard prerequisite failure(s), %d first-class GPU acceleration failure(s).\n' "$RED" "$NC" "$HARD_FAILURES" "$GPU_FAILURES"
-  printf '  For ROCm/HIP nodes, re-run with LMML_GPU_MODE=rocm after installing ROCm and rocminfo.\n'
+  printf '  For ROCm/HIP nodes, install matching AMD ROCm development packages such as amdrocm-runtime-dev7.14, then re-run with LMML_GPU_MODE=rocm.\n'
   printf '  For Vulkan-only nodes, re-run with LMML_GPU_MODE=vulkan.\n'
   printf '  For intentional CPU-only nodes, re-run with LMML_GPU_MODE=cpu-only.\n'
   exit 1

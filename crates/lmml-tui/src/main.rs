@@ -874,9 +874,13 @@ async fn run_doctor() -> i32 {
         println!("  ✓  ROCm/HIP available  ·  {version}  ·  {targets}");
     } else if profile.rocm.hipconfig_path.is_some() {
         soft_issues += 1;
-        println!("  ⚠  ROCm/HIP tooling found, but no supported gfx target was detected");
-        if let Some(error) = &profile.rocm.rocminfo_error {
+        println!("  ⚠  ROCm/HIP tooling found, but HIP backend is not build-ready");
+        if let Some(error) = &profile.rocm.hip_cmake_error {
+            println!("     → {error}");
+        } else if let Some(error) = &profile.rocm.rocminfo_error {
             println!("     → rocminfo: {error}");
+        } else {
+            println!("     → rocminfo did not report a supported gfx target");
         }
     }
 
