@@ -2945,18 +2945,26 @@ mod tests {
 
         assert_eq!(
             app.state.model.active_profile,
-            "r9700-qwen35-crown11-aw-q8-deep"
+            "r9700-qwen35-crown11-aw-q8-balanced2"
         );
         assert_eq!(app.state.server.ctx_size, 262_144);
         assert_eq!(app.state.server.n_gpu_layers, -1);
         assert_eq!(app.state.server.ubatch_size, 128);
         assert!(app.state.server.flash_attn);
         assert!(app.state.server.jinja);
-        assert_eq!(&app.state.server.extra_args[0..2], ["--parallel", "1"]);
+        assert_eq!(&app.state.server.extra_args[0..2], ["--parallel", "2"]);
         assert_eq!(
             &app.state.server.extra_args[4..],
             ["-ctk", "q8_0", "-ctv", "q8_0", "--cache-ram", "4096"]
         );
+
+        let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('p'))));
+        app.dispatch(action.expect("profile cycle action"));
+        assert_eq!(
+            app.state.model.active_profile,
+            "r9700-qwen35-crown11-aw-q8-deep"
+        );
+        assert_eq!(&app.state.server.extra_args[0..2], ["--parallel", "1"]);
     }
 
     #[test]

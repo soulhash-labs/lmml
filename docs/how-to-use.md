@@ -186,6 +186,17 @@ r9700-qwen9b-deep        9B Q8, 262144 ctx, parallel 1, q8 KV, ROCm/HIP gfx1201
 5070ti-qwen9b-deep       9B Q8, 196608 ctx, parallel 1, q8 KV
 ```
 
+### Balanced two-slot profiles
+
+Use these when concurrent local agents matter more than one full-depth 256k
+slot. The configured context is total server context, so two slots split the
+262144 token pool.
+
+```text
+r9700-qwen9b-balanced2                    9B Q8, 262144 total ctx, parallel 2, q8 KV, ROCm/HIP gfx1201
+r9700-qwen35-crown11-aw-q8-balanced2      CROWN11 9B Q8, 262144 total ctx, parallel 2, q8 KV, ROCm/HIP gfx1201
+```
+
 ### KV-unified fanout profiles
 
 Use these for concurrent agent harnesses. They intentionally trade context depth

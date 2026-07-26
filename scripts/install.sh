@@ -518,21 +518,23 @@ if [ "$LMML_PROFILE_HINT" = "radeon-r9700-qwen35-9b-q8" ]; then
   echo "    operator hard compress/reject:      170000-190000 live prompt tokens"
   echo "    OpenCode provider timeout:          7200 seconds"
   echo "    OpenCode stream chunk timeout:      2400 seconds"
-  echo "    llama-server parallel slots:        1"
+  echo "    llama-server parallel slots:        2"
   echo "    ROCm target:                        gfx1201"
   echo "    recommended source mode:            LMML_GPU_MODE=rocm INSTALL_MODE=source"
-  echo "    recommended extra_args:             [\"--parallel\", \"1\", \"--slot-save-path\", \"\$HOME/.local/share/lmml/llama-slots\"]"
+  echo "    recommended extra_args:             [\"--parallel\", \"2\", \"--slot-save-path\", \"\$HOME/.local/share/lmml/llama-slots\"]"
   echo "    recommended KV/cache args:          [\"-ctk\", \"q8_0\", \"-ctv\", \"q8_0\", \"--cache-ram\", \"4096\"]"
   echo
   echo "  TUI runtime profiles:"
+  echo "    r9700-qwen9b-balanced2:             Qwen3.5-9B-Q8_0.gguf, ctx 262144 total, parallel 2"
   echo "    r9700-qwen9b-deep:                  Qwen3.5-9B-Q8_0.gguf, ctx 262144, parallel 1"
+  echo "    r9700-qwen35-crown11-aw-q8-balanced2: qwen35-crown11-aw-Q8_0.gguf, ctx 262144 total, parallel 2"
   echo "    r9700-qwen35-crown11-aw-q8-deep:    qwen35-crown11-aw-Q8_0.gguf, ctx 262144, parallel 1"
   echo "    TUI switch key:                     p on Models or Server tab"
   echo
   echo "  Notes:"
   echo "    Keep ROCm packages from the same AMD 7.14 tree."
   echo "    Use embedded GGUF chat templates by leaving lmml chat_template empty unless a per-model override is proven."
-  echo "    This is a single-slot deep profile; route background agents to another worker or a fanout profile."
+  echo "    Two slots split the configured context pool; use the deep profile when one full-depth slot matters more than concurrency."
 fi
 
 if [ "$LMML_PROFILE_HINT" = "qwen36-27b-q4" ] || [ "$LMML_PROFILE_HINT" = "qwen36-35b-a3b-q4" ]; then

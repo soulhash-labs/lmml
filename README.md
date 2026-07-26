@@ -411,9 +411,10 @@ safeguards for known Qwen runtime issues, including raw reasoning output when
 needed, KV cache quantization guidance for large context, and profile-specific
 context/parallelism settings.
 
-Radeon AI PRO R9700 hosts get a ROCm/HIP `gfx1201` deep profile for
-Qwen3.5-style 9B Q8 models: `r9700-qwen9b-deep` uses `ctx_size=262144`,
-single-slot serving, q8 KV cache, and full GPU layer auto-offload.
+Radeon AI PRO R9700 hosts get ROCm/HIP `gfx1201` profiles for Qwen3.5-style
+9B Q8 models. `r9700-qwen9b-balanced2` uses `ctx_size=262144`, two server
+slots, q8 KV cache, and full GPU layer auto-offload; `r9700-qwen9b-deep`
+remains available for single-slot deep-context runs.
 
 Supported catalog families include small Qwen variants and larger Qwen3.6
 variants such as 27B and 35B-A3B-style MoE profiles where the hardware and GGUF
