@@ -2950,6 +2950,7 @@ mod tests {
         assert_eq!(app.state.server.ctx_size, 262_144);
         assert_eq!(app.state.server.n_gpu_layers, -1);
         assert_eq!(app.state.server.ubatch_size, 128);
+        assert_eq!(app.state.server.threads, 20);
         assert!(app.state.server.flash_attn);
         assert!(app.state.server.jinja);
         assert_eq!(&app.state.server.extra_args[0..2], ["--parallel", "2"]);
@@ -2965,6 +2966,30 @@ mod tests {
             "r9700-qwen35-crown11-aw-q8-deep"
         );
         assert_eq!(&app.state.server.extra_args[0..2], ["--parallel", "1"]);
+    }
+
+    #[test]
+    fn r9700_qwen35_27b_q6_profile_applies_to_selected_model() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut app = App::default();
+        app.state_save_path = Some(tempdir.path().join("state.toml"));
+        app.active_tab = Tab::Models;
+        app.models = vec![model_entry("/models/Qwen3.5-27B-Q6_K.gguf")];
+        app.selected_model = 0;
+
+        app.dispatch(Action::SelectModel(app.models[0].path.clone()));
+
+        assert_eq!(app.state.model.active_profile, "r9700-qwen35-27b-q6-deep");
+        assert_eq!(app.state.server.ctx_size, 262_144);
+        assert_eq!(app.state.server.n_gpu_layers, -1);
+        assert_eq!(app.state.server.ubatch_size, 128);
+        assert!(app.state.server.flash_attn);
+        assert!(app.state.server.jinja);
+        assert_eq!(&app.state.server.extra_args[0..2], ["--parallel", "1"]);
+        assert_eq!(
+            &app.state.server.extra_args[4..],
+            ["-ctk", "q8_0", "-ctv", "q8_0", "--cache-ram", "4096"]
+        );
     }
 
     #[test]

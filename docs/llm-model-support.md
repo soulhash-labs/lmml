@@ -32,8 +32,10 @@ been validating against.
 | Qwen3.5-397B-A17B | MoE, 17B active | 262k | datacenter-scale local inference only |
 
 Existing LMML runtime profiles remain focused on the field-tested 4B and 9B
-Q8 paths. The larger variants are catalog-aware but should get dedicated
-profiles only after VRAM/KV-cache behavior is validated.
+Q8 paths, plus a dedicated R9700 single-slot `Qwen3.5-27B-Q6_K.gguf` profile
+copied from the stable 9B deep-context shape. Other larger variants are
+catalog-aware but should get dedicated profiles only after VRAM/KV-cache
+behavior is validated.
 
 ## Qwen3.6
 

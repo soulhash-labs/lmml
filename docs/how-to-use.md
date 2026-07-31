@@ -182,6 +182,7 @@ Use these for long, single-agent sessions:
 orion-qwen-q8-deep       4B Q8, 262144 ctx, parallel 1, q8 KV
 m6000-qwen9b-deep        9B Q8, 262144 ctx, parallel 1, q8 KV
 r9700-qwen9b-deep        9B Q8, 262144 ctx, parallel 1, q8 KV, ROCm/HIP gfx1201
+r9700-qwen35-27b-q6-deep 27B Q6, 262144 ctx, parallel 1, 20 threads, q8 KV, ROCm/HIP gfx1201
 5060ti-qwen9b-deep       9B Q8, 196608 ctx, parallel 1, q8 KV
 5070ti-qwen9b-deep       9B Q8, 196608 ctx, parallel 1, q8 KV
 ```

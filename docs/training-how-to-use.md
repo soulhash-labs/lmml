@@ -9,6 +9,8 @@ Current policy:
 - Treat upstream `llama-finetune` as a **full-model GGUF fine-tuner**.
 - Do not assume LoRA adapter output unless `llama-finetune --help` explicitly
   advertises custom flags such as `--lora-out`.
+- For large adapter training on ROCm, use the PyTorch/PEFT QLoRA container flow
+  in [`qlora-rocm-training.md`](qlora-rocm-training.md).
 - Train from F16/BF16/F32 GGUF models. Do not train from Q8/Q4 deployment
   quantizations.
 

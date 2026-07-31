@@ -527,6 +527,7 @@ if [ "$LMML_PROFILE_HINT" = "radeon-r9700-qwen35-9b-q8" ]; then
   echo "  TUI runtime profiles:"
   echo "    r9700-qwen9b-balanced2:             Qwen3.5-9B-Q8_0.gguf, ctx 262144 total, parallel 2"
   echo "    r9700-qwen9b-deep:                  Qwen3.5-9B-Q8_0.gguf, ctx 262144, parallel 1"
+  echo "    r9700-qwen35-27b-q6-deep:           Qwen3.5-27B-Q6_K.gguf, ctx 262144, parallel 1, threads 20"
   echo "    r9700-qwen35-crown11-aw-q8-balanced2: qwen35-crown11-aw-Q8_0.gguf, ctx 262144 total, parallel 2"
   echo "    r9700-qwen35-crown11-aw-q8-deep:    qwen35-crown11-aw-Q8_0.gguf, ctx 262144, parallel 1"
   echo "    TUI switch key:                     p on Models or Server tab"

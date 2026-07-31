@@ -507,6 +507,7 @@ Workspace crates:
 - [How to use lmml](docs/how-to-use.md)
 - [LAN client install guide](docs/lan-client-install.md)
 - [Training guide](docs/training-how-to-use.md)
+- [ROCm QLoRA adapter training](docs/qlora-rocm-training.md)
 - [GPU support catalog](docs/hardware-gpu-support.md)
 - [LLM model support catalog](docs/llm-model-support.md)
 - [Fleet profile reference](docs/lmml-fleet-profiles.md)

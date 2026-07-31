@@ -18,6 +18,11 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Child;
 use tokio::sync::{mpsc, watch, Mutex};
 
+const DEFAULT_STARTUP_TIMEOUT_SECS: u64 = 600;
+const HEALTH_CHECK_TIMEOUT_SECS: u64 = 10;
+const HEALTH_CHECK_INTERVAL_SECS: u64 = 2;
+const HEALTH_FAILURE_LOG_THRESHOLD: u32 = 3;
+
 /// Runtime status for a managed llama-server process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerStatus {
@@ -105,8 +110,13 @@ impl ServerManager {
         config: &ServerConfig,
         log_tx: mpsc::Sender<String>,
     ) -> Result<ServerHandle, ServerError> {
-        self.start_with_timeout(model, config, log_tx, Duration::from_secs(30))
-            .await
+        self.start_with_timeout(
+            model,
+            config,
+            log_tx,
+            Duration::from_secs(DEFAULT_STARTUP_TIMEOUT_SECS),
+        )
+        .await
     }
 
     /// Start llama-server with an explicit readiness timeout.
@@ -231,7 +241,7 @@ pub async fn wait_for_ready(
     timeout: Duration,
 ) -> Result<String, ServerError> {
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(HEALTH_CHECK_TIMEOUT_SECS))
         .build()
         .map_err(ServerError::HttpClient)?;
     wait_for_ready_with(host, port, timeout, move |url| {
@@ -294,18 +304,21 @@ fn spawn_runtime_monitor(
 ) {
     tokio::spawn(async move {
         let client = match reqwest::Client::builder()
-            .timeout(Duration::from_secs(2))
+            .timeout(Duration::from_secs(HEALTH_CHECK_TIMEOUT_SECS))
             .build()
         {
-            Ok(client) => client,
+            Ok(client) => Some(client),
             Err(error) => {
-                let _ignored = status_tx.send(ServerStatus::Failed {
-                    reason: format!("failed to create health-check HTTP client: {error}"),
-                });
-                return;
+                let _ignored = log_tx
+                    .send(format!(
+                        "failed to create health-check HTTP client; process monitoring will continue without HTTP checks: {error}"
+                    ))
+                    .await;
+                None
             }
         };
-        let mut interval = tokio::time::interval(Duration::from_secs(2));
+        let mut interval = tokio::time::interval(Duration::from_secs(HEALTH_CHECK_INTERVAL_SECS));
+        let mut consecutive_health_failures = 0;
         loop {
             interval.tick().await;
             if status_tx.receiver_count() == 0 {
@@ -332,21 +345,54 @@ fn spawn_runtime_monitor(
                     }
                 }
             }
-            match check_health_once(&client, &host, port).await {
-                Ok(true) => {}
-                Ok(false) => {
-                    let reason = "llama-server health check failed".to_string();
-                    let _ignored = status_tx.send(ServerStatus::Failed { reason });
-                    break;
-                }
-                Err(error) => {
-                    let reason = format!("llama-server health check failed: {error}");
-                    let _ignored = status_tx.send(ServerStatus::Failed { reason });
-                    break;
+            if let Some(client) = &client {
+                match check_health_once(client, &host, port).await {
+                    Ok(true) => {
+                        if consecutive_health_failures >= HEALTH_FAILURE_LOG_THRESHOLD {
+                            let _ignored = log_tx
+                                .send("llama-server health check recovered".to_string())
+                                .await;
+                        }
+                        consecutive_health_failures = 0;
+                    }
+                    Ok(false) => {
+                        consecutive_health_failures += 1;
+                        maybe_log_health_failure(
+                            &log_tx,
+                            consecutive_health_failures,
+                            "llama-server health endpoint returned a non-success status",
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        consecutive_health_failures += 1;
+                        maybe_log_health_failure(
+                            &log_tx,
+                            consecutive_health_failures,
+                            &format!("llama-server health check failed: {error}"),
+                        )
+                        .await;
+                    }
                 }
             }
         }
     });
+}
+
+async fn maybe_log_health_failure(
+    log_tx: &mpsc::Sender<String>,
+    consecutive_failures: u32,
+    reason: &str,
+) {
+    if consecutive_failures == HEALTH_FAILURE_LOG_THRESHOLD
+        || consecutive_failures.is_multiple_of(30)
+    {
+        let _ignored = log_tx
+            .send(format!(
+                "{reason}; process is still running, keeping server marked ready ({consecutive_failures} consecutive health failures)"
+            ))
+            .await;
+    }
 }
 
 fn spawn_log_reader<R>(reader: R, log_tx: mpsc::Sender<String>)

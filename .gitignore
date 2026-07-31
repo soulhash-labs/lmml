@@ -1,5 +1,10 @@
 /target/
 /dist/
+/outputs/
+/qlora-*.log
+/row*.log
+__pycache__/
+*.pyc
 /.agents/
 /.codex/
 /.ignore/
