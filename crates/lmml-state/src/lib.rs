@@ -1554,7 +1554,7 @@ mod tests {
         assert_eq!(profile.server.ctx_size, 262_144);
         assert_eq!(profile.server.n_gpu_layers, -1);
         assert_eq!(profile.server.ubatch_size, 128);
-        assert_eq!(profile.server.threads, 20);
+        assert_eq!(profile.server.threads, 8);
         assert!(profile.server.flash_attn);
         assert!(profile.server.jinja);
         assert_eq!(
