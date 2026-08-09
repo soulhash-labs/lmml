@@ -78,6 +78,8 @@ jobs:
             dist/latest
             dist/SHA256SUMS
             dist/SHA256SUMS.minisig
+            release/LMML_MINISIGN_PUBLIC_KEY
+            release/lmml-minisign.pub
             dist/install.sh
             dist/preflight.sh
             dist/uninstall.sh
