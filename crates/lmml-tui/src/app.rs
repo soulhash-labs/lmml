@@ -2950,7 +2950,7 @@ mod tests {
         assert_eq!(app.state.server.ctx_size, 262_144);
         assert_eq!(app.state.server.n_gpu_layers, -1);
         assert_eq!(app.state.server.ubatch_size, 128);
-        assert_eq!(app.state.server.threads, 20);
+        assert_eq!(app.state.server.threads, 8);
         assert!(app.state.server.flash_attn);
         assert!(app.state.server.jinja);
         assert_eq!(&app.state.server.extra_args[0..2], ["--parallel", "2"]);
