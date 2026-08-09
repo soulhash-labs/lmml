@@ -50,8 +50,23 @@ jobs:
       - name: Test lmml-server
         run: cargo test -p lmml-server -- --test-threads=1
 
-      - name: Test lmml-tui lib
-        run: cargo test -p lmml-tui --lib -- --test-threads=1
+      - name: Test lmml-tui settings state
+        run: cargo test -p lmml-tui --lib app::settings_state::tests -- --test-threads=1
+
+      - name: Test lmml-tui app
+        run: cargo test -p lmml-tui --lib app::tests -- --test-threads=1
+
+      - name: Test lmml-tui event loop
+        run: cargo test -p lmml-tui --lib event_loop::tests -- --test-threads=1
+
+      - name: Test lmml-tui runtime CLI unit
+        run: cargo test -p lmml-tui --lib runtime_cli::tests -- --test-threads=1
+
+      - name: Test lmml-tui detect tab
+        run: cargo test -p lmml-tui --lib tabs::detect::tests -- --test-threads=1
+
+      - name: Test lmml-tui snapshots
+        run: cargo test -p lmml-tui --lib tabs::tests -- --test-threads=1
 
       - name: Test lmml-tui bin
         run: cargo test -p lmml-tui --bin lmml -- --test-threads=1
