@@ -27,4 +27,4 @@ jobs:
         run: cargo clippy --workspace -- -D warnings
 
       - name: Tests
-        run: cargo test --workspace
+        run: cargo test --workspace -- --test-threads=1
