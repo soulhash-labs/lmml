@@ -234,12 +234,13 @@ trusted LAN hosts. Production/public release flows should require a signed
 - [x] Make `LMML_CHECKSUM_VERIFY=required` fail clearly when signature, minisign, or public key is missing
 - [x] Add `LMML_SIGN_CHECKSUMS=1` packaging hook that signs `SHA256SUMS` with `LMML_MINISIGN_SECRET_KEY_FILE`
 - [x] Add installer fixture tests for required signed verification failure and invalid verification mode
-- [x] Keep real minisign release-keypair verification as a future/public-release task, not a local v0.1.0 blocker
+- [x] Generate the LMML public release signing key and document the public key
 
 ### Future Public Release Follow-up
 
-- [ ] For release-quality internal LAN serving, publish `SHA256SUMS.minisig` next to `SHA256SUMS` and validate one install with `LMML_CHECKSUM_VERIFY=required` plus the internal minisign public key.
-- [ ] Before publishing outside the local/LAN environment, generate and verify a real minisign release keypair and publish the public key with release instructions.
+- [x] Publish `SHA256SUMS.minisig` next to `SHA256SUMS` for the public `v0.1.0` GitHub release
+- [ ] Configure `LMML_MINISIGN_SECRET_KEY` and `LMML_MINISIGN_PUBLIC_KEY` repository secrets before the next public tag release.
+- [ ] Validate one public install with `LMML_CHECKSUM_VERIFY=required` plus the LMML minisign public key after the `SHA256SUMS.minisig` asset is published.
 
 ---
 

@@ -1,0 +1,58 @@
+name: Publish Release Signatures
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/publish-release-signatures.yml"
+      - "release/**/SHA256SUMS.minisig"
+      - "release/LMML_MINISIGN_PUBLIC_KEY"
+      - "release/lmml-minisign.pub"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to update.
+        required: true
+        default: v0.1.0
+
+permissions:
+  contents: write
+
+jobs:
+  upload:
+    name: Upload release signature assets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve release tag
+        id: release
+        run: |
+          tag="${{ github.event.inputs.tag || '' }}"
+          if [ -z "$tag" ]; then
+            sig_path="$(find release -mindepth 2 -maxdepth 2 -path '*/SHA256SUMS.minisig' | sort | tail -n 1)"
+            if [ -z "$sig_path" ]; then
+              echo "::error::No release/<tag>/SHA256SUMS.minisig file found."
+              exit 1
+            fi
+            tag="${sig_path#release/}"
+            tag="${tag%/SHA256SUMS.minisig}"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Upload signature assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.release.outputs.tag }}"
+          sig_path="release/$tag/SHA256SUMS.minisig"
+          test -f "$sig_path"
+          test -f release/LMML_MINISIGN_PUBLIC_KEY
+          test -f release/lmml-minisign.pub
+          gh release upload "$tag" \
+            "$sig_path#SHA256SUMS.minisig" \
+            "release/LMML_MINISIGN_PUBLIC_KEY#LMML_MINISIGN_PUBLIC_KEY" \
+            "release/lmml-minisign.pub#lmml-minisign.pub" \
+            --clobber

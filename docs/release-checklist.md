@@ -83,24 +83,33 @@ corrupt or incomplete downloads from a trusted release host, but it does not
 protect against a host or network attacker who can replace both the tarball and
 `SHA256SUMS`.
 
-Signed checksum verification is supported with minisign. Local/LAN v0.1.0 does
-not require a real release signing keypair. Future public releases should
-publish `SHA256SUMS.minisig` and require signature verification:
+Signed checksum verification is supported with minisign. Public releases must
+publish `SHA256SUMS.minisig` next to `SHA256SUMS` and should document the LMML
+release public key:
+
+```text
+RWTN+mk4LPfphKsgD69EnBHhxAKebT73As8KPQEcIxoJI+1+d4RChC8W
+```
+
+Release automation expects the passwordless minisign secret key in the
+repository secret `LMML_MINISIGN_SECRET_KEY`. Set
+`LMML_MINISIGN_PUBLIC_KEY` to the public key above to make CI verify the
+signature before upload:
 
 ```sh
 LMML_SIGN_CHECKSUMS=1 LMML_MINISIGN_SECRET_KEY_FILE=/secure/lmml-minisign.key scripts/package-release.sh
-curl -fsSL https://release.example/install.sh | LMML_CHECKSUM_VERIFY=required LMML_MINISIGN_PUBLIC_KEY='RW...' sh
+curl -fsSL https://release.example/install.sh | LMML_CHECKSUM_VERIFY=required LMML_MINISIGN_PUBLIC_KEY='RWTN+mk4LPfphKsgD69EnBHhxAKebT73As8KPQEcIxoJI+1+d4RChC8W' sh
 ```
 
 For LAN testing, the installer defaults to `LMML_CHECKSUM_VERIFY=optional`.
 That mode verifies `SHA256SUMS.minisig` when a signature and public key are
 configured, otherwise it warns and falls back to SHA256 integrity only.
 
-Release-hardening item: before treating a LAN release server as release-quality,
-serve `SHA256SUMS.minisig` next to `SHA256SUMS` and run at least one client
-install with `LMML_CHECKSUM_VERIFY=required` plus the internal minisign public
-key. This keeps ad hoc trusted-LAN bootstrap available while giving internal
-installs authenticity verification beyond unsigned hashes.
+Before treating a LAN release server as release-quality, serve
+`SHA256SUMS.minisig` next to `SHA256SUMS` and run at least one client install
+with `LMML_CHECKSUM_VERIFY=required` plus the minisign public key. This keeps
+ad hoc trusted-LAN bootstrap available while giving internal installs
+authenticity verification beyond unsigned hashes.
 
 ## Reproducibility Check
 
