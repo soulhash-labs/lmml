@@ -26,5 +26,32 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace -- -D warnings
 
-      - name: Tests
-        run: cargo test --workspace -- --test-threads=1
+      - name: Test lmml-api
+        run: cargo test -p lmml-api -- --test-threads=1
+
+      - name: Test lmml-build
+        run: cargo test -p lmml-build -- --test-threads=1
+
+      - name: Test lmml-compat
+        run: cargo test -p lmml-compat -- --test-threads=1
+
+      - name: Test lmml-detect
+        run: cargo test -p lmml-detect -- --test-threads=1
+
+      - name: Test lmml-models
+        run: cargo test -p lmml-models -- --test-threads=1
+
+      - name: Test lmml-node
+        run: cargo test -p lmml-node -- --test-threads=1
+
+      - name: Test lmml-router
+        run: cargo test -p lmml-router -- --test-threads=1
+
+      - name: Test lmml-server
+        run: cargo test -p lmml-server -- --test-threads=1
+
+      - name: Test lmml-tui
+        run: cargo test -p lmml-tui -- --test-threads=1
+
+      - name: Test workspace docs
+        run: cargo test --workspace --doc
