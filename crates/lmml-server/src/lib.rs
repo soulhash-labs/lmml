@@ -18,10 +18,19 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Child;
 use tokio::sync::{mpsc, watch, Mutex};
 
-const DEFAULT_STARTUP_TIMEOUT_SECS: u64 = 600;
+/// Default llama-server readiness timeout in seconds.
+///
+/// Large GGUF files can spend multiple minutes loading and allocating KV cache
+/// before the health endpoint answers, especially with long-context profiles.
+pub const DEFAULT_STARTUP_TIMEOUT_SECS: u64 = 600;
 const HEALTH_CHECK_TIMEOUT_SECS: u64 = 10;
 const HEALTH_CHECK_INTERVAL_SECS: u64 = 2;
 const HEALTH_FAILURE_LOG_THRESHOLD: u32 = 3;
+
+/// Return the default llama-server readiness timeout.
+pub fn default_startup_timeout() -> Duration {
+    Duration::from_secs(DEFAULT_STARTUP_TIMEOUT_SECS)
+}
 
 /// Runtime status for a managed llama-server process.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,13 +119,8 @@ impl ServerManager {
         config: &ServerConfig,
         log_tx: mpsc::Sender<String>,
     ) -> Result<ServerHandle, ServerError> {
-        self.start_with_timeout(
-            model,
-            config,
-            log_tx,
-            Duration::from_secs(DEFAULT_STARTUP_TIMEOUT_SECS),
-        )
-        .await
+        self.start_with_timeout(model, config, log_tx, default_startup_timeout())
+            .await
     }
 
     /// Start llama-server with an explicit readiness timeout.
@@ -551,6 +555,11 @@ mod tests {
     #[test]
     fn ipv6_base_url_is_bracketed() {
         assert_eq!(base_url("::1", 8080), "http://[::1]:8080");
+    }
+
+    #[test]
+    fn default_startup_timeout_allows_large_model_loads() {
+        assert_eq!(default_startup_timeout(), Duration::from_secs(600));
     }
 
     #[tokio::test]

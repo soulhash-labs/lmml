@@ -11,6 +11,8 @@ use tokio::sync::{mpsc, watch};
 use crate::action::Action;
 use crate::app::{App, AppEvent};
 
+const SERVER_STARTUP_TIMEOUT_ENV: &str = "LMML_SERVER_STARTUP_TIMEOUT_MS";
+
 /// Errors returned by the TUI event loop.
 #[derive(Debug, thiserror::Error)]
 pub enum EventLoopError {
@@ -534,7 +536,17 @@ fn spawn_server_start(
             }
         };
         let manager = ServerManager { binary, caps };
-        match manager.start(&model, &config, log_tx).await {
+        let startup_timeout = server_startup_timeout();
+        let _ignored = log_tx
+            .send(format!(
+                "Waiting up to {}s for server readiness (set {SERVER_STARTUP_TIMEOUT_ENV} to override)",
+                startup_timeout.as_secs()
+            ))
+            .await;
+        match manager
+            .start_with_timeout(&model, &config, log_tx, startup_timeout)
+            .await
+        {
             Ok(handle) => {
                 let mut status_rx = handle.subscribe();
                 let status_tx = tx.clone();
@@ -561,6 +573,18 @@ fn spawn_server_start(
             }
         }
     });
+}
+
+fn server_startup_timeout() -> Duration {
+    std::env::var(SERVER_STARTUP_TIMEOUT_ENV)
+        .ok()
+        .and_then(|value| parse_timeout_millis(&value))
+        .unwrap_or_else(lmml_server::default_startup_timeout)
+}
+
+fn parse_timeout_millis(value: &str) -> Option<Duration> {
+    let millis = value.parse::<u64>().ok()?;
+    (millis > 0).then(|| Duration::from_millis(millis))
 }
 
 async fn send_server_start_result(
@@ -686,5 +710,17 @@ mod tests {
             &config,
             &fingerprint
         ));
+    }
+
+    #[test]
+    fn parse_timeout_millis_rejects_empty_zero_and_invalid_values() {
+        assert_eq!(parse_timeout_millis(""), None);
+        assert_eq!(parse_timeout_millis("0"), None);
+        assert_eq!(parse_timeout_millis("wat"), None);
+    }
+
+    #[test]
+    fn parse_timeout_millis_accepts_positive_values() {
+        assert_eq!(parse_timeout_millis("60000"), Some(Duration::from_secs(60)));
     }
 }

@@ -107,6 +107,14 @@ curl -fsS http://127.0.0.1:1200/health
 curl -fsS http://127.0.0.1:1200/v1/models
 ```
 
+Large GGUF files and long-context profiles can take several minutes before
+`llama-server` answers `/health`. The TUI waits up to 10 minutes by default. To
+override that for unusually slow model loads, start lmml with:
+
+```sh
+LMML_SERVER_STARTUP_TIMEOUT_MS=1200000 lmml
+```
+
 ## Quick Start For Agents And Harnesses
 
 Agents should use lmml as a local OpenAI-compatible HTTP endpoint.
