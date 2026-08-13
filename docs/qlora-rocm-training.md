@@ -675,6 +675,51 @@ The converter writes:
 outputs/qlora/qwen35-27b-r9700-qlora.gguf
 ```
 
+### Local llama.cpp converter patch
+
+Qwen3.5 LoRA conversion may require local llama.cpp edits in:
+
+```text
+${HOME}/.local/share/lmml/llama.cpp/conversion/qwen.py
+${HOME}/.local/share/lmml/llama.cpp/convert_lora_to_gguf.py
+```
+
+Those edits fix the Qwen3.5 linear-attention LoRA reorder path and add missing
+`LoraTorchTensor` shape helpers used by the converter. They are local conversion
+fixes, not disposable changes.
+
+If LMML's Build tab later fails during a llama.cpp update with:
+
+```text
+error: Your local changes to the following files would be overwritten by merge
+```
+
+preserve and stash the converter patch before retrying the update:
+
+```sh
+cd "${HOME}/.local/share/lmml/llama.cpp"
+
+git diff --output="${HOME}/lmml-qwen35-lora-conversion-fixes.patch" -- \
+  conversion/qwen.py \
+  convert_lora_to_gguf.py
+
+git stash push -m "lmml qwen35 lora gguf conversion fixes" -- \
+  conversion/qwen.py \
+  convert_lora_to_gguf.py
+```
+
+Then return to LMML and run the update/build again.
+
+Only restore the stash when you need to convert or merge Qwen3.5 LoRA again:
+
+```sh
+cd "${HOME}/.local/share/lmml/llama.cpp"
+git stash pop
+```
+
+If `git stash pop` conflicts, port the converter fix to the new upstream file
+layout. Do not blindly accept either side.
+
 ## Serve With LMML/llama.cpp
 
 Use the Q6_K deployment model plus the adapter:

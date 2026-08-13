@@ -284,6 +284,57 @@ In the TUI Build tab:
 lmml's default tracking mode follows upstream `ggml-org/llama.cpp` main/master.
 If a checkout already exists, lmml uses `git pull --ff-only` before building.
 
+#### Dirty llama.cpp checkout during update
+
+If the Build tab fails with a message like:
+
+```text
+FAILED: git exited with exit status: 1
+error: Your local changes to the following files would be overwritten by merge:
+  conversion/qwen.py
+Please commit your changes or stash them before you merge.
+Aborting
+```
+
+the update itself probably fetched correctly, but git refused to merge because
+the embedded llama.cpp checkout has local edits.
+
+For Qwen3.5 adapter work, local changes to these files may be intentional:
+
+```text
+conversion/qwen.py
+convert_lora_to_gguf.py
+```
+
+They are conversion fixes for Qwen3.5 LoRA/GGUF workflows, not random dirt. Do
+not delete them casually.
+
+Preserve and stash them before retrying the LMML update/build:
+
+```sh
+cd "${HOME}/.local/share/lmml/llama.cpp"
+
+git diff --output="${HOME}/lmml-qwen35-lora-conversion-fixes.patch" -- \
+  conversion/qwen.py \
+  convert_lora_to_gguf.py
+
+git stash push -m "lmml qwen35 lora gguf conversion fixes" -- \
+  conversion/qwen.py \
+  convert_lora_to_gguf.py
+```
+
+Then go back to LMML and run the update/build again.
+
+Only reapply the patch if you need to convert or merge Qwen3.5 LoRA again:
+
+```sh
+cd "${HOME}/.local/share/lmml/llama.cpp"
+git stash pop
+```
+
+That may conflict after upstream llama.cpp changes. If it does, port the patch
+forward deliberately instead of blindly resolving the conflict.
+
 ### Serve release files over LAN
 
 On the release host:
