@@ -20,6 +20,8 @@ use lmml_tui::tabs;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::EnvFilter;
 
+mod ocr_cli;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "lmml",
@@ -61,6 +63,33 @@ enum Command {
         #[arg(long)]
         merge_output: Option<PathBuf>,
         /// Additional llama-finetune arguments after `--`.
+        #[arg(last = true)]
+        extra_args: Vec<String>,
+    },
+    /// Run OCR on an image with llama-mtmd-cli and Unlimited-OCR defaults.
+    Ocr {
+        /// Image path to process.
+        #[arg(long, short = 'i')]
+        image: PathBuf,
+        /// Unlimited-OCR language GGUF. Defaults to the selected lmml model.
+        #[arg(long)]
+        model: Option<PathBuf>,
+        /// Multimodal projector GGUF. Defaults to mmproj-unlimited-ocr-F16.gguf beside the model.
+        #[arg(long)]
+        mmproj: Option<PathBuf>,
+        /// OCR prompt. Use "document parsing." for layout/grounding output.
+        #[arg(long)]
+        prompt: Option<String>,
+        /// Context size passed to llama-mtmd-cli. Defaults to the active OCR profile.
+        #[arg(long, short = 'c')]
+        ctx_size: Option<u32>,
+        /// Maximum generated tokens. Defaults to the active OCR profile.
+        #[arg(long, short = 'n')]
+        predict: Option<u32>,
+        /// Allow llama.cpp warmup instead of passing --no-warmup.
+        #[arg(long)]
+        warmup: bool,
+        /// Additional llama-mtmd-cli arguments after `--`.
         #[arg(last = true)]
         extra_args: Vec<String>,
     },
@@ -206,6 +235,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 checkpoint_in,
                 checkpoint_out,
                 merge_output,
+                extra_args,
+            })
+            .await;
+            std::process::exit(code);
+        }
+        Some(Command::Ocr {
+            image,
+            model,
+            mmproj,
+            prompt,
+            ctx_size,
+            predict,
+            warmup,
+            extra_args,
+        }) => {
+            let code = ocr_cli::run_ocr(ocr_cli::OcrRequest {
+                image,
+                model,
+                mmproj,
+                prompt,
+                ctx_size,
+                predict,
+                warmup,
                 extra_args,
             })
             .await;

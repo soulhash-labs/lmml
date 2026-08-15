@@ -553,6 +553,7 @@ async fn run_build_inner(
         "--target".to_string(),
         "llama-cli".to_string(),
         "llama-server".to_string(),
+        "llama-mtmd-cli".to_string(),
         "llama-finetune".to_string(),
         "llama-export-lora".to_string(),
         "-j".to_string(),
@@ -561,9 +562,11 @@ async fn run_build_inner(
     stream_command("cmake", &build_args, tx, log_tail, &mut cancel_rx).await?;
 
     let cli = build_dir.join("bin").join(binary_name("llama-cli"));
+    let mtmd_cli = build_dir.join("bin").join(binary_name("llama-mtmd-cli"));
     let finetune = build_dir.join("bin").join(binary_name("llama-finetune"));
     let export_lora = build_dir.join("bin").join(binary_name("llama-export-lora"));
     verify_binary(&cli).await?;
+    verify_binary_help(&mtmd_cli).await?;
     verify_binary(&finetune).await?;
     verify_binary(&export_lora).await?;
     if !is_executable(&server) {
@@ -687,6 +690,30 @@ async fn verify_binary(binary: &Path) -> Result<(), BuildError> {
     } else {
         Err(BuildError::Verification(format!(
             "{} --version failed",
+            binary.display()
+        )))
+    }
+}
+
+async fn verify_binary_help(binary: &Path) -> Result<(), BuildError> {
+    if !is_executable(binary) {
+        return Err(BuildError::Verification(format!(
+            "expected verification binary missing or not executable: {}",
+            binary.display()
+        )));
+    }
+    let output = tokio::process::Command::new(binary)
+        .arg("--help")
+        .output()
+        .await
+        .map_err(|error| {
+            BuildError::Verification(format!("failed to verify {}: {error}", binary.display()))
+        })?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(BuildError::Verification(format!(
+            "{} --help failed",
             binary.display()
         )))
     }

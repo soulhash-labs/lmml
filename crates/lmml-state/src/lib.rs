@@ -223,6 +223,10 @@ pub struct ModelState {
     pub profiles: Vec<ModelRuntimeProfile>,
     /// Active model runtime profile name.
     pub active_profile: String,
+    /// Per-model OCR profiles for llama.cpp multimodal CLI runs.
+    pub ocr_profiles: Vec<OcrRuntimeProfile>,
+    /// Active OCR runtime profile name.
+    pub active_ocr_profile: String,
 }
 
 impl Default for ModelState {
@@ -238,6 +242,8 @@ impl Default for ModelState {
             aliases: Vec::new(),
             profiles: Vec::new(),
             active_profile: String::new(),
+            ocr_profiles: Vec::new(),
+            active_ocr_profile: String::new(),
         }
     }
 }
@@ -285,7 +291,28 @@ impl ModelState {
         self.runtime_profile_for_path(path)
     }
 
-    /// Add built-in model profiles that are missing from persisted state.
+    /// Return the configured OCR profile for a model path.
+    pub fn ocr_profile_for_path(&self, path: &Path) -> Option<&OcrRuntimeProfile> {
+        let mut matching = self.ocr_profiles_for_path(path);
+        if matching.is_empty() {
+            return None;
+        }
+        matching
+            .iter()
+            .copied()
+            .find(|profile| profile.name == self.active_ocr_profile)
+            .or_else(|| matching.drain(..).next())
+    }
+
+    /// Return all configured OCR profiles for a model path.
+    pub fn ocr_profiles_for_path(&self, path: &Path) -> Vec<&OcrRuntimeProfile> {
+        self.ocr_profiles
+            .iter()
+            .filter(|profile| profile.matches_model_path(path))
+            .collect()
+    }
+
+    /// Add built-in model and OCR profiles that are missing from persisted state.
     pub fn ensure_builtin_profiles(&mut self) {
         let data_dir = default_data_dir_from_env(
             env::var_os("XDG_DATA_HOME"),
@@ -305,10 +332,40 @@ impl ModelState {
             }
         }
 
+        for builtin in builtin_ocr_profiles() {
+            let exists = self
+                .ocr_profiles
+                .iter()
+                .any(|profile| profile.name == builtin.name && profile.model == builtin.model);
+            if !exists {
+                self.ocr_profiles.push(builtin);
+            }
+        }
+
         if self.active_profile.is_empty() {
             self.active_profile = "orion-qwen-q8-deep".to_string();
         }
+        if self.active_ocr_profile.is_empty() {
+            self.active_ocr_profile = "unlimited-ocr-q8-mtmd".to_string();
+        }
     }
+}
+
+fn builtin_ocr_profiles() -> Vec<OcrRuntimeProfile> {
+    vec![OcrRuntimeProfile {
+        name: "unlimited-ocr-q8-mtmd".to_string(),
+        model: PathBuf::from("unlimited-ocr-Q8_0.gguf"),
+        mmproj: PathBuf::from("mmproj-unlimited-ocr-F16.gguf"),
+        prompt: "document parsing.".to_string(),
+        chat_template: "deepseek-ocr".to_string(),
+        temp: "0".to_string(),
+        repeat_penalty: "1.0".to_string(),
+        flash_attn: "off".to_string(),
+        ctx_size: 16_384,
+        predict: 2_600,
+        no_warmup: true,
+        extra_args: Vec::new(),
+    }]
 }
 
 fn builtin_model_profiles(slot_save_path: String) -> Vec<ModelRuntimeProfile> {
@@ -750,6 +807,69 @@ impl Default for ModelRuntimeProfile {
             name: String::new(),
             model: PathBuf::new(),
             server: ServerConfig::default(),
+        }
+    }
+}
+
+/// OCR settings that should apply when a matching model is selected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OcrRuntimeProfile {
+    /// Human-readable profile name.
+    pub name: String,
+    /// Exact GGUF path or file name this profile applies to.
+    pub model: PathBuf,
+    /// Multimodal projector path or file name used by `llama-mtmd-cli`.
+    pub mmproj: PathBuf,
+    /// OCR prompt passed with `-p`.
+    pub prompt: String,
+    /// Chat template passed with `--chat-template`.
+    pub chat_template: String,
+    /// Temperature value passed with `--temp`.
+    pub temp: String,
+    /// Repetition penalty value passed with `--repeat-penalty`.
+    pub repeat_penalty: String,
+    /// Flash-attention mode passed with `--flash-attn`.
+    pub flash_attn: String,
+    /// Context size passed with `-c`.
+    pub ctx_size: u32,
+    /// Maximum generated tokens passed with `-n`.
+    pub predict: u32,
+    /// Pass `--no-warmup` when the installed `llama-mtmd-cli` supports it.
+    pub no_warmup: bool,
+    /// Extra `llama-mtmd-cli` argv entries appended after profile-owned flags.
+    pub extra_args: Vec<String>,
+}
+
+impl OcrRuntimeProfile {
+    /// Return whether this profile applies to a selected model path.
+    pub fn matches_model_path(&self, path: &Path) -> bool {
+        if self.model == path {
+            return true;
+        }
+
+        let Some(profile_name) = self.model.file_name() else {
+            return false;
+        };
+        path.file_name() == Some(profile_name)
+    }
+}
+
+impl Default for OcrRuntimeProfile {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            model: PathBuf::new(),
+            mmproj: PathBuf::new(),
+            prompt: String::new(),
+            chat_template: String::new(),
+            temp: String::new(),
+            repeat_penalty: String::new(),
+            flash_attn: String::new(),
+            ctx_size: 4096,
+            predict: 128,
+            no_warmup: false,
+            extra_args: Vec::new(),
         }
     }
 }
@@ -1260,6 +1380,8 @@ mod tests {
         assert_eq!(state.runtime.state.opencode.status, RuntimeStatus::Stopped);
         assert!(state.model.profiles.is_empty());
         assert!(state.model.active_profile.is_empty());
+        assert!(state.model.ocr_profiles.is_empty());
+        assert!(state.model.active_ocr_profile.is_empty());
     }
 
     #[test]
@@ -1310,6 +1432,35 @@ mod tests {
         assert_eq!(qwen_profiles.len(), 15);
         assert_eq!(model_state.active_profile, "orion-qwen-q8-deep");
         assert_eq!(model_state.profiles.len(), 44);
+        assert_eq!(model_state.active_ocr_profile, "unlimited-ocr-q8-mtmd");
+        assert_eq!(model_state.ocr_profiles.len(), 1);
+    }
+
+    #[test]
+    fn unlimited_ocr_q8_profile_is_available() {
+        let mut model_state = ModelState::default();
+        let model = Path::new("/models/unlimited-ocr-Q8_0.gguf");
+        model_state.ensure_builtin_profiles();
+
+        let profile = model_state
+            .ocr_profile_for_path(model)
+            .expect("Unlimited-OCR Q8 profile");
+
+        assert_eq!(profile.name, "unlimited-ocr-q8-mtmd");
+        assert_eq!(profile.model, PathBuf::from("unlimited-ocr-Q8_0.gguf"));
+        assert_eq!(
+            profile.mmproj,
+            PathBuf::from("mmproj-unlimited-ocr-F16.gguf")
+        );
+        assert_eq!(profile.prompt, "document parsing.");
+        assert_eq!(profile.chat_template, "deepseek-ocr");
+        assert_eq!(profile.temp, "0");
+        assert_eq!(profile.repeat_penalty, "1.0");
+        assert_eq!(profile.flash_attn, "off");
+        assert_eq!(profile.ctx_size, 16_384);
+        assert_eq!(profile.predict, 2_600);
+        assert!(profile.no_warmup);
+        assert!(profile.extra_args.is_empty());
     }
 
     #[test]
@@ -1881,6 +2032,21 @@ mod tests {
                     },
                 }],
                 active_profile: "mistral".to_string(),
+                ocr_profiles: vec![OcrRuntimeProfile {
+                    name: "unlimited-ocr-q8-mtmd".to_string(),
+                    model: PathBuf::from("/models/unlimited-ocr-Q8_0.gguf"),
+                    mmproj: PathBuf::from("/models/mmproj-unlimited-ocr-F16.gguf"),
+                    prompt: "document parsing.".to_string(),
+                    chat_template: "deepseek-ocr".to_string(),
+                    temp: "0".to_string(),
+                    repeat_penalty: "1.0".to_string(),
+                    flash_attn: "off".to_string(),
+                    ctx_size: 16_384,
+                    predict: 2_600,
+                    no_warmup: true,
+                    extra_args: Vec::new(),
+                }],
+                active_ocr_profile: "unlimited-ocr-q8-mtmd".to_string(),
             },
             server: ServerConfig {
                 port: 8081,

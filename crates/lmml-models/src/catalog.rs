@@ -14,6 +14,8 @@ pub enum LlmFamily {
     Qwen35,
     /// Alibaba Qwen3.6 open-weight model family.
     Qwen36,
+    /// Baidu Unlimited-OCR document OCR model family.
+    UnlimitedOcr,
     /// Google Gemma 4 open model family.
     Gemma4,
     /// Nous Research Hermes 4 model family.
@@ -25,6 +27,7 @@ impl fmt::Display for LlmFamily {
         match self {
             LlmFamily::Qwen35 => formatter.write_str("Qwen3.5"),
             LlmFamily::Qwen36 => formatter.write_str("Qwen3.6"),
+            LlmFamily::UnlimitedOcr => formatter.write_str("Unlimited-OCR"),
             LlmFamily::Gemma4 => formatter.write_str("Gemma 4"),
             LlmFamily::Hermes4 => formatter.write_str("Hermes 4"),
         }
@@ -134,6 +137,7 @@ impl KnownModelVariant {
 }
 
 const TEXT: &[LlmModality] = &[LlmModality::Text];
+const TEXT_VISION: &[LlmModality] = &[LlmModality::Text, LlmModality::Vision];
 const TEXT_VISION_VIDEO: &[LlmModality] =
     &[LlmModality::Text, LlmModality::Vision, LlmModality::Video];
 const GEMMA_ALL_SMALL: &[LlmModality] = &[
@@ -155,6 +159,13 @@ const QWEN36_NOTES: &[&str] = &[
     "current official open Qwen3.6 variants are 27B dense and 35B-A3B MoE",
     "LMML adds --reasoning-format none at launch to preserve raw thinking tags",
     "LMML adds q8_0 KV cache when Qwen context exceeds 32k and no KV type is already set",
+];
+const UNLIMITED_OCR_NOTES: &[&str] = &[
+    "requires llama.cpp with deepseek2-ocr support from PR #24969 or newer",
+    "use lmml ocr / llama-mtmd-cli for image inference; llama-server multimodal serving is not validated for this model",
+    "requires mmproj-unlimited-ocr-F16.gguf beside the language GGUF or passed explicitly",
+    "Q8_0 matches the BF16 OCR baseline on the published corpus and is the LMML throughput-oriented default",
+    "avoid Q4 variants for dense documents unless your own OCR harness validates them",
 ];
 const GEMMA4_COMMON_NOTES: &[&str] = &[
     "native roles: system, user, assistant",
@@ -307,6 +318,25 @@ const KNOWN_MODEL_VARIANTS: &[KnownModelVariant] = &[
         serving_notes: QWEN36_NOTES,
         filename_needles: &["qwen3.6-35b-a3b", "qwen36-35b-a3b"],
         source: LlmCatalogSource::Official,
+    },
+    KnownModelVariant {
+        family: LlmFamily::UnlimitedOcr,
+        name: "Unlimited-OCR",
+        parameter_label: "OCR",
+        context_tokens: 16_384,
+        architecture: LlmArchitecture::Dense,
+        modalities: TEXT_VISION,
+        local_guidance: "document OCR path; prefer Q8_0 when RAM allows and run through lmml ocr",
+        implementation_note:
+            "DeepSeek2-OCR GGUF architecture with required multimodal projector sidecar",
+        serving_notes: UNLIMITED_OCR_NOTES,
+        filename_needles: &[
+            "unlimited-ocr",
+            "unlimitedocr",
+            "deepseek2-ocr",
+            "deepseek2ocr",
+        ],
+        source: LlmCatalogSource::CommunityGguf,
     },
     KnownModelVariant {
         family: LlmFamily::Gemma4,
@@ -526,6 +556,23 @@ mod tests {
                 active_parameters: "4B"
             }
         );
+    }
+
+    #[test]
+    fn matches_unlimited_ocr_gguf() {
+        let variant =
+            match_known_model_name("unlimited-ocr-Q8_0.gguf").expect("match unlimited ocr");
+
+        assert_eq!(variant.family, LlmFamily::UnlimitedOcr);
+        assert_eq!(variant.context_tokens, 16_384);
+        assert_eq!(
+            variant.modalities,
+            &[LlmModality::Text, LlmModality::Vision]
+        );
+        assert!(variant
+            .serving_notes
+            .iter()
+            .any(|note| note.contains("lmml ocr")));
     }
 
     #[test]

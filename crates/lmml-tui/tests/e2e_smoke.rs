@@ -146,6 +146,16 @@ echo llama-cli stub
 exit 0
 CLI
 chmod +x "$BUILD/bin/llama-cli"
+cat > "$BUILD/bin/llama-mtmd-cli" <<'MTMD'
+#!/bin/sh
+if [ "$1" = "--help" ]; then
+  echo "llama-mtmd-cli stub --model -m --mmproj --image --prompt -p --chat-template --temp --repeat-penalty --flash-attn --predict -n --ctx-size -c --no-warmup"
+  exit 0
+fi
+echo llama-mtmd-cli stub
+exit 0
+MTMD
+chmod +x "$BUILD/bin/llama-mtmd-cli"
 cat > "$BUILD/bin/llama-finetune" <<'FINETUNE'
 #!/bin/sh
 echo llama-finetune stub

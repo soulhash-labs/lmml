@@ -27,6 +27,7 @@ The contract separates three concerns:
 | `lmml-router` static upstream routing | Implemented |
 | `lmml-router` opt-in LAN discovery | Implemented |
 | Server control through node APIs | Gated, disabled by default |
+| OCR profiles through `lmml ocr` / `llama-mtmd-cli` | Implemented for Unlimited-OCR-style local image OCR |
 | Native llama.cpp training wrapper | Experimental |
 
 Anything outside this table should be treated as planned or experimental unless

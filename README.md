@@ -103,6 +103,7 @@ Implemented and tested today:
 - Model-family guidance for Qwen3.5, Qwen3.6, Gemma 4, and Hermes 4.
 - Runtime profile support for validated Qwen, Gemma MTP, and BC-250 Vulkan
   scenarios.
+- OCR profile support for Unlimited-OCR Q8 through `llama-mtmd-cli`.
 - Opt-in LAN node discovery and authenticated router-to-worker probing.
 
 Experimental or host-dependent:
@@ -143,6 +144,9 @@ speak Anthropic-style Messages APIs while your backend remains `llama.cpp`.
 
 **⚙️ Runtime profiles:** Stores repeatable profile settings for context size,
 parallelism, GPU layers, KV cache, draft-model flags, sampling, and server args.
+
+**🧾 OCR profiles:** Runs image OCR through `llama-mtmd-cli` with a built-in
+Unlimited-OCR Q8 profile and validated DeepSeek-OCR prompt flags.
 
 **🧪 Training command support:** Wraps current upstream `llama-finetune` behavior
 without pretending unsupported flags such as `--lora-out` exist unless the local
@@ -446,6 +450,71 @@ curl -fsSL http://192.168.1.100:8000/install.sh | \
   LMML_PROFILE_HINT=bc250-qwen35-9b-q4km-vulkan \
   sh
 ```
+
+### Unlimited-OCR Q8
+
+Unlimited-OCR uses llama.cpp's multimodal CLI path, not the normal
+`llama-server` request path. LMML exposes it through the built-in OCR profile
+`unlimited-ocr-q8-mtmd`.
+
+Use these two files:
+
+```text
+~/.local/share/lmml/models/unlimited-ocr-Q8_0.gguf
+~/.local/share/lmml/models/mmproj-unlimited-ocr-F16.gguf
+```
+
+GGUF model files are published at
+<https://huggingface.co/vimalnakrani/unlimited-ocr-gguf>.
+
+Run OCR on an image:
+
+```sh
+lmml ocr \
+  --model ~/.local/share/lmml/models/unlimited-ocr-Q8_0.gguf \
+  --image ./page.png
+```
+
+If `unlimited-ocr-Q8_0.gguf` is already selected in the TUI, omit `--model`:
+
+```sh
+lmml ocr --image ./page.png
+```
+
+The profile emits the measured llama.cpp flag set, adding `--no-warmup` when
+the installed `llama-mtmd-cli` advertises it:
+
+```text
+-m unlimited-ocr-Q8_0.gguf
+--mmproj mmproj-unlimited-ocr-F16.gguf
+--image page.png
+-p "document parsing."
+--chat-template deepseek-ocr
+--temp 0
+--repeat-penalty 1.0
+--flash-attn off
+-n 2600
+-c 16384
+--no-warmup
+```
+
+Override a profile value for one run:
+
+```sh
+lmml ocr \
+  --model ~/.local/share/lmml/models/unlimited-ocr-Q8_0.gguf \
+  --image ./invoice.png \
+  --prompt "document parsing." \
+  -c 16384 \
+  -n 2600
+```
+
+Use `--mmproj` if the projector is not beside the language GGUF. Pass extra
+`llama-mtmd-cli` flags after `--`.
+
+LMML does not expose Unlimited-OCR as a server runtime profile yet. Current
+llama.cpp builds can host the model in `llama-server`, but the image prompt path
+for this architecture is validated through `llama-mtmd-cli`.
 
 ## 🧪 Native llama.cpp Training
 

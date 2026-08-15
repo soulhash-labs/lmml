@@ -71,6 +71,35 @@ templates may be useful, but bundling them requires a source, license, and
 regression decision. The safe default is to expose template override support
 without silently replacing model-provided templates.
 
+## Unlimited-OCR
+
+Unlimited-OCR support is an OCR CLI path, not a `llama-server` runtime profile.
+Use it when the selected files are:
+
+| File | Role | LMML Default |
+| --- | --- | --- |
+| `unlimited-ocr-Q8_0.gguf` | language GGUF | preferred throughput-oriented OCR model |
+| `mmproj-unlimited-ocr-F16.gguf` | multimodal projector | required sidecar beside the model or passed with `--mmproj` |
+
+Runtime policy:
+
+- Requires a llama.cpp checkout new enough to include `deepseek2-ocr` support
+  from PR #24969.
+- LMML builds and verifies `llama-mtmd-cli` because image inference is validated
+  there, not through `llama-server`.
+- Default command shape is exposed through the built-in OCR profile
+  `unlimited-ocr-q8-mtmd`: prompt `document parsing.`,
+  `--chat-template deepseek-ocr`, temperature `0`, repetition penalty `1.0`,
+  flash attention off, `-c 16384`, `-n 2600`, and `--no-warmup` when the
+  installed `llama-mtmd-cli` advertises it.
+- `llama-server` can host the files on some builds, but LMML should not expose a
+  server runtime profile until upstream server image prompt injection is
+  validated for this architecture.
+- Q4 variants are marked unsuitable for dense documents unless a local OCR eval
+  harness validates the user's document distribution. Q8 is the LMML default
+  because the published ladder reports BF16-equivalent recognition with higher
+  generation throughput than Q5 on the measured hardware.
+
 ## Gemma 4
 
 Gemma 4 has five official sizes. LMML tracks all five in the catalog.
@@ -129,6 +158,10 @@ Implementation notes baked into LMML:
   <https://github.com/QwenLM/Qwen3.6>
 - Qwen3.5 GGUF collection:
   <https://huggingface.co/collections/unsloth/qwen35>
+- Unlimited-OCR GGUF measured ladder:
+  <https://huggingface.co/vimalnakrani/unlimited-ocr-gguf>
+- llama.cpp Unlimited-OCR architecture support:
+  <https://github.com/ggml-org/llama.cpp/pull/24969>
 - Gemma 4 model overview:
   <https://ai.google.dev/gemma/docs/core>
 - Gemma 4 model card:

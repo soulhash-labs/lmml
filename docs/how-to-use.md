@@ -262,9 +262,58 @@ and `--checkpoint-out` when `llama-finetune --help` explicitly advertises them.
 - Use text GGUF files for normal text serving.
 - For multimodal Qwen profiles, keep the matching `mmproj` file beside the main
   GGUF. The `mmproj` file is the vision encoder, not the primary text model.
+- For Unlimited-OCR, keep `mmproj-unlimited-ocr-F16.gguf` beside
+  `unlimited-ocr-Q8_0.gguf`, or pass it to `lmml ocr --mmproj`.
 - Do not accidentally select an `mmproj` file as the main model for text serving.
 - Use F16/BF16/F32 models for training, then quantize the trained output for
   deployment.
+
+## OCR With Unlimited-OCR
+
+Unlimited-OCR uses llama.cpp's multimodal CLI path. LMML does not expose it as a
+`llama-server` profile yet because upstream server image requests are not
+validated for this architecture.
+
+Put both files in your model directory:
+
+```text
+~/.local/share/lmml/models/unlimited-ocr-Q8_0.gguf
+~/.local/share/lmml/models/mmproj-unlimited-ocr-F16.gguf
+```
+
+Then run:
+
+```sh
+lmml ocr \
+  --model ~/.local/share/lmml/models/unlimited-ocr-Q8_0.gguf \
+  --image ./page.png
+```
+
+If the Unlimited-OCR GGUF is the selected model in the TUI, `--model` can be
+omitted. LMML derives the projector path from the model directory unless
+`--mmproj` is passed.
+
+Defaults:
+
+```text
+profile: unlimited-ocr-q8-mtmd
+prompt: document parsing.
+chat template: deepseek-ocr
+temperature: 0
+repeat penalty: 1.0
+flash attention: off
+context: 16384
+predict: 2600
+warmup: disabled
+```
+
+The profile is stored as an OCR profile, not a `llama-server` profile. Pass
+`--prompt`, `-c`, `-n`, `--mmproj`, `--warmup`, or trailing args after `--` to
+override it for one run.
+
+Use Q8 for the default LMML OCR path. The published ladder reports Q8 matching
+the BF16 baseline on the measured corpus. Avoid Q4 variants for dense documents
+unless your own OCR eval proves they are acceptable.
 
 ## Common Operations
 
