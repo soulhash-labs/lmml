@@ -442,6 +442,9 @@ LMML does not bundle or redistribute the model weights; download them under
 the repository's license and place the selected GGUF in the configured models
 directory.
 
+Special thanks to Hatsu | Ai for recommending Blackfrost-AI's Qwen3.8 build for
+cybersecurity work.
+
 Use a current llama.cpp build that recognizes the model's 65-layer metadata.
 The profile is for text serving; omit `--mmproj` unless the selected GGUF
 release provides and documents a compatible projector. For manually converted
