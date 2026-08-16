@@ -424,6 +424,30 @@ Supported catalog families include small Qwen variants and larger Qwen3.6
 variants such as 27B and 35B-A3B-style MoE profiles where the hardware and GGUF
 files are available.
 
+### Qwen3.8 Native MTP
+
+LMML includes Qwen3.8 27B profiles for GGUF files that contain the native 65th
+NextN/MTP block. The profiles enable `draft-mtp` with up to three speculative
+tokens and do not add a separate draft model:
+
+```text
+qwen38-27b-mtp-q4km: Qwen3.8-27B-ABLITERATED-Q4_K_M.gguf, ctx 16384
+qwen38-27b-mtp-q6:   Qwen3.8-27B-ABLITERATED-Q6_K.gguf, ctx 16384
+qwen38-27b-mtp-q8:   Qwen3.8-27B-ABLITERATED-Q8_0.gguf, ctx 16384
+args: --spec-type draft-mtp --spec-draft-n-max 3 --jinja -fa on
+```
+
+The ABLITERATED GGUF files are provided by [Blackfrost-AI on Hugging Face](https://huggingface.co/Blackfrost-AI/Qwen3.8-27B-ABLITERATED-GGUF).
+LMML does not bundle or redistribute the model weights; download them under
+the repository's license and place the selected GGUF in the configured models
+directory.
+
+Use a current llama.cpp build that recognizes the model's 65-layer metadata.
+The profile is for text serving; omit `--mmproj` unless the selected GGUF
+release provides and documents a compatible projector. For manually converted
+safetensors, convert to a GGUF that preserves the embedded MTP block before
+selecting the LMML profile.
+
 ### Gemma 4
 
 Gemma 4 support includes QAT-oriented guidance and an MTP profile for speculative

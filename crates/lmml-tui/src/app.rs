@@ -1544,7 +1544,9 @@ fn is_qwen35_or_qwen36_model(model: &ModelEntry) -> bool {
     matched.is_some_and(|variant| {
         matches!(
             variant.family,
-            lmml_models::catalog::LlmFamily::Qwen35 | lmml_models::catalog::LlmFamily::Qwen36
+            lmml_models::catalog::LlmFamily::Qwen35
+                | lmml_models::catalog::LlmFamily::Qwen36
+                | lmml_models::catalog::LlmFamily::Qwen38
         )
     })
 }

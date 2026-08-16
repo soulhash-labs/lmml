@@ -14,6 +14,8 @@ pub enum LlmFamily {
     Qwen35,
     /// Alibaba Qwen3.6 open-weight model family.
     Qwen36,
+    /// Alibaba Qwen3.8 open-weight model family.
+    Qwen38,
     /// Baidu Unlimited-OCR document OCR model family.
     UnlimitedOcr,
     /// Google Gemma 4 open model family.
@@ -27,6 +29,7 @@ impl fmt::Display for LlmFamily {
         match self {
             LlmFamily::Qwen35 => formatter.write_str("Qwen3.5"),
             LlmFamily::Qwen36 => formatter.write_str("Qwen3.6"),
+            LlmFamily::Qwen38 => formatter.write_str("Qwen3.8"),
             LlmFamily::UnlimitedOcr => formatter.write_str("Unlimited-OCR"),
             LlmFamily::Gemma4 => formatter.write_str("Gemma 4"),
             LlmFamily::Hermes4 => formatter.write_str("Hermes 4"),
@@ -159,6 +162,12 @@ const QWEN36_NOTES: &[&str] = &[
     "current official open Qwen3.6 variants are 27B dense and 35B-A3B MoE",
     "LMML adds --reasoning-format none at launch to preserve raw thinking tags",
     "LMML adds q8_0 KV cache when Qwen context exceeds 32k and no KV type is already set",
+];
+const QWEN38_NOTES: &[&str] = &[
+    "use the embedded GGUF chat template with --jinja",
+    "the native 65th NextN/MTP block is inside supported GGUF files; do not add a draft model",
+    "enable native speculation with --spec-type draft-mtp --spec-draft-n-max 3",
+    "validate the installed llama.cpp build against the model's MTP metadata before serving",
 ];
 const UNLIMITED_OCR_NOTES: &[&str] = &[
     "requires llama.cpp with deepseek2-ocr support from PR #24969 or newer",
@@ -303,6 +312,20 @@ const KNOWN_MODEL_VARIANTS: &[KnownModelVariant] = &[
         serving_notes: QWEN36_NOTES,
         filename_needles: &["qwen3.6-27b", "qwen36-27b"],
         source: LlmCatalogSource::Official,
+    },
+    KnownModelVariant {
+        family: LlmFamily::Qwen38,
+        name: "Qwen3.8-27B",
+        parameter_label: "27B",
+        context_tokens: 262_144,
+        architecture: LlmArchitecture::Dense,
+        modalities: TEXT,
+        local_guidance:
+            "27B local serving; Q4_K_M needs substantial VRAM, Q8_0 needs more headroom",
+        implementation_note: "Qwen3.8 27B GGUF with an embedded 65th native MTP block",
+        serving_notes: QWEN38_NOTES,
+        filename_needles: &["qwen3.8-27b", "qwen38-27b"],
+        source: LlmCatalogSource::CommunityGguf,
     },
     KnownModelVariant {
         family: LlmFamily::Qwen36,
@@ -528,6 +551,18 @@ mod tests {
                 active_parameters: "3B"
             }
         );
+    }
+
+    #[test]
+    fn matches_qwen38_native_mtp_variant() {
+        let variant = match_known_model_name("Qwen3.8-27B-Q8_0.gguf").expect("match qwen3.8");
+
+        assert_eq!(variant.family, LlmFamily::Qwen38);
+        assert_eq!(variant.parameter_label, "27B");
+        assert!(variant
+            .serving_notes
+            .iter()
+            .any(|note| note.contains("native 65th NextN/MTP")));
     }
 
     #[test]

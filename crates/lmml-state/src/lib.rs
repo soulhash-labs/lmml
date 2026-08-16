@@ -576,6 +576,21 @@ fn builtin_model_profiles(slot_save_path: String) -> Vec<ModelRuntimeProfile> {
             server: r9700_qwen_deep_server_config(&slot_save_path),
         },
         ModelRuntimeProfile {
+            name: "qwen38-27b-mtp-q4km".to_string(),
+            model: PathBuf::from("Qwen3.8-27B-ABLITERATED-Q4_K_M.gguf"),
+            server: qwen38_mtp_server_config(&slot_save_path),
+        },
+        ModelRuntimeProfile {
+            name: "qwen38-27b-mtp-q6".to_string(),
+            model: PathBuf::from("Qwen3.8-27B-ABLITERATED-Q6_K.gguf"),
+            server: qwen38_mtp_server_config(&slot_save_path),
+        },
+        ModelRuntimeProfile {
+            name: "qwen38-27b-mtp-q8".to_string(),
+            model: PathBuf::from("Qwen3.8-27B-ABLITERATED-Q8_0.gguf"),
+            server: qwen38_mtp_server_config(&slot_save_path),
+        },
+        ModelRuntimeProfile {
             name: "bc250-qwen9b-q4km-vulkan".to_string(),
             model: PathBuf::from("Qwen3.5-9B-Q4_K_M.gguf"),
             server: bc250_qwen9b_vulkan_server_config(&slot_save_path),
@@ -715,6 +730,39 @@ fn r9700_qwen35_27b_q6_deep_server_config(slot_save_path: &str) -> ServerConfig 
     let mut server = r9700_qwen_deep_server_config(slot_save_path);
     server.threads = 20;
     server
+}
+
+fn qwen38_mtp_server_config(slot_save_path: &str) -> ServerConfig {
+    ServerConfig {
+        port: 1200,
+        host: "127.0.0.1".to_string(),
+        ctx_size: 16_384,
+        n_gpu_layers: 999,
+        batch_size: 512,
+        ubatch_size: 128,
+        threads: 8,
+        flash_attn: true,
+        mlock: false,
+        api_key: String::new(),
+        jinja: true,
+        chat_template: String::new(),
+        extra_args: vec![
+            "--parallel".to_string(),
+            "1".to_string(),
+            "--slot-save-path".to_string(),
+            slot_save_path.to_string(),
+            "--spec-type".to_string(),
+            "draft-mtp".to_string(),
+            "--spec-draft-n-max".to_string(),
+            "3".to_string(),
+            "--temp".to_string(),
+            "1.0".to_string(),
+            "--top-p".to_string(),
+            "0.95".to_string(),
+            "--top-k".to_string(),
+            "20".to_string(),
+        ],
+    }
 }
 
 fn qwen_kv_unified_server_config(
@@ -1765,6 +1813,44 @@ mod tests {
             ]
         );
         assert!(profile.server.extra_args[3].ends_with("lmml/llama-slots"));
+    }
+
+    #[test]
+    fn qwen38_native_mtp_profiles_use_embedded_drafter() {
+        let mut model_state = ModelState::default();
+        model_state.ensure_builtin_profiles();
+        let q6 = model_state
+            .runtime_profiles_for_path(Path::new("/models/Qwen3.8-27B-ABLITERATED-Q6_K.gguf"))
+            .into_iter()
+            .find(|profile| profile.name == "qwen38-27b-mtp-q6")
+            .expect("Qwen3.8 Q6 native MTP profile");
+        assert_eq!(q6.server.ctx_size, 16_384);
+
+        let profile = model_state
+            .runtime_profiles_for_path(Path::new("/models/Qwen3.8-27B-ABLITERATED-Q8_0.gguf"))
+            .into_iter()
+            .find(|profile| profile.name == "qwen38-27b-mtp-q8")
+            .expect("Qwen3.8 native MTP profile");
+
+        assert_eq!(profile.server.n_gpu_layers, 999);
+        assert_eq!(profile.server.ctx_size, 16_384);
+        assert!(profile.server.jinja);
+        assert!(profile
+            .server
+            .extra_args
+            .windows(2)
+            .any(|args| { args == ["--spec-type", "draft-mtp"] }));
+        assert!(profile
+            .server
+            .extra_args
+            .windows(2)
+            .any(|args| args == ["--spec-draft-n-max", "3"]));
+        assert!(!profile.server.extra_args.iter().any(|arg| arg == "-md"));
+        assert!(!profile
+            .server
+            .extra_args
+            .iter()
+            .any(|arg| arg == "--spec-draft-model"));
     }
 
     #[test]
