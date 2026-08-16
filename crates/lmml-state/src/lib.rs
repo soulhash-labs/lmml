@@ -1479,7 +1479,10 @@ mod tests {
             model_state.runtime_profiles_for_path(Path::new("/models/Qwen3.5-4B-Q8_0.gguf"));
         assert_eq!(qwen_profiles.len(), 15);
         assert_eq!(model_state.active_profile, "orion-qwen-q8-deep");
-        assert_eq!(model_state.profiles.len(), 44);
+        assert_eq!(
+            model_state.profiles.len(),
+            1 + builtin_model_profiles("slot-save-path".to_string()).len()
+        );
         assert_eq!(model_state.active_ocr_profile, "unlimited-ocr-q8-mtmd");
         assert_eq!(model_state.ocr_profiles.len(), 1);
     }
