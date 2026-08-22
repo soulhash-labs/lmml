@@ -164,6 +164,40 @@ pub fn render_codex_config(state: &AppState) -> Result<String, RuntimeCliError> 
     ))
 }
 
+/// Render a DeepSeek Harness custom-provider fragment for LMML's local server.
+pub fn render_deepseek_harness_config(state: &AppState) -> Result<String, RuntimeCliError> {
+    let profile = state
+        .runtime
+        .profile("opencode")
+        .ok_or(RuntimeCliError::UnknownProfile)?;
+    let model = profile.model_name();
+    let model_id = if model.is_empty() {
+        "<select-a-model-in-lmml>"
+    } else {
+        model.as_str()
+    };
+    let base_url = profile.api_base_url();
+    Ok(format!(
+        concat!(
+            "# Add this provider under $DSH_HOME/settings.yaml.\n",
+            "# LMML owns the local llama-server at this endpoint.\n",
+            "llm-pi-ai:\n",
+            "  providers:\n",
+            "    lmml:\n",
+            "      api: openai-completions\n",
+            "      baseURL: {base_url}\n",
+            "      models:\n",
+            "        - id: {model}\n"
+        ),
+        base_url = yaml_quote(&base_url),
+        model = yaml_quote(model_id),
+    ))
+}
+
+fn yaml_quote(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| format!("\"{}\"", value.replace('"', "\\\"")))
+}
+
 /// Return warning lines for incomplete OpenCode runtime profiles.
 pub fn opencode_config_warnings(state: &AppState) -> Vec<String> {
     RuntimeConfig::profile_names()
@@ -1420,6 +1454,20 @@ mod tests {
         assert!(rendered.contains("base_url = \"http://127.0.0.1:1200/v1\""));
         assert!(rendered.contains("wire_api = \"responses\""));
         assert!(rendered.contains("codex --profile lmml"));
+    }
+
+    #[test]
+    fn deepseek_harness_config_targets_lmml_openai_endpoint() {
+        let mut state = AppState::default();
+        state.runtime.opencode.model = PathBuf::from("/models/Qwen3.8-27B-Q6_K.gguf");
+
+        let rendered = render_deepseek_harness_config(&state).expect("render config");
+
+        assert!(rendered.contains("llm-pi-ai:"));
+        assert!(rendered.contains("api: openai-completions"));
+        assert!(rendered.contains("baseURL: \"http://127.0.0.1:1200/v1\""));
+        assert!(rendered.contains("id: \"Qwen3.8-27B-Q6_K.gguf\""));
+        assert!(!rendered.contains("apiKey"));
     }
 
     #[test]

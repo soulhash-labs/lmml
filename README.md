@@ -133,7 +133,7 @@ build, scan models, start/stop the server, inspect logs, and switch profiles.
 basic metadata, and maps known model families to safer runtime guidance.
 
 **🔌 Agent-ready serving:** Runs local `llama-server` endpoints for Codex,
-OpenCode, Claude Code, Hermes-style clients, shell scripts, and
+OpenCode, Claude Code, DeepSeek Harness, Hermes-style clients, shell scripts, and
 OpenAI-compatible tools.
 
 **💬 Anthropic compatibility:** Adds `/v1/messages` translation for clients that
@@ -286,6 +286,22 @@ Add the reviewed TOML to `~/.codex/lmml.config.toml`, then start Codex with:
 ```sh
 codex --profile lmml
 ```
+
+### DeepSeek Harness
+
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) can use
+LMML as a local OpenAI-compatible provider. Start the selected LMML runtime,
+then print the provider fragment:
+
+```sh
+lmml runtime print-config deepseek-harness
+```
+
+Review the output and add it under `$DSH_HOME/settings.yaml` (defaults to
+`~/.dsh/settings.yaml`). The generated route uses `openai-completions`, points
+to LMML's managed `/v1` endpoint, and names the selected model. DeepSeek Harness
+remains an optional Node.js client; LMML does not bundle it or require it for
+local serving.
 
 For LAN routing, keep the same profile shape but set the provider `base_url` to
 the router:

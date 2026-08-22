@@ -168,6 +168,8 @@ enum RuntimeConfigTarget {
     Opencode,
     /// Codex CLI profile config.
     Codex,
+    /// DeepSeek Harness custom OpenAI-compatible provider fragment.
+    DeepseekHarness,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -702,6 +704,18 @@ fn run_runtime_print_config(state: &lmml_state::AppState, target: RuntimeConfigT
                 1
             }
         },
+        RuntimeConfigTarget::DeepseekHarness => {
+            match runtime_cli::render_deepseek_harness_config(state) {
+                Ok(rendered) => {
+                    println!("{rendered}");
+                    0
+                }
+                Err(error) => {
+                    eprintln!("failed to render DeepSeek Harness config: {error}");
+                    1
+                }
+            }
+        }
     }
 }
 
@@ -772,6 +786,10 @@ fn run_runtime_configure(state: &lmml_state::AppState, args: RuntimeConfigureArg
         }
         RuntimeConfigTarget::Codex => {
             eprintln!("automatic Codex config writes are not supported; use `lmml runtime print-config codex` and review the TOML before adding it to ~/.codex/lmml.config.toml");
+            2
+        }
+        RuntimeConfigTarget::DeepseekHarness => {
+            eprintln!("automatic DeepSeek Harness config writes are not supported; use `lmml runtime print-config deepseek-harness` and review the YAML before adding it to $DSH_HOME/settings.yaml");
             2
         }
     }
