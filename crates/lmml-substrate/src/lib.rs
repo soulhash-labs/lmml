@@ -21,7 +21,8 @@ mod types;
 pub use adapter::*;
 pub use lifecycle::*;
 pub use storage::{
-    append_artifact_manifest, manifest_json, parse_artifact_manifest_json, parse_manifest_json,
+    append_artifact_manifest, append_gguf_candidate_manifest, manifest_json,
+    parse_artifact_manifest_json, parse_gguf_candidate_manifest_json, parse_manifest_json,
     store_substrate_manifest, validate_identifier,
 };
 pub use types::*;
@@ -931,6 +932,44 @@ mod tests {
         assert!(matches!(
             parse_artifact_manifest_json(&payload),
             Err(SubstrateError::InvalidArtifactManifest(_))
+        ));
+    }
+
+    #[test]
+    fn pending_gguf_candidate_is_append_only_and_not_an_artifact() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let candidate = GgufCandidateManifest {
+            schema_version: SCHEMA_VERSION,
+            artifact: ArtifactIdentity {
+                artifact_id: "qwen38-q8-pending".into(),
+                model_lineage_id: "qwen38-27b".into(),
+                representation: ModelRepresentation::Gguf,
+                quantization: Some(QuantizationKind::Q8_0),
+                artifact_hash: hash('c'),
+            },
+            parent_artifact: "qwen38-27b-safetensors".into(),
+            canonical_model: "qwen38-27b".into(),
+            tool: "llama.cpp".into(),
+            tool_version: "test-revision".into(),
+            command_or_parameters: vec!["Q8_0".into()],
+            source_hashes: vec![hash('d')],
+            output_hash: hash('c'),
+            artifact_path: dir.path().join("qwen38-q8.gguf"),
+            created_at: "2026-08-25T00:00:00Z".into(),
+        };
+        let first = append_gguf_candidate_manifest(dir.path(), &candidate).expect("append");
+        let second = append_gguf_candidate_manifest(dir.path(), &candidate).expect("idempotent");
+        assert_eq!(first, second);
+        assert!(parse_artifact_manifest_json(
+            &serde_json::to_string(&candidate).expect("serialize candidate")
+        )
+        .is_err());
+
+        let mut changed = candidate;
+        changed.tool_version = "different-revision".into();
+        assert!(matches!(
+            append_gguf_candidate_manifest(dir.path(), &changed),
+            Err(SubstrateError::CandidateConflict(_))
         ));
     }
 

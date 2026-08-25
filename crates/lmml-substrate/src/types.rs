@@ -246,6 +246,37 @@ pub struct ArtifactManifest {
     pub created_at: String,
 }
 
+/// Immutable record for a structurally validated GGUF awaiting backend admission.
+///
+/// Candidate records let CPU-only conversion and hashing finish without making
+/// the payload eligible for runtime selection. [`ArtifactManifest`] remains the
+/// only runnable artifact record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GgufCandidateManifest {
+    /// Schema version for forward compatibility.
+    pub schema_version: u32,
+    /// Intended artifact identity after admission.
+    pub artifact: ArtifactIdentity,
+    /// Immediate parent artifact.
+    pub parent_artifact: String,
+    /// Canonical model lineage identifier.
+    pub canonical_model: String,
+    /// Tool name that produced the candidate.
+    pub tool: String,
+    /// Tool versions and source revisions used during conversion.
+    pub tool_version: String,
+    /// Exact conversion and quantization command parameters.
+    pub command_or_parameters: Vec<String>,
+    /// Input hashes used to produce the candidate.
+    pub source_hashes: Vec<Hash256>,
+    /// Candidate payload hash.
+    pub output_hash: Hash256,
+    /// Absolute path to the immutable candidate payload.
+    pub artifact_path: PathBuf,
+    /// RFC3339 creation timestamp.
+    pub created_at: String,
+}
+
 /// Evidence that a deployment backend opened and checked an artifact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactAdmission {
@@ -701,6 +732,9 @@ pub enum SubstrateError {
     /// An artifact ID already has a different append-only record.
     #[error("artifact manifest already exists with different contents: {0}")]
     ArtifactConflict(PathBuf),
+    /// A pending GGUF candidate ID already has a different immutable record.
+    #[error("GGUF candidate manifest already exists with different contents: {0}")]
+    CandidateConflict(PathBuf),
     /// Artifact identity fields contradict each other.
     #[error("invalid artifact manifest: {0}")]
     InvalidArtifactManifest(String),

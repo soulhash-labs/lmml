@@ -28,6 +28,17 @@ impl GgufAdmissionProvider for LlamaServerAdmission {
 }
 
 async fn validate_derived_gguf(artifact: &Path, server: Option<&Path>) -> Result<(), String> {
+    validate_gguf_structure(artifact).await?;
+    let server = server
+        .map(PathBuf::from)
+        .unwrap_or_else(default_server_path);
+    if !server.is_file() {
+        return Err(format!("llama-server not found: {}", server.display()));
+    }
+    admit_with_server(artifact, &server).await
+}
+
+pub(super) async fn validate_gguf_structure(artifact: &Path) -> Result<(), String> {
     lmml_substrate::validate_gguf(artifact).map_err(|error| error.to_string())?;
     let metadata = lmml_models::parse_gguf_metadata(artifact)
         .await
@@ -35,12 +46,10 @@ async fn validate_derived_gguf(artifact: &Path, server: Option<&Path>) -> Result
     if metadata.tensor_count == 0 || metadata.architecture.is_none() {
         return Err("GGUF metadata is incomplete: tensor count or architecture missing".into());
     }
-    let server = server
-        .map(PathBuf::from)
-        .unwrap_or_else(default_server_path);
-    if !server.is_file() {
-        return Err(format!("llama-server not found: {}", server.display()));
-    }
+    Ok(())
+}
+
+async fn admit_with_server(artifact: &Path, server: &Path) -> Result<(), String> {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
         .map_err(|error| format!("could not allocate validation port: {error}"))?;
     let port = listener
@@ -48,7 +57,7 @@ async fn validate_derived_gguf(artifact: &Path, server: Option<&Path>) -> Result
         .map_err(|error| error.to_string())?
         .port();
     drop(listener);
-    let mut child = Command::new(&server)
+    let mut child = Command::new(server)
         .args([
             "-m",
             artifact.to_string_lossy().as_ref(),

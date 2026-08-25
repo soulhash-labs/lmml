@@ -8,8 +8,9 @@ use serde_json::Value;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 use crate::{
-    read_required, sha256_bytes, tokenizer_hash_from_records, ArtifactManifest, Hash256,
-    ModelRepresentation, SubstrateError, SubstrateManifest, SCHEMA_VERSION,
+    read_required, sha256_bytes, tokenizer_hash_from_records, ArtifactManifest,
+    GgufCandidateManifest, Hash256, ModelRepresentation, SubstrateError, SubstrateManifest,
+    SCHEMA_VERSION,
 };
 
 /// Serialize a manifest in stable, human-readable JSON.
@@ -38,6 +39,16 @@ pub fn parse_artifact_manifest_json(payload: &str) -> Result<ArtifactManifest, S
     let manifest: ArtifactManifest =
         serde_json::from_str(payload).map_err(SubstrateError::ManifestJson)?;
     validate_artifact_manifest(&manifest)?;
+    Ok(manifest)
+}
+
+/// Parse and validate a pending GGUF candidate manifest.
+pub fn parse_gguf_candidate_manifest_json(
+    payload: &str,
+) -> Result<GgufCandidateManifest, SubstrateError> {
+    let manifest: GgufCandidateManifest =
+        serde_json::from_str(payload).map_err(SubstrateError::ManifestJson)?;
+    validate_gguf_candidate_manifest(&manifest)?;
     Ok(manifest)
 }
 
@@ -72,6 +83,23 @@ pub fn append_artifact_manifest(
     let path = root.join(format!("{}.json", manifest.artifact.artifact_id));
     let payload = serde_json::to_vec_pretty(manifest).map_err(SubstrateError::Serialize)?;
     persist_immutable(&path, &payload, SubstrateError::ArtifactConflict)?;
+    Ok(path)
+}
+
+/// Persist a pending GGUF candidate without replacing an existing record.
+pub fn append_gguf_candidate_manifest(
+    root: impl AsRef<Path>,
+    manifest: &GgufCandidateManifest,
+) -> Result<PathBuf, SubstrateError> {
+    validate_gguf_candidate_manifest(manifest)?;
+    let root = root.as_ref();
+    fs::create_dir_all(root).map_err(|source| SubstrateError::Io {
+        path: root.to_path_buf(),
+        source,
+    })?;
+    let path = root.join(format!("{}.json", manifest.artifact.artifact_id));
+    let payload = serde_json::to_vec_pretty(manifest).map_err(SubstrateError::Serialize)?;
+    persist_immutable(&path, &payload, SubstrateError::CandidateConflict)?;
     Ok(path)
 }
 
@@ -261,6 +289,56 @@ pub(crate) fn validate_artifact_manifest(
     {
         return Err(SubstrateError::InvalidArtifactManifest(
             "Safetensors artifacts cannot declare GGUF quantization".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_gguf_candidate_manifest(
+    manifest: &GgufCandidateManifest,
+) -> Result<(), SubstrateError> {
+    validate_schema_version(manifest.schema_version)?;
+    validate_identifier(&manifest.artifact.artifact_id)?;
+    validate_identifier(&manifest.artifact.model_lineage_id)?;
+    validate_identifier(&manifest.parent_artifact)?;
+    if manifest.parent_artifact == manifest.artifact.artifact_id {
+        return Err(SubstrateError::InvalidArtifactManifest(
+            "GGUF candidate cannot be its own parent".to_string(),
+        ));
+    }
+    if manifest.artifact.representation != ModelRepresentation::Gguf
+        || manifest.artifact.quantization.is_none()
+    {
+        return Err(SubstrateError::InvalidArtifactManifest(
+            "GGUF candidate requires GGUF representation and quantization".to_string(),
+        ));
+    }
+    if manifest.canonical_model != manifest.artifact.model_lineage_id {
+        return Err(SubstrateError::InvalidArtifactManifest(
+            "canonical_model must match artifact.model_lineage_id".to_string(),
+        ));
+    }
+    if manifest.output_hash != manifest.artifact.artifact_hash {
+        return Err(SubstrateError::InvalidArtifactManifest(
+            "output_hash must match artifact.artifact_hash".to_string(),
+        ));
+    }
+    if manifest.source_hashes.is_empty() {
+        return Err(SubstrateError::InvalidArtifactManifest(
+            "GGUF candidates require at least one source hash".to_string(),
+        ));
+    }
+    if manifest.tool.trim().is_empty() || manifest.tool_version.trim().is_empty() {
+        return Err(SubstrateError::InvalidArtifactManifest(
+            "tool and tool_version are required".to_string(),
+        ));
+    }
+    OffsetDateTime::parse(&manifest.created_at, &Rfc3339).map_err(|_| {
+        SubstrateError::InvalidArtifactManifest("created_at must be RFC3339".to_string())
+    })?;
+    if !manifest.artifact_path.is_absolute() {
+        return Err(SubstrateError::InvalidArtifactManifest(
+            "artifact_path must be absolute".to_string(),
         ));
     }
     Ok(())

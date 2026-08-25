@@ -259,6 +259,48 @@ async fn complete_quantized_derive_publishes_registers_and_rolls_back_conflicts(
     let admission = RecordingAdmission {
         calls: AtomicUsize::new(0),
     };
+    let pending_output = dir.path().join("qwen38-q8-pending.gguf");
+    let pending = derive_model_with(
+        &manifest_path,
+        &source,
+        &pending_output,
+        "qwen38-q8-pending",
+        QuantizationArg::Q8_0,
+        Some(&converter),
+        Some(&quantizer),
+        Some(&server),
+        "/bin/sh",
+        None,
+        None,
+        true,
+        false,
+        &data_root,
+        &admission,
+    )
+    .await;
+    assert_eq!(pending, 0);
+    assert!(pending_output.is_file());
+    assert!(data_root
+        .join("lmml/models/candidates/qwen38-q8-pending.json")
+        .is_file());
+    assert!(!data_root.join("lmml/models/artifacts").exists());
+    assert_eq!(admission.calls.load(Ordering::SeqCst), 0);
+    let admitted = super::candidate::admit_with(
+        &data_root.join("lmml/models/candidates/qwen38-q8-pending.json"),
+        &manifest_path,
+        &source,
+        Some(&server),
+        false,
+        &data_root,
+        &admission,
+    )
+    .await;
+    assert_eq!(admitted, 0);
+    assert!(data_root
+        .join("lmml/models/artifacts/qwen38-q8-pending.json")
+        .is_file());
+    assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
+
     let output = dir.path().join("qwen38-q8.gguf");
     let result = derive_model_with(
         &manifest_path,
@@ -272,6 +314,7 @@ async fn complete_quantized_derive_publishes_registers_and_rolls_back_conflicts(
         "/bin/sh",
         None,
         None,
+        false,
         false,
         &data_root,
         &admission,
@@ -300,13 +343,14 @@ async fn complete_quantized_derive_publishes_registers_and_rolls_back_conflicts(
         None,
         None,
         false,
+        false,
         &data_root,
         &admission,
     )
     .await;
     assert_eq!(conflict, 1);
     assert!(!conflicting_output.exists());
-    assert_eq!(admission.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(admission.calls.load(Ordering::SeqCst), 3);
 }
 
 #[test]

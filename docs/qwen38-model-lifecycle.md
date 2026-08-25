@@ -62,6 +62,32 @@ lmml model derive \
   --quant q8-0
 ```
 
+When the inference GPU is reserved, conversion can stop at an immutable pending
+candidate. This performs source verification, conversion, quantization, GGUF
+metadata inspection, SHA-256 hashing, and no-clobber publication without loading
+the model or adding it to the runnable artifact catalog:
+
+```sh
+lmml model derive \
+  --manifest ~/.local/share/lmml/models/manifests/qwen38-27b.json \
+  --source /home/angelo/repos/qwen38-safetensors \
+  --output ~/.local/share/lmml/models/candidates/qwen38-27b-bf16.gguf \
+  --artifact-id qwen38-27b-bf16 \
+  --quant bf16 \
+  --defer-admission
+```
+
+After the GPU is available, admit that exact candidate. LMML re-hashes the
+payload, verifies its canonical source, runs the tensor/backend checks, and only
+then creates the runnable artifact record:
+
+```sh
+lmml model admit-artifact \
+  --candidate ~/.local/share/lmml/models/candidates/qwen38-27b-bf16.json \
+  --manifest ~/.local/share/lmml/models/manifests/qwen38-27b.json \
+  --source /home/angelo/repos/qwen38-safetensors
+```
+
 F16/BF16 conversion requires the llama.cpp converter and its Python
 dependencies. Q8_0, Q6_K, and Q4_K_M additionally require `llama-quantize`.
 LMML reports missing tools or unsupported conversion failures without
@@ -94,9 +120,10 @@ Conversion does not receive `/dev/kfd` or `/dev/dri`; GGUF conversion is a CPU
 operation and must not contend with an active GPU workload. The container mounts
 the canonical source read-only and can write only inside a private temporary
 derivation directory.
-The final GGUF is published only after metadata inspection,
-`llama-server --check-tensors` admission, and the 600-second large-model
-startup window.
+An immediately admitted GGUF is published only after metadata inspection,
+`llama-server --check-tensors` admission, and the 600-second large-model startup
+window. A deferred candidate is published under the candidate boundary and
+cannot enter runtime selection before `model admit-artifact` completes.
 
 List the append-only artifact catalog with:
 
@@ -242,9 +269,10 @@ successor gates.
 The schema-v2 managed manifest now exists for the complete canonical checkpoint,
 with canonical hash
 `fe6a79f82e8c830c801ac5b82b0e18c19c0d6c1e5626534431b4424a8161e1d0`.
-`llama-quantize` is built at managed llama.cpp revision `e79e4bf`. The first real
-F16/BF16 GGUF remains pending because this shell lacks Docker socket access to
-the validated converter image. Q8_0, Q6_K, and Q4_K_M depend on that parent GGUF.
+`llama-quantize` is built at managed llama.cpp revision `e79e4bf`. The host now
+has an isolated converter layer using ROCm Torch 2.13, Safetensors 0.8,
+Transformers 5.14, NumPy 2.5, and llama.cpp's local GGUF module. The first real
+F16/BF16 GGUF and its Q8_0, Q6_K, and Q4_K_M derivatives remain to be executed.
 Backend admission and baseline execution are also paused while the R9700 is in
 use. These pending executions do not weaken the catalog: no derivative is marked
 usable until metadata, tensor, backend, hash, and lineage gates pass. No partial

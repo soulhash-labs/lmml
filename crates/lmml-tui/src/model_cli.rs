@@ -96,6 +96,27 @@ pub(crate) enum ModelCommand {
         /// Image used with --rocm-container. Defaults to LMML's validated ROCm image.
         #[arg(long)]
         rocm_image: Option<String>,
+        /// Publish an immutable candidate without loading it in llama.cpp.
+        #[arg(long)]
+        defer_admission: bool,
+        /// Emit the artifact manifest as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Admit a pending GGUF candidate and register it in the runnable artifact DAG.
+    AdmitArtifact {
+        /// Immutable pending candidate manifest.
+        #[arg(long)]
+        candidate: PathBuf,
+        /// Canonical substrate manifest JSON.
+        #[arg(long)]
+        manifest: PathBuf,
+        /// Canonical Safetensors directory.
+        #[arg(long)]
+        source: PathBuf,
+        /// Path to llama-server used for tensor and backend admission.
+        #[arg(long)]
+        server: Option<PathBuf>,
         /// Emit the artifact manifest as JSON.
         #[arg(long)]
         json: bool,
@@ -259,6 +280,7 @@ pub(crate) async fn run(command: ModelCommand) -> i32 {
             python,
             rocm_container,
             rocm_image,
+            defer_admission,
             json,
         } => {
             derive_model(
@@ -273,7 +295,25 @@ pub(crate) async fn run(command: ModelCommand) -> i32 {
                 &python,
                 rocm_container.as_deref(),
                 rocm_image.as_deref(),
+                defer_admission,
                 json,
+            )
+            .await
+        }
+        ModelCommand::AdmitArtifact {
+            candidate,
+            manifest,
+            source,
+            server,
+            json,
+        } => {
+            derive::admit_candidate(
+                &candidate,
+                &manifest,
+                &source,
+                server.as_deref(),
+                json,
+                &managed_data_root(),
             )
             .await
         }

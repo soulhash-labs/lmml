@@ -8,18 +8,39 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
-use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 mod admission;
+mod candidate;
 mod container;
+mod manifest;
 
-use admission::{GgufAdmissionProvider, LlamaServerAdmission};
+use admission::{validate_gguf_structure, GgufAdmissionProvider, LlamaServerAdmission};
 use container::{build_converter_command, inspect_rocm_container};
+use manifest::{artifact_manifest, canonical_source_artifact, ensure_source_artifact, timestamp};
 
 const DEFAULT_ROCM_CONVERSION_IMAGE: &str =
     "rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.9.1";
+
+pub(super) async fn admit_candidate(
+    candidate_path: &Path,
+    substrate_path: &Path,
+    source: &Path,
+    server: Option<&Path>,
+    json: bool,
+    data_root: &Path,
+) -> i32 {
+    candidate::admit(
+        candidate_path,
+        substrate_path,
+        source,
+        server,
+        json,
+        data_root,
+    )
+    .await
+}
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
 pub(crate) enum QuantizationArg {
@@ -81,6 +102,7 @@ pub(super) async fn derive_model(
     python: &str,
     rocm_container: Option<&Path>,
     rocm_image: Option<&str>,
+    defer_admission: bool,
     json: bool,
 ) -> i32 {
     derive_model_with(
@@ -95,6 +117,7 @@ pub(super) async fn derive_model(
         python,
         rocm_container,
         rocm_image,
+        defer_admission,
         json,
         &managed_data_root(),
         &LlamaServerAdmission,
@@ -115,6 +138,7 @@ async fn derive_model_with<A: GgufAdmissionProvider>(
     python: &str,
     rocm_container: Option<&Path>,
     rocm_image: Option<&str>,
+    defer_admission: bool,
     json: bool,
     data_root: &Path,
     admission: &A,
@@ -297,11 +321,8 @@ async fn derive_model_with<A: GgufAdmissionProvider>(
         }
     }
 
-    let server_path = server
-        .map(PathBuf::from)
-        .unwrap_or_else(default_server_path);
-    if let Err(error) = admission.admit(&output_temp, &server_path).await {
-        eprintln!("model derive failed post-conversion validation: {error}");
+    if let Err(error) = validate_gguf_structure(&output_temp).await {
+        eprintln!("model derive failed structural GGUF validation: {error}");
         return 1;
     }
     let artifact_hash = match lmml_substrate::sha256_file(&output_temp) {
@@ -312,26 +333,6 @@ async fn derive_model_with<A: GgufAdmissionProvider>(
         }
     };
     let source_artifact_id = format!("{}-safetensors", substrate.model.lineage_id);
-    let source_artifact = match artifact_manifest(
-        &source_artifact_id,
-        &substrate.model.lineage_id,
-        lmml_substrate::ModelRepresentation::Safetensors,
-        None,
-        substrate.model.canonical_manifest_hash.clone(),
-        None,
-        "lmml-canonical",
-        "2",
-        vec![substrate.model.canonical_manifest_hash.clone()],
-        vec!["canonical_manifest".into()],
-        source,
-        None,
-    ) {
-        Ok(manifest) => manifest,
-        Err(error) => {
-            eprintln!("could not create source artifact manifest: {error}");
-            return 1;
-        }
-    };
     let host_converter_revision =
         git_revision(converter.parent().unwrap_or_else(|| Path::new("."))).await;
     let quantizer_provenance = if quant.is_quantized() {
@@ -375,14 +376,44 @@ async fn derive_model_with<A: GgufAdmissionProvider>(
             command_version(python).await
         )
     };
+    let conversion_tool_version =
+        format!("{converter_provenance}; {quantizer_provenance}; {python_provenance}");
+    if defer_admission {
+        return candidate::record(
+            candidate::RecordOptions {
+                output_temp: &output_temp,
+                output,
+                artifact_id,
+                lineage_id: &substrate.model.lineage_id,
+                parent_artifact: &source_artifact_id,
+                quantization: quant.kind(),
+                artifact_hash,
+                source_hash: substrate.model.canonical_manifest_hash.clone(),
+                tool_version: &conversion_tool_version,
+                command_or_parameters: command_parameters,
+                json,
+            },
+            data_root,
+        );
+    }
+    let server_path = server
+        .map(PathBuf::from)
+        .unwrap_or_else(default_server_path);
+    if let Err(error) = admission.admit(&output_temp, &server_path).await {
+        eprintln!("model derive failed post-conversion admission: {error}");
+        return 1;
+    }
+    let source_artifact = match canonical_source_artifact(&substrate, source) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            eprintln!("could not create source artifact manifest: {error}");
+            return 1;
+        }
+    };
     let server_version = tool_version(&server_path).await;
     let tool_version = format!(
-        "{}; {}; {}; server_path={}; server_version={}",
-        converter_provenance,
-        quantizer_provenance,
-        python_provenance,
-        server_path.display(),
-        server_version,
+        "{conversion_tool_version}; server_path={}; server_version={server_version}",
+        server_path.display()
     );
     let admitted_at = match timestamp() {
         Ok(timestamp) => timestamp,
@@ -484,64 +515,6 @@ fn build_quantizer_args(
     ]
 }
 
-fn ensure_source_artifact(
-    root: &Path,
-    expected: &lmml_substrate::ArtifactManifest,
-) -> Result<PathBuf, lmml_substrate::SubstrateError> {
-    let path = root.join(format!("{}.json", expected.artifact.artifact_id));
-    match read_matching_source_artifact(&path, expected)? {
-        Some(path) => Ok(path),
-        None => match lmml_substrate::append_artifact_manifest(root, expected) {
-            Ok(path) => Ok(path),
-            Err(lmml_substrate::SubstrateError::ArtifactConflict(_)) => {
-                read_matching_source_artifact(&path, expected)?
-                    .ok_or(lmml_substrate::SubstrateError::ArtifactConflict(path))
-            }
-            Err(error) => Err(error),
-        },
-    }
-}
-
-fn read_matching_source_artifact(
-    path: &Path,
-    expected: &lmml_substrate::ArtifactManifest,
-) -> Result<Option<PathBuf>, lmml_substrate::SubstrateError> {
-    let payload = match fs::read(path) {
-        Ok(payload) => payload,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => {
-            return Err(lmml_substrate::SubstrateError::Io {
-                path: path.to_path_buf(),
-                source,
-            });
-        }
-    };
-    let payload = String::from_utf8(payload).map_err(|error| {
-        lmml_substrate::SubstrateError::InvalidArtifactManifest(format!(
-            "artifact manifest is not UTF-8: {error}"
-        ))
-    })?;
-    let existing = lmml_substrate::parse_artifact_manifest_json(&payload)?;
-    let matches = existing.schema_version == expected.schema_version
-        && existing.artifact == expected.artifact
-        && existing.parent_artifact == expected.parent_artifact
-        && existing.canonical_model == expected.canonical_model
-        && existing.tool == expected.tool
-        && existing.tool_version == expected.tool_version
-        && existing.command_or_parameters == expected.command_or_parameters
-        && existing.source_hashes == expected.source_hashes
-        && existing.output_hash == expected.output_hash
-        && existing.artifact_path == expected.artifact_path
-        && existing.admission == expected.admission;
-    if matches {
-        Ok(Some(path.to_path_buf()))
-    } else {
-        Err(lmml_substrate::SubstrateError::ArtifactConflict(
-            path.to_path_buf(),
-        ))
-    }
-}
-
 fn require_admitted_successor(
     substrate: &lmml_substrate::SubstrateManifest,
     data_root: &Path,
@@ -573,59 +546,6 @@ fn require_admitted_successor(
         ));
     }
     Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn artifact_manifest(
-    artifact_id: &str,
-    lineage_id: &str,
-    representation: lmml_substrate::ModelRepresentation,
-    quantization: Option<lmml_substrate::QuantizationKind>,
-    artifact_hash: lmml_substrate::Hash256,
-    parent_artifact: Option<String>,
-    tool: &str,
-    tool_version: &str,
-    source_hashes: Vec<lmml_substrate::Hash256>,
-    command_or_parameters: Vec<String>,
-    artifact_path: &Path,
-    admission: Option<lmml_substrate::ArtifactAdmission>,
-) -> Result<lmml_substrate::ArtifactManifest, String> {
-    Ok(lmml_substrate::ArtifactManifest {
-        schema_version: lmml_substrate::SCHEMA_VERSION,
-        artifact: lmml_substrate::ArtifactIdentity {
-            artifact_id: artifact_id.to_string(),
-            model_lineage_id: lineage_id.to_string(),
-            representation,
-            quantization,
-            artifact_hash: artifact_hash.clone(),
-        },
-        parent_artifact,
-        canonical_model: lineage_id.to_string(),
-        tool: tool.to_string(),
-        tool_version: tool_version.to_string(),
-        command_or_parameters,
-        source_hashes,
-        output_hash: artifact_hash,
-        artifact_path: absolute_path(artifact_path)?,
-        admission,
-        created_at: timestamp()?,
-    })
-}
-
-fn absolute_path(path: &Path) -> Result<PathBuf, String> {
-    if path.is_absolute() {
-        Ok(path.to_path_buf())
-    } else {
-        std::env::current_dir()
-            .map(|root| root.join(path))
-            .map_err(|error| format!("could not resolve {}: {error}", path.display()))
-    }
-}
-
-fn timestamp() -> Result<String, String> {
-    OffsetDateTime::now_utc()
-        .format(&Rfc3339)
-        .map_err(|error| error.to_string())
 }
 
 struct ProcessResult {
