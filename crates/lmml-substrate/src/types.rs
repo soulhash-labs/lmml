@@ -99,14 +99,19 @@ pub enum ModelRepresentation {
 #[allow(non_camel_case_types)]
 pub enum QuantizationKind {
     /// F16 artifact.
+    #[serde(rename = "f16")]
     F16,
     /// BF16 artifact.
+    #[serde(rename = "bf16")]
     Bf16,
     /// Q8_0 artifact.
+    #[serde(rename = "q8_0")]
     Q8_0,
     /// Q6_K artifact.
+    #[serde(rename = "q6_k", alias = "q6__k")]
     Q6_K,
     /// Q4_K_M artifact.
+    #[serde(rename = "q4_k_m", alias = "q4__k__m")]
     Q4_K_M,
 }
 

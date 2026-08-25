@@ -854,6 +854,26 @@ mod tests {
     }
 
     #[test]
+    fn quantization_labels_are_stable_and_accept_initial_candidate_aliases() {
+        assert_eq!(
+            serde_json::to_string(&QuantizationKind::Q6_K).expect("serialize Q6_K"),
+            "\"q6_k\""
+        );
+        assert_eq!(
+            serde_json::to_string(&QuantizationKind::Q4_K_M).expect("serialize Q4_K_M"),
+            "\"q4_k_m\""
+        );
+        assert_eq!(
+            serde_json::from_str::<QuantizationKind>("\"q6__k\"").expect("legacy Q6_K"),
+            QuantizationKind::Q6_K
+        );
+        assert_eq!(
+            serde_json::from_str::<QuantizationKind>("\"q4__k__m\"").expect("legacy Q4_K_M"),
+            QuantizationKind::Q4_K_M
+        );
+    }
+
+    #[test]
     fn llama_cpp_tap_provider_can_return_explicit_unsupported() {
         let provider = LlamaCppActivationProvider;
         assert_eq!(

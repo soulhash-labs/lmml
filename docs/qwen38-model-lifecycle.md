@@ -269,14 +269,26 @@ successor gates.
 The schema-v2 managed manifest now exists for the complete canonical checkpoint,
 with canonical hash
 `fe6a79f82e8c830c801ac5b82b0e18c19c0d6c1e5626534431b4424a8161e1d0`.
-`llama-quantize` is built at managed llama.cpp revision `e79e4bf`. The host now
-has an isolated converter layer using ROCm Torch 2.13, Safetensors 0.8,
-Transformers 5.14, NumPy 2.5, and llama.cpp's local GGUF module. The first real
-F16/BF16 GGUF and its Q8_0, Q6_K, and Q4_K_M derivatives remain to be executed.
-Backend admission and baseline execution are also paused while the R9700 is in
-use. These pending executions do not weaken the catalog: no derivative is marked
-usable until metadata, tensor, backend, hash, and lineage gates pass. No partial
-download is eligible for conversion, and no Qwen3.5 asset is used as a fallback.
+`llama-quantize` is built at managed llama.cpp revision `e79e4bf`. The host uses
+an isolated converter layer with ROCm Torch 2.13, Safetensors 0.8, Transformers
+5.14, NumPy 2.5, and llama.cpp's local GGUF module.
+
+The first real CPU-side candidate set completed on 2026-08-26:
+
+| Candidate | Bytes | SHA-256 |
+|---|---:|---|
+| BF16 | 54,657,735,808 | `cf3123616fbf0178a3abe3b58a438ca6d0e0088c19e0cafe57009408a496d86e` |
+| Q8_0 | 29,047,086,208 | `f60d5f08ef1524a8aee53f02aa9c19d47b276524de004440dcb3c613bfafcb7a` |
+| Q6_K | 22,431,001,728 | `15bba9deafd3454e5f48b7c2829e6715fa3c966d6297985ccb30444c675367ad` |
+| Q4_K_M | 16,810,716,288 | `9d02bb6e73b840330600e6839f6dc32a1fb0df4c01665bdee567c7781717e9c8` |
+
+Each manifest binds the candidate to canonical source hash
+`fe6a79f82e8c830c801ac5b82b0e18c19c0d6c1e5626534431b4424a8161e1d0`
+and llama.cpp revision `e79e4bf660e19f2ad851e06c6913f7a8c5852621`. Backend
+admission and baseline execution remain paused while the R9700 is in use. No
+candidate is marked usable until metadata, tensor, backend, hash, and lineage
+gates pass. No partial download is eligible for conversion, and no Qwen3.5 asset
+is used as a fallback.
 
 ## Record examples
 
