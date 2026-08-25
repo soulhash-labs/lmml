@@ -1080,6 +1080,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "lmml-substrate"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "time",
+]
+
+[[package]]
 name = "lmml-tui"
 version = "0.1.0"
 dependencies = [
@@ -1093,11 +1105,15 @@ dependencies = [
  "lmml-models",
  "lmml-server",
  "lmml-state",
+ "lmml-substrate",
  "pretty_assertions",
  "ratatui",
+ "reqwest",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror",
+ "time",
  "tokio",
  "tracing",
  "tracing-appender",
@@ -1705,6 +1721,16 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "digest",
+ "sha2-asm",
+]
+
+[[package]]
+name = "sha2-asm"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b845214d6175804686b2bd482bcffe96651bb2d1200742b712003504a2dac1ab"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

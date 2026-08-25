@@ -9,6 +9,7 @@ members = [
     "crates/lmml-models",
     "crates/lmml-server",
     "crates/lmml-state",
+    "crates/lmml-substrate",
     "crates/lmml-tui",
 ]
 default-members = ["crates/lmml-tui"]

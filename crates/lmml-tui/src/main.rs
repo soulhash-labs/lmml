@@ -20,6 +20,8 @@ use lmml_tui::tabs;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::EnvFilter;
 
+mod lifecycle_runtime_cli;
+mod model_cli;
 mod ocr_cli;
 
 #[derive(Debug, Parser)]
@@ -98,6 +100,11 @@ enum Command {
         #[command(subcommand)]
         command: RuntimeCommand,
     },
+    /// Import and verify canonical model substrates and their manifests.
+    Model {
+        #[command(subcommand)]
+        command: model_cli::ModelCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -159,6 +166,56 @@ enum RuntimeCommand {
         /// Source for OpenCode's top-level small_model routing.
         #[arg(long, default_value = "lmml")]
         small_model_source: RoutingSourceArg,
+    },
+    /// Register a live local llama.cpp process against an admitted artifact.
+    Register {
+        /// Stable runtime identifier.
+        #[arg(long)]
+        runtime_id: String,
+        /// Exact admitted artifact identifier.
+        #[arg(long)]
+        artifact_id: String,
+        /// PID of the local llama.cpp process.
+        #[arg(long)]
+        pid: u32,
+        /// Runtime endpoint granted to clients.
+        #[arg(long)]
+        endpoint: String,
+        /// Exact llama.cpp version or revision.
+        #[arg(long)]
+        backend_version: String,
+        /// Active context size.
+        #[arg(long)]
+        context_size: usize,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Request a capability lease without exposing an artifact path.
+    Request {
+        /// Conceptual model lineage.
+        #[arg(long)]
+        lineage_id: String,
+        /// Workload purpose recorded in the request.
+        #[arg(long)]
+        purpose: String,
+        /// Required runtime capabilities.
+        #[arg(long, value_enum, default_value = "text-generation")]
+        capability: Vec<lifecycle_runtime_cli::CapabilityArg>,
+        /// Stable lease identifier.
+        #[arg(long)]
+        lease_id: String,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect a persisted runtime manifest or model lease.
+    Inspect {
+        /// Runtime or lease manifest path.
+        manifest: PathBuf,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -267,6 +324,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Command::Runtime { command }) => {
             let code = run_runtime(command).await;
+            std::process::exit(code);
+        }
+        Some(Command::Model { command }) => {
+            let code = model_cli::run(command).await;
             std::process::exit(code);
         }
         None => {}
@@ -562,6 +623,39 @@ async fn run_runtime(command: RuntimeCommand) -> i32 {
                     },
                 },
             )
+        }
+        RuntimeCommand::Register {
+            runtime_id,
+            artifact_id,
+            pid,
+            endpoint,
+            backend_version,
+            context_size,
+            json,
+        } => {
+            lifecycle_runtime_cli::register(lifecycle_runtime_cli::RegisterOptions {
+                runtime_id: &runtime_id,
+                artifact_id: &artifact_id,
+                pid,
+                endpoint: &endpoint,
+                backend_version: &backend_version,
+                context_size,
+                json,
+            })
+            .await
+        }
+        RuntimeCommand::Request {
+            lineage_id,
+            purpose,
+            capability,
+            lease_id,
+            json,
+        } => {
+            lifecycle_runtime_cli::request(&lineage_id, &purpose, &capability, &lease_id, json)
+                .await
+        }
+        RuntimeCommand::Inspect { manifest, json } => {
+            lifecycle_runtime_cli::inspect(&manifest, json)
         }
     }
 }

@@ -1,0 +1,14 @@
+[
+  {
+    "case_id": "identity",
+    "prompt": "State your model family in one sentence."
+  },
+  {
+    "case_id": "arithmetic",
+    "prompt": "Return only the result of 37 * 19."
+  },
+  {
+    "case_id": "deterministic-code",
+    "prompt": "Return only a Rust function named add that adds two i32 values."
+  }
+]
