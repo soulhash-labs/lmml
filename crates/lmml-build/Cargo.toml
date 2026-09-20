@@ -7,6 +7,7 @@ license = "Apache-2.0"
 repository = "https://github.com/soulhash-labs/lmml"
 
 [dependencies]
+lmml-compat = { path = "../lmml-compat" }
 lmml-detect = { path = "../lmml-detect" }
 libc = "0.2"
 sha2 = "0.10"

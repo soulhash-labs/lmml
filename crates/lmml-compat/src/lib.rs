@@ -9,7 +9,46 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+/// Trusted llama.cpp runtime implementation selected for a GGUF model.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LlamaRuntimeFlavor {
+    /// The normal ggml-org/llama.cpp runtime.
+    #[default]
+    Upstream,
+    /// The isolated PrismML fork required by Prism tensor formats.
+    Prism,
+}
+
+impl LlamaRuntimeFlavor {
+    /// Return the canonical trusted source repository for this runtime.
+    pub const fn repository_url(self) -> &'static str {
+        match self {
+            Self::Upstream => "https://github.com/ggml-org/llama.cpp.git",
+            Self::Prism => "https://github.com/PrismML-Eng/llama.cpp.git",
+        }
+    }
+
+    /// Return the initial source ref LMML trusts for this runtime.
+    pub const fn initial_ref(self) -> Option<&'static str> {
+        match self {
+            Self::Upstream => None,
+            Self::Prism => Some("d8f26eec76da6d09bb708bcba51ef64b8cd868a3"),
+        }
+    }
+}
+
+impl std::fmt::Display for LlamaRuntimeFlavor {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Upstream => formatter.write_str("upstream"),
+            Self::Prism => formatter.write_str("prism"),
+        }
+    }
+}
 
 /// Result of running a command through a [`CommandRunner`].
 #[derive(Debug, Clone, PartialEq, Eq)]

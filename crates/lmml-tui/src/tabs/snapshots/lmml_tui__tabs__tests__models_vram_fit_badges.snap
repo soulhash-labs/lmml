@@ -1,6 +1,5 @@
 ---
 source: crates/lmml-tui/src/tabs/mod.rs
-assertion_line: 333
 expression: render_app(&app)
 ---
 "┌lmml────────────────────────────────────────────────────────────────────────────────────────────────────────┐"
@@ -12,14 +11,14 @@ expression: render_app(&app)
 "│Press a to add a model alias. Press x to delete ││Runtime profile: custom/global                            │"
 "│Press p to switch selected model runtime profile││Size: 3.8 GB                                              │"
 "│Models dir: $HOME/.local/share/lmml/model││Quant: Q4_K_M                                             │"
+"│                                                ││Required runtime: upstream                                │"
+"│> mistral-7b-Q4_K_M.gguf  3.8 GB  Q4_K_M  fits (││Tensor type IDs: none detected                            │"
 "│                                                ││Architecture: llama                                       │"
-"│> mistral-7b-Q4_K_M.gguf  3.8 GB  Q4_K_M  fits (││Context: 4096                                             │"
+"│                                                ││Context: 4096                                             │"
 "│                                                ││Alias: false                                              │"
 "│                                                ││VRAM: fits (19897 MB free)                                │"
 "│                                                ││Recommended ngl: -1                                       │"
-"│                                                ││                                                          │"
-"│                                                ││                                                          │"
-"│                                                ││                                                          │"
+"│                                                ││Runtime binary: $HOME/.local/share/lmml/llama.cpp/b│"
 "│                                                ││                                                          │"
 "│                                                ││                                                          │"
 "│                                                ││                                                          │"

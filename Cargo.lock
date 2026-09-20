@@ -969,6 +969,7 @@ name = "lmml-build"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "lmml-compat",
  "lmml-detect",
  "sha2",
  "tempfile",
@@ -981,6 +982,7 @@ dependencies = [
 name = "lmml-compat"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "thiserror",
  "tokio",
  "tracing",
@@ -1002,6 +1004,7 @@ dependencies = [
 name = "lmml-models"
 version = "0.1.0"
 dependencies = [
+ "lmml-compat",
  "lmml-detect",
  "reqwest",
  "serde",
@@ -1062,6 +1065,7 @@ dependencies = [
  "lmml-models",
  "pretty_assertions",
  "reqwest",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
@@ -1072,6 +1076,7 @@ dependencies = [
 name = "lmml-state"
 version = "0.1.0"
 dependencies = [
+ "lmml-compat",
  "pretty_assertions",
  "serde",
  "tempfile",

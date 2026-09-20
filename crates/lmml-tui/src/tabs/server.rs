@@ -13,11 +13,16 @@ pub fn render(area: Rect, app: &App, frame: &mut Frame) {
         ServerStatus::Starting { .. } | ServerStatus::Ready { .. } => "Press s to stop server.",
     };
     let selected_model = app.selected_server_model();
-    let model = selected_model
+    let displayed_model = app
+        .active_server_model
+        .as_ref()
+        .cloned()
+        .or_else(|| selected_model.clone());
+    let model = displayed_model
         .as_ref()
         .map(|model| model.path.display().to_string())
         .unwrap_or_else(|| "No model selected".to_string());
-    let profile = selected_model
+    let profile = displayed_model
         .as_ref()
         .and_then(|model| {
             app.state
@@ -27,13 +32,41 @@ pub fn render(area: Rect, app: &App, frame: &mut Frame) {
         })
         .unwrap_or_else(|| "custom/global".to_string());
     let gpu_layers = app.server_gpu_layers_label(selected_model.as_ref());
+    let runtime_flavor = app.active_runtime_flavor.or_else(|| {
+        displayed_model
+            .as_ref()
+            .and_then(|model| model.runtime.flavor())
+    });
+    let runtime_binary = app
+        .active_runtime_binary
+        .as_deref()
+        .or_else(|| runtime_flavor.map(|flavor| app.state.build.runtime_binary(flavor)))
+        .unwrap_or(&app.state.build.binary);
+    let runtime_commit = runtime_flavor
+        .map(|flavor| app.state.build.runtime_commit(flavor))
+        .filter(|commit| !commit.is_empty())
+        .unwrap_or("unknown");
     let left = vec![
         Line::from(action),
         Line::from("Press p to switch runtime profile."),
         Line::from(format!("Status: {:?}", app.server_status)),
         Line::from(format!("Profile: {profile}")),
-        Line::from(format!("Model: {model}")),
-        Line::from(format!("Binary: {}", app.state.build.binary.display())),
+        Line::from(format!(
+            "{}: {model}",
+            if app.active_server_model.is_some() {
+                "Last ready model"
+            } else {
+                "Selected model"
+            }
+        )),
+        Line::from(format!(
+            "Runtime: {}",
+            runtime_flavor
+                .map(|flavor| flavor.to_string())
+                .unwrap_or_else(|| "not resolved".to_string())
+        )),
+        Line::from(format!("Runtime commit: {runtime_commit}")),
+        Line::from(format!("Binary: {}", runtime_binary.display())),
         Line::from(format!("Host: {}", app.state.server.host)),
         Line::from(format!("Port: {}", app.state.server.port)),
         Line::from(format!("Context: {}", app.state.server.ctx_size)),

@@ -5,10 +5,9 @@ managed `llama-server` profiles, OpenAI-compatible coding harnesses such as
 OpenCode and Continue, and Anthropic Messages clients routed through
 `lmml-node`.
 
-Current status: planned Phase 11 contract. Some fields already exist in the v2
-state schema and `lmml-compat`; others are explicit implementation tasks.
-Do not describe the whole contract as shipped until the matching todo items and
-tests are complete.
+Current status: the core process lifecycle, single-server OpenCode patching,
+GGUF runtime preflight, and isolated upstream/Prism build state are implemented.
+Profile-schema extensions and the Prism hardware acceptance test remain open.
 
 ## Topology
 
@@ -25,12 +24,11 @@ Claude Code -> lmml-node /v1/messages -> llama-server /v1/chat/completions
 responses, synthesized SSE responses, and Anthropic-shaped errors. Raw
 `llama-server` remains OpenAI-compatible; it does not own `/v1/messages`.
 
-Default OpenCode provider targets:
+Canonical OpenCode provider target:
 
 | Profile | Port | Purpose |
 |---|---:|---|
-| `opencode` | `1200` | primary/full coding-agent runtime |
-| `opencode-fast` | `1200` | secondary fast/small lane using the active TUI server by default |
+| `opencode` | `1200` | sole local coding-agent runtime |
 
 Each provider lane declares:
 
@@ -43,6 +41,26 @@ Each provider lane declares:
 Ports are static because harness config files store base URLs. lmml must detect
 port conflicts and fail clearly rather than silently choosing a new port.
 
+## Runtime Flavor Selection
+
+`runtime_selection = "auto"` inspects the selected GGUF before spawn. Standard
+tensor IDs select upstream llama.cpp. Tensor IDs `142`/`143` or
+`prism.hadamard.*` metadata select the isolated Prism runtime. Unknown tensor
+IDs fail before the current server is stopped.
+
+Operators can set `build_runtime` to `prism` in Settings and build that flavor
+without changing the `runtime_selection = "auto"` launch policy. The initial
+trusted Prism source is pinned to commit
+`d8f26eec76da6d09bb708bcba51ef64b8cd868a3`; its checkout lives below
+`~/.local/share/lmml/runtimes/prism/llama.cpp`. Build verification checks the
+Prism tensor registry and rejects `libggml`, `libllama`, or `libmtmd` resolved
+outside that build tree.
+
+The first unprofiled Prism launch is capped at 32K context with one slot, flash
+attention, Jinja, temperature `1.0`, top-p `0.95`, and top-k `20`. A dedicated
+model runtime profile can replace those initial safeguards after hardware
+acceptance.
+
 Current workstation-proven OpenCode route:
 
 ```text
@@ -54,8 +72,10 @@ practical single-agent input target: 80000-90000 tokens
 hard reject/compress threshold: 96000-100000 tokens
 ```
 
-Both OpenCode provider lanes should target the active TUI-managed `1200` server
-by default.
+OpenCode uses one provider named `llamacpp`. Both `model` and `small_model`
+refer to the model served by the active TUI-managed server on port `1200`.
+`llamacpp_fast` is emitted only in explicit dual-managed mode with a real second
+runtime and model.
 
 ## Profile Schema Target
 
@@ -243,12 +263,12 @@ GTX 1080 Ti with about 2.4 GiB VRAM free after load. The server reported
 validated 256k profile should use prompt cache/checkpoints and leave
 `cache_reuse = 0`.
 
-The active OpenCode route for this profile is `http://127.0.0.1:1200/v1` for
-both `llamacpp` and `llamacpp_fast`. The active top-level model keys are:
+The active OpenCode route for this profile is `http://127.0.0.1:1200/v1`.
+The active top-level model keys are:
 
 ```text
 model:       llamacpp/Qwen3.5-4B-Q8_0.gguf
-small_model: llamacpp_fast/Qwen3.5-4B-Q8_0.gguf
+small_model: llamacpp/Qwen3.5-4B-Q8_0.gguf
 ```
 
 `opencode.json` alone may not be the whole integration. If a client
@@ -463,6 +483,8 @@ lmml runtime print-config opencode
 lmml runtime configure opencode --dry-run
 lmml runtime configure opencode [--yes] [--force]
 lmml runtime configure opencode --path <file>
+lmml runtime configure opencode --openagent-path <file>
+lmml runtime configure opencode --opencode-only
 lmml runtime configure opencode --rollback <backup-file>
 lmml runtime configure opencode --model-source existing|lmml|none
 lmml runtime configure opencode --small-model-source existing|lmml|none
@@ -686,6 +708,12 @@ Defaults:
 - top-level `model` routing is local-first
 - top-level `small_model` routing is local-first
 - unrelated user config is preserved
+- an existing Oh My OpenAgent config is updated in the same compensating
+  transaction; use `--opencode-only` to opt out
+- non-dry-run local routing requires `/v1/models` to report the selected GGUF
+  before either config file is changed
+- `snapshot`, plugins, instructions, compaction, provider timeout fields, and
+  unrelated providers remain user-owned
 
 Conflict policy:
 
@@ -817,6 +845,8 @@ not be hardcoded to `32768` or `65536`.
 - preserve unrelated user config
 - back up before writing
 - patch lmml-owned providers
+- patch Oh My OpenAgent agent/category routes and sync metadata when installed
+- stage and validate both JSON files before publication, with backups for both
 - local-first routing by default
 - explicit routing flags for preserving cloud model choices
 - write `compaction.reserved` only through the same reviewed configure flow

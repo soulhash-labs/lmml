@@ -18,6 +18,9 @@ The contract separates three concerns:
 | Area | Status |
 |---|---|
 | TUI-managed local `llama-server` | Implemented |
+| Content-based upstream/Prism GGUF selection | Implemented; Prism hardware smoke pending |
+| Single-server OpenCode configuration | Implemented |
+| Transactional OpenCode/Oh My OpenAgent route sync | Implemented through reviewed CLI apply |
 | OpenAI-compatible llama.cpp serving | Implemented through `llama-server` |
 | `lmml-node` health/capabilities/load/models | Implemented |
 | `lmml-node` `/v1/infer` | Implemented |
@@ -113,6 +116,25 @@ Profile rules:
 - `extra_args` are appended after LMML-owned args but should not duplicate them.
 - Model-family overrides must be tied to a specific model/profile, not applied
   globally.
+
+## Runtime Flavors
+
+LMML inspects GGUF contents before it selects a `llama-server` binary:
+
+- tensor types through `42` use upstream `ggml-org/llama.cpp`;
+- tensor types `142` (`PQ2_0`) and `143` (`PTQ1_0`) require the isolated
+  PrismML runtime;
+- `prism.hadamard.*` metadata requires Prism even when tensor IDs are in the
+  upstream range;
+- unknown higher tensor IDs fail preflight and remain visible in the error.
+
+The upstream and Prism source trees, build directories, binaries, commits, and
+fingerprints are separate. `runtime_selection = "auto"` is the normal launch
+policy. An `upstream` override cannot launch a Prism-required model.
+
+LMML requires both `/health` and `/v1/models` to identify the selected GGUF
+before it records a server as ready. This verification does not claim that the
+Prism hardware acceptance test has run.
 
 ## Context Guard
 

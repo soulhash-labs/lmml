@@ -9,6 +9,23 @@ use crate::app::App;
 
 /// Render the llama.cpp build tab.
 pub fn render(area: Rect, app: &App, frame: &mut Frame) {
+    let flavor = app.state.build.selected_build_flavor();
+    let (source_dir, binary, commit, backend, requested_ref) = match flavor {
+        lmml_compat::LlamaRuntimeFlavor::Upstream => (
+            &app.state.build.source_dir,
+            &app.state.build.binary,
+            app.state.build.commit.as_str(),
+            app.state.build.backend.as_str(),
+            "tracking policy",
+        ),
+        lmml_compat::LlamaRuntimeFlavor::Prism => (
+            &app.state.build.prism.source_dir,
+            &app.state.build.prism.binary,
+            app.state.build.prism.commit.as_str(),
+            app.state.build.prism.backend.as_str(),
+            app.state.build.prism.requested_ref.as_str(),
+        ),
+    };
     let update = app
         .update_check
         .as_ref()
@@ -40,8 +57,21 @@ pub fn render(area: Rect, app: &App, frame: &mut Frame) {
         Line::from("Press b to build llama.cpp."),
         Line::from("Press B for a clean build."),
         Line::from("Press u to check for updates."),
-        Line::from(format!("Source: {}", app.state.build.source_dir.display())),
-        Line::from(format!("Backend: {}", app.state.build.backend)),
+        Line::from("Set build_runtime in Settings before building."),
+        Line::from(format!("Runtime: {flavor}")),
+        Line::from(format!("Repository: {}", flavor.repository_url())),
+        Line::from(format!("Requested ref: {requested_ref}")),
+        Line::from(format!(
+            "Resolved commit: {}",
+            if commit.is_empty() {
+                "not built"
+            } else {
+                commit
+            }
+        )),
+        Line::from(format!("Source: {}", source_dir.display())),
+        Line::from(format!("Binary: {}", binary.display())),
+        Line::from(format!("Backend: {backend}")),
         Line::from(format!("sccache: {sccache}")),
         Line::from(format!("Update: {update}")),
     ];

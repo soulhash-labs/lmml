@@ -175,6 +175,12 @@ pub struct BuildState {
     pub last_built: String,
     /// Source tracking mode.
     pub track_mode: TrackMode,
+    /// Runtime selection policy used when launching a GGUF.
+    pub runtime_selection: RuntimeSelectionMode,
+    /// Runtime flavor targeted by the TUI build action.
+    pub build_flavor: lmml_compat::LlamaRuntimeFlavor,
+    /// Isolated Prism runtime build state.
+    pub prism: RuntimeFlavorBuildState,
 }
 
 impl Default for BuildState {
@@ -195,7 +201,129 @@ impl Default for BuildState {
             sccache_used: false,
             last_built: String::new(),
             track_mode: TrackMode::Main,
+            runtime_selection: RuntimeSelectionMode::Auto,
+            build_flavor: lmml_compat::LlamaRuntimeFlavor::Upstream,
+            prism: RuntimeFlavorBuildState::prism_default(&data_dir),
         }
+    }
+}
+
+impl BuildState {
+    /// Return the configured server binary for a runtime flavor.
+    pub fn runtime_binary(&self, flavor: lmml_compat::LlamaRuntimeFlavor) -> &Path {
+        match flavor {
+            lmml_compat::LlamaRuntimeFlavor::Upstream => &self.binary,
+            lmml_compat::LlamaRuntimeFlavor::Prism => &self.prism.binary,
+        }
+    }
+
+    /// Return the recorded source commit for a runtime flavor.
+    pub fn runtime_commit(&self, flavor: lmml_compat::LlamaRuntimeFlavor) -> &str {
+        match flavor {
+            lmml_compat::LlamaRuntimeFlavor::Upstream => &self.commit,
+            lmml_compat::LlamaRuntimeFlavor::Prism => &self.prism.commit,
+        }
+    }
+
+    /// Return the runtime flavor targeted by an explicit TUI build.
+    ///
+    /// Automatic runtime selection remains model-driven at launch time. Builds
+    /// made while selection is `auto` continue to target upstream llama.cpp.
+    pub fn selected_build_flavor(&self) -> lmml_compat::LlamaRuntimeFlavor {
+        self.build_flavor
+    }
+}
+
+/// Operator policy for selecting a llama.cpp runtime.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RuntimeSelectionMode {
+    /// Select the required runtime from GGUF contents.
+    #[default]
+    Auto,
+    /// Require the upstream ggml-org runtime.
+    Upstream,
+    /// Require the isolated PrismML runtime.
+    Prism,
+}
+
+impl RuntimeSelectionMode {
+    /// Return the stable configuration spelling for this selection policy.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Upstream => "upstream",
+            Self::Prism => "prism",
+        }
+    }
+}
+
+impl std::fmt::Display for RuntimeSelectionMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Persisted build identity for an additional isolated runtime flavor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RuntimeFlavorBuildState {
+    /// Trusted canonical source repository.
+    pub source_url: String,
+    /// Requested pinned source ref.
+    pub requested_ref: String,
+    /// Source checkout directory.
+    pub source_dir: PathBuf,
+    /// Built llama-server binary.
+    pub binary: PathBuf,
+    /// Resolved source commit.
+    pub commit: String,
+    /// Hex-encoded CMake fingerprint.
+    pub cmake_hash: String,
+    /// Backend used for the build.
+    pub backend: String,
+    /// CUDA or ROCm architectures used for the build.
+    pub archs: Vec<String>,
+    /// Whether sccache was injected into the last successful build.
+    pub sccache_used: bool,
+    /// Last successful build timestamp.
+    pub last_built: String,
+    /// Last successful verification timestamp.
+    pub last_verified: String,
+}
+
+impl RuntimeFlavorBuildState {
+    fn prism_default(data_dir: &Path) -> Self {
+        let source_dir = data_dir.join("runtimes/prism/llama.cpp");
+        Self {
+            source_url: lmml_compat::LlamaRuntimeFlavor::Prism
+                .repository_url()
+                .to_string(),
+            requested_ref: lmml_compat::LlamaRuntimeFlavor::Prism
+                .initial_ref()
+                .unwrap_or_default()
+                .to_string(),
+            binary: expected_server_binary(&source_dir),
+            source_dir,
+            commit: String::new(),
+            cmake_hash: String::new(),
+            backend: "Auto".to_string(),
+            archs: Vec::new(),
+            sccache_used: false,
+            last_built: String::new(),
+            last_verified: String::new(),
+        }
+    }
+}
+
+impl Default for RuntimeFlavorBuildState {
+    fn default() -> Self {
+        let data_dir = default_data_dir_from_env(
+            env::var_os("XDG_DATA_HOME"),
+            env::var_os("HOME"),
+            env::var_os("USERPROFILE"),
+        );
+        Self::prism_default(&data_dir)
     }
 }
 
@@ -978,6 +1106,8 @@ impl Default for ServerConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RuntimeConfig {
+    /// OpenCode routing mode. Single-server avoids a fake fast route by default.
+    pub mode: OpenCodeRuntimeMode,
     /// Runtime profile used by OpenCode as the primary model.
     pub opencode: RuntimeProfile,
     /// Runtime profile used by OpenCode as the fast/small model.
@@ -1015,11 +1145,23 @@ impl RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
+            mode: OpenCodeRuntimeMode::SingleServer,
             opencode: RuntimeProfile::opencode_default(),
             opencode_fast: RuntimeProfile::opencode_fast_default(),
             state: RuntimeState::default(),
         }
     }
+}
+
+/// OpenCode backend ownership mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OpenCodeRuntimeMode {
+    /// One healthy llama-server backs both full and small model routes.
+    #[default]
+    SingleServer,
+    /// Two independently configured and running managed profiles.
+    DualManaged,
 }
 
 /// Desired state for a managed llama-server profile.
@@ -1053,7 +1195,7 @@ impl RuntimeProfile {
         Self {
             port: 1200,
             ctx_size: 65_536,
-            parallel: 4,
+            parallel: 1,
             ..Self::default()
         }
     }
@@ -1163,6 +1305,10 @@ pub struct RuntimeProfileState {
     pub port: u16,
     /// Last model path served by the profile.
     pub model: PathBuf,
+    /// Runtime flavor used by the live process.
+    pub flavor: lmml_compat::LlamaRuntimeFlavor,
+    /// Exact llama-server binary used by the live process.
+    pub binary: PathBuf,
     /// Log file path for the profile.
     pub log_path: PathBuf,
     /// Start timestamp string.
@@ -1183,6 +1329,8 @@ impl Default for RuntimeProfileState {
             host: String::new(),
             port: 0,
             model: PathBuf::new(),
+            flavor: lmml_compat::LlamaRuntimeFlavor::Upstream,
+            binary: PathBuf::new(),
             log_path: PathBuf::new(),
             started_at: String::new(),
             last_health_at: String::new(),
@@ -1418,9 +1566,25 @@ mod tests {
         assert_eq!(state.server.threads, 8);
         assert!(state.server.flash_attn);
         assert_eq!(state.build.track_mode, TrackMode::Main);
+        assert_eq!(state.build.runtime_selection, RuntimeSelectionMode::Auto);
+        assert_eq!(
+            state.build.build_flavor,
+            lmml_compat::LlamaRuntimeFlavor::Upstream
+        );
+        assert_eq!(
+            state.build.prism.source_url,
+            lmml_compat::LlamaRuntimeFlavor::Prism.repository_url()
+        );
+        assert_eq!(
+            state.build.prism.requested_ref,
+            lmml_compat::LlamaRuntimeFlavor::Prism
+                .initial_ref()
+                .expect("Prism pin")
+        );
         assert_eq!(state.runtime.opencode.port, 1200);
         assert_eq!(state.runtime.opencode.ctx_size, 65_536);
-        assert_eq!(state.runtime.opencode.parallel, 4);
+        assert_eq!(state.runtime.mode, OpenCodeRuntimeMode::SingleServer);
+        assert_eq!(state.runtime.opencode.parallel, 1);
         assert_eq!(state.runtime.opencode_fast.port, 1200);
         assert_eq!(state.runtime.opencode_fast.ctx_size, 32_768);
         assert_eq!(state.runtime.opencode_fast.parallel, 2);
@@ -2107,6 +2271,9 @@ mod tests {
                 sccache_used: true,
                 last_built: "2026-06-01T00:00:00Z".to_string(),
                 track_mode: TrackMode::Tag,
+                runtime_selection: RuntimeSelectionMode::Auto,
+                build_flavor: lmml_compat::LlamaRuntimeFlavor::Upstream,
+                prism: RuntimeFlavorBuildState::default(),
             },
             model: ModelState {
                 last_used: PathBuf::from("/models/mistral.gguf"),
@@ -2153,6 +2320,7 @@ mod tests {
                 extra_args: vec!["--verbose".to_string()],
             },
             runtime: RuntimeConfig {
+                mode: OpenCodeRuntimeMode::DualManaged,
                 opencode: RuntimeProfile {
                     host: "127.0.0.1".to_string(),
                     port: 1200,
@@ -2184,6 +2352,8 @@ mod tests {
                         host: "127.0.0.1".to_string(),
                         port: 1200,
                         model: PathBuf::from("/models/full.gguf"),
+                        flavor: lmml_compat::LlamaRuntimeFlavor::Upstream,
+                        binary: PathBuf::from("/data/lmml/custom/llama-server"),
                         log_path: PathBuf::from("/state/lmml/runtime/opencode.log"),
                         started_at: "2026-06-01T00:00:00Z".to_string(),
                         last_health_at: "2026-06-01T00:00:05Z".to_string(),

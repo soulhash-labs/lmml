@@ -170,6 +170,26 @@ impl ServerManager {
         let started_at = Instant::now();
         match wait_for_ready(&config.host, config.port, startup_timeout).await {
             Ok(url) => {
+                if let Err(error) = verify_served_model(
+                    &config.host,
+                    config.port,
+                    &model.path,
+                    config.api_key.as_deref(),
+                )
+                .await
+                {
+                    tracing::error!(error = %error, "server model identity verification failed");
+                    let child = Arc::new(Mutex::new(Some(child)));
+                    let _ignored = stop_child(child).await;
+                    let reason = error.to_string();
+                    let _ignored = status_tx.send(ServerStatus::Failed {
+                        reason: reason.clone(),
+                    });
+                    return Err(ServerError::Startup {
+                        elapsed: started_at.elapsed(),
+                        reason,
+                    });
+                }
                 tracing::info!(url = %url, "server ready");
                 let _ignored = status_tx.send(ServerStatus::Ready { url });
             }
@@ -259,6 +279,71 @@ pub async fn wait_for_ready(
         }
     })
     .await
+}
+
+/// Verify that a ready llama-server reports the GGUF selected for launch.
+pub async fn verify_served_model(
+    host: &str,
+    port: u16,
+    expected_model: &Path,
+    api_key: Option<&str>,
+) -> Result<String, ServerError> {
+    let url = format!("{}/v1/models", base_url(host, port));
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(HEALTH_CHECK_TIMEOUT_SECS))
+        .build()
+        .map_err(ServerError::HttpClient)?;
+    let mut request = client.get(&url);
+    if let Some(api_key) = api_key.filter(|value| !value.is_empty()) {
+        request = request.bearer_auth(api_key);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|source| ServerError::ModelIdentityRequest {
+            url: url.clone(),
+            source,
+        })?;
+    if !response.status().is_success() {
+        return Err(ServerError::ModelIdentityStatus {
+            url,
+            status: response.status().as_u16(),
+        });
+    }
+    let value = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|source| ServerError::ModelIdentityRequest {
+            url: url.clone(),
+            source,
+        })?;
+    let ids = value
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("id").and_then(serde_json::Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    let expected_file = expected_model
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let expected_path = expected_model.to_string_lossy();
+    if let Some(id) = ids.iter().find(|id| {
+        id.as_str() == expected_path
+            || id.as_str() == expected_file
+            || Path::new(id.as_str())
+                .file_name()
+                .and_then(|name| name.to_str())
+                == Some(expected_file)
+    }) {
+        return Ok(id.clone());
+    }
+    Err(ServerError::ModelIdentityMismatch {
+        expected: expected_model.to_path_buf(),
+        reported: ids,
+    })
 }
 
 async fn wait_for_ready_with<F, Fut>(
@@ -510,6 +595,31 @@ pub enum ServerError {
     /// Reqwest client construction failed.
     #[error("failed to create health-check HTTP client: {0}")]
     HttpClient(#[source] reqwest::Error),
+    /// The ready server's model registry could not be queried or decoded.
+    #[error("failed to query llama-server model identity at {url}: {source}")]
+    ModelIdentityRequest {
+        /// `/v1/models` URL.
+        url: String,
+        /// HTTP transport or JSON decoding error.
+        #[source]
+        source: reqwest::Error,
+    },
+    /// The ready server rejected its model-registry request.
+    #[error("llama-server model identity endpoint {url} returned HTTP {status}")]
+    ModelIdentityStatus {
+        /// `/v1/models` URL.
+        url: String,
+        /// HTTP status code.
+        status: u16,
+    },
+    /// The ready server does not report the model selected for launch.
+    #[error("llama-server reported models {reported:?}, expected {expected}")]
+    ModelIdentityMismatch {
+        /// Selected GGUF path.
+        expected: PathBuf,
+        /// Model identifiers returned by `/v1/models`.
+        reported: Vec<String>,
+    },
     /// Readiness polling timed out.
     #[error("server did not become ready within {timeout:?}")]
     StartupTimeout {

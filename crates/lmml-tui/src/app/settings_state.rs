@@ -14,6 +14,10 @@ use super::App;
 /// Editable settings fields shown on the Settings tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsField {
+    /// Runtime flavor targeted by build actions.
+    BuildFlavor,
+    /// Runtime selection policy used for GGUF launch and explicit builds.
+    RuntimeSelection,
     /// Server host.
     Host,
     /// Server port.
@@ -44,7 +48,9 @@ pub enum SettingsField {
 
 impl SettingsField {
     /// All editable fields in display order.
-    pub const ALL: [SettingsField; 13] = [
+    pub const ALL: [SettingsField; 15] = [
+        SettingsField::BuildFlavor,
+        SettingsField::RuntimeSelection,
         SettingsField::Host,
         SettingsField::Port,
         SettingsField::CtxSize,
@@ -63,6 +69,8 @@ impl SettingsField {
     /// User-visible field name.
     pub fn label(self) -> &'static str {
         match self {
+            SettingsField::BuildFlavor => "build_runtime",
+            SettingsField::RuntimeSelection => "runtime",
             SettingsField::Host => "host",
             SettingsField::Port => "port",
             SettingsField::CtxSize => "ctx_size",
@@ -99,7 +107,7 @@ impl SettingsField {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SettingsKeyResult {
     /// Settings consumed the key and may emit an action.
-    Handled(Option<Action>),
+    Handled(Box<Option<Action>>),
     /// Settings did not consume the key; global handling may continue.
     Unhandled,
 }
@@ -108,7 +116,7 @@ impl App {
     /// Handle a key when the active tab is Settings.
     pub fn handle_settings_key(&mut self, key: KeyEvent) -> SettingsKeyResult {
         if self.settings_edit_buffer.is_some() {
-            return SettingsKeyResult::Handled(match key.code {
+            return SettingsKeyResult::Handled(Box::new(match key.code {
                 KeyCode::Esc => {
                     self.settings_edit_buffer = None;
                     None
@@ -152,33 +160,35 @@ impl App {
                 | KeyCode::KeypadBegin
                 | KeyCode::Media(_)
                 | KeyCode::Modifier(_) => None,
-            });
+            }));
         }
 
         match key.code {
             KeyCode::Up => {
                 self.previous_settings_field();
-                SettingsKeyResult::Handled(None)
+                SettingsKeyResult::Handled(Box::new(None))
             }
             KeyCode::Down => {
                 self.next_settings_field();
-                SettingsKeyResult::Handled(None)
+                SettingsKeyResult::Handled(Box::new(None))
             }
-            KeyCode::Esc | KeyCode::Backspace => SettingsKeyResult::Handled(None),
-            KeyCode::Enter => SettingsKeyResult::Handled(Some(Action::SaveSettings)),
+            KeyCode::Esc | KeyCode::Backspace => SettingsKeyResult::Handled(Box::new(None)),
+            KeyCode::Enter => SettingsKeyResult::Handled(Box::new(Some(Action::SaveSettings))),
             KeyCode::Char(' ') => {
                 self.toggle_settings_field();
-                SettingsKeyResult::Handled(None)
+                SettingsKeyResult::Handled(Box::new(None))
             }
-            KeyCode::Char('?') => SettingsKeyResult::Handled(Some(Action::ShowHelp)),
-            KeyCode::Char('q') => SettingsKeyResult::Handled(Some(Action::Quit)),
+            KeyCode::Char('?') => SettingsKeyResult::Handled(Box::new(Some(Action::ShowHelp))),
+            KeyCode::Char('q') => SettingsKeyResult::Handled(Box::new(Some(Action::Quit))),
             KeyCode::Char('e') => {
                 self.settings_edit_buffer =
                     Some(self.settings_field_value(self.selected_settings_field));
-                SettingsKeyResult::Handled(None)
+                SettingsKeyResult::Handled(Box::new(None))
             }
-            KeyCode::Char('p') => SettingsKeyResult::Handled(Some(Action::ProbeServerCapabilities)),
-            KeyCode::Char('s') => SettingsKeyResult::Handled(Some(Action::SaveSettings)),
+            KeyCode::Char('p') => {
+                SettingsKeyResult::Handled(Box::new(Some(Action::ProbeServerCapabilities)))
+            }
+            KeyCode::Char('s') => SettingsKeyResult::Handled(Box::new(Some(Action::SaveSettings))),
             KeyCode::Char(_)
             | KeyCode::Left
             | KeyCode::Right
@@ -216,6 +226,11 @@ impl App {
             quant: String::new(),
             context_length: None,
             architecture: None,
+            runtime: lmml_models::GgufRuntimeRequirement::Unsupported {
+                tensor_types: std::collections::BTreeSet::new(),
+            },
+            tensor_types: std::collections::BTreeSet::new(),
+            prism_metadata_keys: std::collections::BTreeSet::new(),
             aliased: false,
         });
         lmml_compat::unsupported_warnings(&self.server_config(&model), caps)
@@ -227,6 +242,8 @@ impl App {
     /// String value for an editable Settings tab field.
     pub fn settings_field_value(&self, field: SettingsField) -> String {
         match field {
+            SettingsField::BuildFlavor => self.state.build.build_flavor.to_string(),
+            SettingsField::RuntimeSelection => self.state.build.runtime_selection.to_string(),
             SettingsField::Host => self.state.server.host.clone(),
             SettingsField::Port => self.state.server.port.to_string(),
             SettingsField::CtxSize => self.state.server.ctx_size.to_string(),
@@ -282,6 +299,8 @@ impl App {
                 self.save_state_after("Settings updated");
             }
             SettingsField::Host
+            | SettingsField::BuildFlavor
+            | SettingsField::RuntimeSelection
             | SettingsField::Port
             | SettingsField::CtxSize
             | SettingsField::NGpuLayers
@@ -314,6 +333,10 @@ impl App {
 
     fn apply_validated_setting(&mut self, setting: ValidatedSetting) {
         match setting {
+            ValidatedSetting::BuildFlavor(value) => self.state.build.build_flavor = value,
+            ValidatedSetting::RuntimeSelection(value) => {
+                self.state.build.runtime_selection = value;
+            }
             ValidatedSetting::Host(value) => self.state.server.host = value,
             ValidatedSetting::Port(value) => self.state.server.port = value,
             ValidatedSetting::CtxSize(value) => self.state.server.ctx_size = value,
@@ -333,6 +356,8 @@ impl App {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ValidatedSetting {
+    BuildFlavor(lmml_compat::LlamaRuntimeFlavor),
+    RuntimeSelection(lmml_state::RuntimeSelectionMode),
     Host(String),
     Port(u16),
     CtxSize(u32),
@@ -350,6 +375,27 @@ enum ValidatedSetting {
 
 fn validate_setting(field: SettingsField, value: &str) -> Result<ValidatedSetting, String> {
     match field {
+        SettingsField::BuildFlavor => match value.trim().to_ascii_lowercase().as_str() {
+            "upstream" => Ok(ValidatedSetting::BuildFlavor(
+                lmml_compat::LlamaRuntimeFlavor::Upstream,
+            )),
+            "prism" => Ok(ValidatedSetting::BuildFlavor(
+                lmml_compat::LlamaRuntimeFlavor::Prism,
+            )),
+            _ => Err("build_runtime must be upstream or prism".to_string()),
+        },
+        SettingsField::RuntimeSelection => match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(ValidatedSetting::RuntimeSelection(
+                lmml_state::RuntimeSelectionMode::Auto,
+            )),
+            "upstream" => Ok(ValidatedSetting::RuntimeSelection(
+                lmml_state::RuntimeSelectionMode::Upstream,
+            )),
+            "prism" => Ok(ValidatedSetting::RuntimeSelection(
+                lmml_state::RuntimeSelectionMode::Prism,
+            )),
+            _ => Err("runtime_selection must be auto, upstream, or prism".to_string()),
+        },
         SettingsField::Host => validate_host(value).map(ValidatedSetting::Host),
         SettingsField::Port => {
             parse_u16_range(value, 1, u16::MAX, "port").map(ValidatedSetting::Port)
@@ -513,6 +559,20 @@ mod tests {
 
     #[test]
     fn validates_host_and_numeric_ranges() {
+        assert_eq!(
+            validate_setting(SettingsField::BuildFlavor, "prism"),
+            Ok(ValidatedSetting::BuildFlavor(
+                lmml_compat::LlamaRuntimeFlavor::Prism
+            ))
+        );
+        assert!(validate_setting(SettingsField::BuildFlavor, "auto").is_err());
+        assert_eq!(
+            validate_setting(SettingsField::RuntimeSelection, "prism"),
+            Ok(ValidatedSetting::RuntimeSelection(
+                lmml_state::RuntimeSelectionMode::Prism
+            ))
+        );
+        assert!(validate_setting(SettingsField::RuntimeSelection, "custom").is_err());
         assert!(validate_setting(SettingsField::Host, "127.0.0.1").is_ok());
         assert!(validate_setting(SettingsField::Host, "lmml.local").is_ok());
         assert!(validate_setting(SettingsField::Host, "-bad.local").is_err());

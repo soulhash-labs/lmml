@@ -201,6 +201,15 @@ pub struct App {
     pub server_caps: Option<LlamaBinaryCapabilities>,
     /// Last server capability probe error.
     pub server_caps_error: Option<String>,
+    /// Model used by the last server that reached ready state.
+    pub active_server_model: Option<ModelEntry>,
+    /// Runtime flavor used by the last server that reached ready state.
+    pub active_runtime_flavor: Option<lmml_compat::LlamaRuntimeFlavor>,
+    /// Exact binary used by the last server that reached ready state.
+    pub active_runtime_binary: Option<PathBuf>,
+    pending_server_model: Option<ModelEntry>,
+    pending_runtime_flavor: Option<lmml_compat::LlamaRuntimeFlavor>,
+    pending_runtime_binary: Option<PathBuf>,
     /// Detect tab log lines.
     pub detect_log: Vec<String>,
     /// Build tab log lines.
@@ -294,6 +303,12 @@ impl App {
             server_status: ServerStatus::Stopped,
             server_caps: None,
             server_caps_error: None,
+            active_server_model: None,
+            active_runtime_flavor: None,
+            active_runtime_binary: None,
+            pending_server_model: None,
+            pending_runtime_flavor: None,
+            pending_runtime_binary: None,
             detect_log: Vec::new(),
             build_log: Vec::new(),
             build_running: false,
@@ -391,9 +406,11 @@ impl App {
                 match result {
                     Ok(handle) => {
                         self.server_status = handle.status();
+                        self.commit_pending_server();
                         self.status_message = "Server ready".to_string();
                     }
                     Err(error) => {
+                        self.clear_pending_server();
                         self.server_status = ServerStatus::Failed {
                             reason: error.clone(),
                         };
@@ -406,6 +423,7 @@ impl App {
                 match result {
                     Ok(handle) => {
                         self.server_status = handle.status();
+                        self.commit_pending_server();
                         self.select_model_path(model.path.clone());
                         if let Some(index) = self
                             .models
@@ -418,6 +436,7 @@ impl App {
                         self.save_state_after("Model selected");
                     }
                     Err(error) => {
+                        self.clear_pending_server();
                         self.server_status = ServerStatus::Failed {
                             reason: error.clone(),
                         };
@@ -668,7 +687,7 @@ impl App {
         }
         if self.active_tab == Tab::Settings {
             match self.handle_settings_key(key) {
-                SettingsKeyResult::Handled(action) => return action,
+                SettingsKeyResult::Handled(action) => return *action,
                 SettingsKeyResult::Unhandled => {}
             }
         }
@@ -1122,19 +1141,34 @@ impl App {
                 ..
             } => {
                 self.build_running = false;
-                self.state.build.binary = binary;
-                self.state.build.commit = fingerprint.commit;
-                self.state.build.cmake_hash = lmml_build::hash_to_hex(&fingerprint.cmake_hash);
-                self.state.build.backend = backend_name(&backend);
-                self.state.build.archs = archs;
-                self.state.build.sccache_used = sccache_used;
-                self.state.build.last_built = unix_timestamp_string();
-                self.build_binary = Some(self.state.build.binary.clone());
+                let built_at = unix_timestamp_string();
+                match fingerprint.flavor {
+                    lmml_compat::LlamaRuntimeFlavor::Upstream => {
+                        self.state.build.binary = binary.clone();
+                        self.state.build.commit = fingerprint.commit;
+                        self.state.build.cmake_hash =
+                            lmml_build::hash_to_hex(&fingerprint.cmake_hash);
+                        self.state.build.backend = backend_name(&backend);
+                        self.state.build.archs = archs;
+                        self.state.build.sccache_used = sccache_used;
+                        self.state.build.last_built = built_at;
+                    }
+                    lmml_compat::LlamaRuntimeFlavor::Prism => {
+                        let prism = &mut self.state.build.prism;
+                        prism.source_url = fingerprint.source_url;
+                        prism.binary = binary.clone();
+                        prism.commit = fingerprint.commit;
+                        prism.cmake_hash = lmml_build::hash_to_hex(&fingerprint.cmake_hash);
+                        prism.backend = backend_name(&backend);
+                        prism.archs = archs;
+                        prism.sccache_used = sccache_used;
+                        prism.last_built = built_at.clone();
+                        prism.last_verified = built_at;
+                    }
+                }
+                self.build_binary = Some(binary.clone());
                 self.build_error = None;
-                self.push_build_log(format!(
-                    "Build complete: {}",
-                    self.state.build.binary.display()
-                ));
+                self.push_build_log(format!("Build complete: {}", binary.display()));
                 self.status_message = "Build complete".to_string();
                 self.save_state_after("Build complete");
             }
@@ -1152,8 +1186,17 @@ impl App {
             BuildEvent::Cancelled => {
                 self.build_running = false;
                 self.build_error = Some("cancelled".to_string());
-                self.state.build.cmake_hash.clear();
-                self.state.build.last_built.clear();
+                match self.state.build.selected_build_flavor() {
+                    lmml_compat::LlamaRuntimeFlavor::Upstream => {
+                        self.state.build.cmake_hash.clear();
+                        self.state.build.last_built.clear();
+                    }
+                    lmml_compat::LlamaRuntimeFlavor::Prism => {
+                        self.state.build.prism.cmake_hash.clear();
+                        self.state.build.prism.last_built.clear();
+                        self.state.build.prism.last_verified.clear();
+                    }
+                }
                 self.push_build_log("Build cancelled");
                 self.status_message = "Build cancelled".to_string();
                 self.save_state_after("Build cancelled");
@@ -1161,7 +1204,12 @@ impl App {
             BuildEvent::Skipped { reason } => {
                 self.build_running = false;
                 self.build_error = None;
-                self.build_binary = Some(self.state.build.binary.clone());
+                self.build_binary = Some(
+                    self.state
+                        .build
+                        .runtime_binary(self.state.build.selected_build_flavor())
+                        .to_path_buf(),
+                );
                 self.push_build_log(format!("Build skipped: {reason}"));
                 self.status_message = "Build up to date".to_string();
             }
@@ -1169,9 +1217,6 @@ impl App {
     }
 
     fn sync_build_backend_after_detection(&mut self, profile: &SystemProfile) {
-        if self.state.build.backend != "Cuda" {
-            return;
-        }
         let BuildBackend::Cuda { archs } = profile.recommended_backend() else {
             return;
         };
@@ -1179,28 +1224,64 @@ impl App {
             .iter()
             .map(|arch| (*arch).to_string())
             .collect::<Vec<_>>();
-        if detected_archs.is_empty() || detected_archs == self.state.build.archs {
+        let flavor = self.state.build.selected_build_flavor();
+        let (backend, persisted_archs) = match flavor {
+            lmml_compat::LlamaRuntimeFlavor::Upstream => {
+                (&self.state.build.backend, &mut self.state.build.archs)
+            }
+            lmml_compat::LlamaRuntimeFlavor::Prism => (
+                &self.state.build.prism.backend,
+                &mut self.state.build.prism.archs,
+            ),
+        };
+        if backend != "Cuda" || detected_archs.is_empty() || detected_archs == *persisted_archs {
             return;
         }
 
-        let previous = format_arch_list(&self.state.build.archs);
+        let previous = format_arch_list(persisted_archs);
         let current = format_arch_list(&detected_archs);
-        self.state.build.archs = detected_archs;
-        self.state.build.cmake_hash.clear();
-        self.state.build.last_built.clear();
+        *persisted_archs = detected_archs;
+        match flavor {
+            lmml_compat::LlamaRuntimeFlavor::Upstream => {
+                self.state.build.cmake_hash.clear();
+                self.state.build.last_built.clear();
+            }
+            lmml_compat::LlamaRuntimeFlavor::Prism => {
+                self.state.build.prism.cmake_hash.clear();
+                self.state.build.prism.last_built.clear();
+                self.state.build.prism.last_verified.clear();
+            }
+        }
+        let label = match flavor {
+            lmml_compat::LlamaRuntimeFlavor::Upstream => "CUDA build archs".to_string(),
+            lmml_compat::LlamaRuntimeFlavor::Prism => "prism CUDA build archs".to_string(),
+        };
         self.detect_log
-            .push(format!("CUDA build archs updated: {previous} -> {current}"));
+            .push(format!("{label} updated: {previous} -> {current}"));
     }
 
     /// Build a `lmml-build` config from current app state.
     pub fn build_config(&self, clean: bool) -> lmml_build::BuildConfig {
-        let requested_backend = if self.state.build.backend == "Auto" {
+        let flavor = self.state.build.selected_build_flavor();
+        let (source_dir, configured_backend, configured_archs) = match flavor {
+            lmml_compat::LlamaRuntimeFlavor::Upstream => (
+                self.state.build.source_dir.clone(),
+                self.state.build.backend.as_str(),
+                self.state.build.archs.as_slice(),
+            ),
+            lmml_compat::LlamaRuntimeFlavor::Prism => (
+                self.state.build.prism.source_dir.clone(),
+                self.state.build.prism.backend.as_str(),
+                self.state.build.prism.archs.as_slice(),
+            ),
+        };
+        let requested_backend = if configured_backend == "Auto" {
             self.detect_profile
                 .as_ref()
                 .map(SystemProfile::recommended_backend)
                 .unwrap_or(BuildBackend::CpuFallback)
         } else {
-            backend_from_state(&self.state.build.backend, &self.state.build.archs)
+            backend_from_state(configured_backend, configured_archs)
         };
         let requested_backend =
             refresh_backend_for_detected_profile(requested_backend, self.detect_profile.as_ref());
@@ -1217,7 +1298,7 @@ impl App {
             requested_backend
         };
 
-        let mut config = lmml_build::BuildConfig::new(self.state.build.source_dir.clone(), backend);
+        let mut config = lmml_build::BuildConfig::for_flavor(source_dir, backend, flavor);
         config.clean = clean;
         config.sccache = self
             .detect_profile
@@ -1240,10 +1321,19 @@ impl App {
                 .as_ref()
                 .and_then(|profile| profile.rocm.hip_path.clone());
         }
-        if self.state.build.track_mode == lmml_state::TrackMode::Tag
-            && !self.state.build.commit.is_empty()
-        {
-            config.git_ref = Some(self.state.build.commit.clone());
+        match flavor {
+            lmml_compat::LlamaRuntimeFlavor::Upstream
+                if self.state.build.track_mode == lmml_state::TrackMode::Tag
+                    && !self.state.build.commit.is_empty() =>
+            {
+                config.git_ref = Some(self.state.build.commit.clone());
+            }
+            lmml_compat::LlamaRuntimeFlavor::Prism
+                if !self.state.build.prism.requested_ref.is_empty() =>
+            {
+                config.git_ref = Some(self.state.build.prism.requested_ref.clone());
+            }
+            lmml_compat::LlamaRuntimeFlavor::Upstream | lmml_compat::LlamaRuntimeFlavor::Prism => {}
         }
         config
     }
@@ -1268,12 +1358,22 @@ impl App {
             quant: "unknown".to_string(),
             context_length: None,
             architecture: None,
+            runtime: lmml_models::GgufRuntimeRequirement::Unsupported {
+                tensor_types: std::collections::BTreeSet::new(),
+            },
+            tensor_types: std::collections::BTreeSet::new(),
+            prism_metadata_keys: std::collections::BTreeSet::new(),
             aliased: false,
         })
     }
 
     /// Build a compat server config from persisted settings and model fit.
     pub fn server_config(&self, model: &ModelEntry) -> lmml_compat::ServerConfig {
+        let has_model_profile = self
+            .state
+            .model
+            .runtime_profile_for_path(&model.path)
+            .is_some();
         let server = self.server_settings_for_model(model);
         let n_gpu_layers = self.resolve_server_gpu_layers(model, &server).launch;
         let mut config = lmml_compat::ServerConfig {
@@ -1293,7 +1393,31 @@ impl App {
             extra_args: server.extra_args.clone(),
         };
         apply_qwen_server_safeguards(model, &mut config);
+        apply_prism_initial_safeguards(model, has_model_profile, &mut config);
         config
+    }
+
+    /// Stage the exact model/runtime pair that a server start will attempt.
+    pub fn prepare_server_start(
+        &mut self,
+        model: ModelEntry,
+        runtime: &crate::runtime_cli::ResolvedModelRuntime,
+    ) {
+        self.pending_server_model = Some(model);
+        self.pending_runtime_flavor = Some(runtime.flavor);
+        self.pending_runtime_binary = Some(runtime.binary.clone());
+    }
+
+    fn commit_pending_server(&mut self) {
+        self.active_server_model = self.pending_server_model.take();
+        self.active_runtime_flavor = self.pending_runtime_flavor.take();
+        self.active_runtime_binary = self.pending_runtime_binary.take();
+    }
+
+    fn clear_pending_server(&mut self) {
+        self.pending_server_model = None;
+        self.pending_runtime_flavor = None;
+        self.pending_runtime_binary = None;
     }
 
     /// Estimate model VRAM fit using live detection first, then cached detection.
@@ -1533,6 +1657,29 @@ fn apply_qwen_server_safeguards(model: &ModelEntry, config: &mut lmml_compat::Se
     }
 }
 
+fn apply_prism_initial_safeguards(
+    model: &ModelEntry,
+    has_model_profile: bool,
+    config: &mut lmml_compat::ServerConfig,
+) {
+    if model.runtime != lmml_models::GgufRuntimeRequirement::Prism || has_model_profile {
+        return;
+    }
+
+    config.ctx_size = config.ctx_size.min(32_768);
+    config.flash_attn = true;
+    config.jinja = true;
+    set_arg_pair(
+        &mut config.extra_args,
+        &["--parallel", "-np"],
+        "--parallel",
+        "1",
+    );
+    set_arg_pair(&mut config.extra_args, &["--temp"], "--temp", "1.0");
+    set_arg_pair(&mut config.extra_args, &["--top-p"], "--top-p", "0.95");
+    set_arg_pair(&mut config.extra_args, &["--top-k"], "--top-k", "20");
+}
+
 fn is_qwen35_or_qwen36_model(model: &ModelEntry) -> bool {
     let matched = lmml_models::catalog::match_known_model_name(&model.name).or_else(|| {
         model
@@ -1568,6 +1715,22 @@ fn push_missing_any_arg_pair(
         .iter()
         .any(|existing| extra_args.iter().any(|arg| arg == existing))
     {
+        extra_args.push(flag.to_string());
+        extra_args.push(value.to_string());
+    }
+}
+
+fn set_arg_pair(extra_args: &mut Vec<String>, flags: &[&str], flag: &str, value: &str) {
+    if let Some(index) = extra_args
+        .iter()
+        .position(|argument| flags.contains(&argument.as_str()))
+    {
+        if let Some(existing) = extra_args.get_mut(index + 1) {
+            *existing = value.to_string();
+        } else {
+            extra_args.push(value.to_string());
+        }
+    } else {
         extra_args.push(flag.to_string());
         extra_args.push(value.to_string());
     }
@@ -2207,6 +2370,62 @@ mod tests {
     }
 
     #[test]
+    fn build_config_targets_isolated_prism_source_when_selected() {
+        let mut app = App::default();
+        app.state.build.build_flavor = lmml_compat::LlamaRuntimeFlavor::Prism;
+        app.state.build.prism.source_dir = PathBuf::from("/tmp/lmml-prism");
+        app.state.build.prism.backend = "Cuda".to_string();
+        app.state.build.prism.archs = vec!["sm_120".to_string()];
+
+        let config = app.build_config(false);
+
+        assert_eq!(config.flavor, lmml_compat::LlamaRuntimeFlavor::Prism);
+        assert_eq!(config.source_dir, PathBuf::from("/tmp/lmml-prism"));
+        assert_eq!(
+            config.git_ref.as_deref(),
+            lmml_compat::LlamaRuntimeFlavor::Prism.initial_ref()
+        );
+        assert_eq!(
+            config.backend,
+            BuildBackend::Cuda {
+                archs: vec!["sm_120"]
+            }
+        );
+    }
+
+    #[test]
+    fn completed_prism_build_does_not_replace_upstream_identity() {
+        let mut app = App::default();
+        let upstream_binary = app.state.build.binary.clone();
+        let binary = PathBuf::from("/tmp/lmml-prism/build/bin/llama-server");
+        app.handle_event(AppEvent::BuildEvent(BuildEvent::Completed {
+            binary: binary.clone(),
+            elapsed: std::time::Duration::from_secs(1),
+            fingerprint: lmml_build::BuildFingerprint {
+                flavor: lmml_compat::LlamaRuntimeFlavor::Prism,
+                source_url: lmml_compat::LlamaRuntimeFlavor::Prism
+                    .repository_url()
+                    .to_string(),
+                commit: "prism-commit".to_string(),
+                cmake_hash: [7; 32],
+                binary: binary.clone(),
+            },
+            backend: BuildBackend::Cuda {
+                archs: vec!["sm_120"],
+            },
+            archs: vec!["sm_120".to_string()],
+            sccache_used: true,
+        }));
+
+        assert_eq!(app.state.build.binary, upstream_binary);
+        assert_eq!(app.state.build.prism.binary, binary);
+        assert_eq!(app.state.build.prism.commit, "prism-commit");
+        assert_eq!(app.state.build.prism.archs, vec!["sm_120"]);
+        assert!(app.state.build.prism.sccache_used);
+        assert!(!app.state.build.prism.last_verified.is_empty());
+    }
+
+    #[test]
     fn build_config_auto_uses_detection_but_explicit_backend_wins() {
         let mut app = App::default();
         app.detect_profile = Some(cuda_profile());
@@ -2593,6 +2812,42 @@ mod tests {
 
         assert_eq!(app.server_config(&model).n_gpu_layers, -1);
         assert_eq!(app.server_gpu_layers_label(Some(&model)), "auto -> -1");
+    }
+
+    #[test]
+    fn prism_model_without_profile_uses_safe_first_launch_defaults() {
+        let mut app = App::default();
+        app.state.server.ctx_size = 196_608;
+        app.state.server.flash_attn = false;
+        app.state.server.jinja = false;
+        app.state.server.extra_args = vec!["--parallel".to_string(), "4".to_string()];
+        let model = ModelEntry {
+            runtime: lmml_models::GgufRuntimeRequirement::Prism,
+            tensor_types: std::collections::BTreeSet::from([142]),
+            ..model_entry("TERNARY-BONSAI-2-27B-DERISKED.gguf")
+        };
+
+        let config = app.server_config(&model);
+
+        assert_eq!(config.ctx_size, 32_768);
+        assert!(config.flash_attn);
+        assert!(config.jinja);
+        assert!(config
+            .extra_args
+            .windows(2)
+            .any(|pair| pair == ["--parallel", "1"]));
+        assert!(config
+            .extra_args
+            .windows(2)
+            .any(|pair| pair == ["--temp", "1.0"]));
+        assert!(config
+            .extra_args
+            .windows(2)
+            .any(|pair| pair == ["--top-p", "0.95"]));
+        assert!(config
+            .extra_args
+            .windows(2)
+            .any(|pair| pair == ["--top-k", "20"]));
     }
 
     #[test]
@@ -3271,6 +3526,9 @@ mod tests {
             context_length: None,
             architecture: None,
             aliased: false,
+            runtime: lmml_models::GgufRuntimeRequirement::Upstream,
+            tensor_types: std::collections::BTreeSet::new(),
+            prism_metadata_keys: std::collections::BTreeSet::new(),
         })));
         app.active_tab = Tab::Settings;
         app.selected_settings_field = SettingsField::Port;
@@ -3293,6 +3551,9 @@ mod tests {
             context_length: Some(4096),
             architecture: Some("llama".to_string()),
             aliased: false,
+            runtime: lmml_models::GgufRuntimeRequirement::Upstream,
+            tensor_types: std::collections::BTreeSet::new(),
+            prism_metadata_keys: std::collections::BTreeSet::new(),
         }
     }
 

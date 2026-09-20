@@ -28,6 +28,7 @@ async fn full_stubbed_runtime_chain_persists_state() {
     fs::create_dir_all(&bin_dir).expect("bin dir");
     write_git_stub(&bin_dir);
     write_cmake_stub(&bin_dir);
+    write_ldd_stub(&bin_dir);
     let old_path = std::env::var_os("PATH").unwrap_or_default();
     let new_path = format!("{}:{}", bin_dir.display(), old_path.to_string_lossy());
     std::env::set_var("PATH", &new_path);
@@ -176,25 +177,37 @@ if [ "$1" = "--version" ]; then
 fi
 HOST="127.0.0.1"
 PORT="8080"
+MODEL=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --host) shift; HOST="$1" ;;
     --port) shift; PORT="$1" ;;
-    --model|-m|--ctx-size|-ngl|--batch-size|--ubatch-size|--threads) shift ;;
+    --model|-m) shift; MODEL="$1" ;;
+    --ctx-size|-ngl|--batch-size|--ubatch-size|--threads) shift ;;
   esac
   shift
 done
-exec python3 -u - "$HOST" "$PORT" <<'PY'
+exec python3 -u - "$HOST" "$PORT" "$MODEL" <<'PY'
 import http.server
+import json
+import os
 import sys
 host = sys.argv[1]
 port = int(sys.argv[2])
+model = os.path.basename(sys.argv[3])
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ("/health", "/v1/health"):
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"ok")
+        elif self.path == "/v1/models":
+            body = json.dumps({"data": [{"id": model}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         else:
             self.send_response(404)
             self.end_headers()
@@ -207,6 +220,13 @@ chmod +x "$BUILD/bin/llama-server"
 echo stub cmake "$@"
 exit 0
 "#,
+    );
+}
+
+fn write_ldd_stub(bin_dir: &Path) {
+    write_executable(
+        &bin_dir.join("ldd"),
+        "#!/bin/sh\n# Synthetic test binaries have no shared dependencies.\nexit 0\n",
     );
 }
 

@@ -151,6 +151,12 @@ enum RuntimeCommand {
         /// Config path override.
         #[arg(long)]
         path: Option<PathBuf>,
+        /// Oh My OpenAgent config path override.
+        #[arg(long)]
+        openagent_path: Option<PathBuf>,
+        /// Update only opencode.json and leave Oh My OpenAgent untouched.
+        #[arg(long)]
+        opencode_only: bool,
         /// Restore config from backup.
         #[arg(long)]
         rollback: Option<PathBuf>,
@@ -243,6 +249,8 @@ struct RuntimeConfigureArgs {
     target: RuntimeConfigTarget,
     dry_run: bool,
     path: Option<PathBuf>,
+    openagent_path: Option<PathBuf>,
+    opencode_only: bool,
     rollback: Option<PathBuf>,
     yes: bool,
     force: bool,
@@ -595,6 +603,8 @@ async fn run_runtime(command: RuntimeCommand) -> i32 {
             target,
             dry_run,
             path,
+            openagent_path,
+            opencode_only,
             rollback,
             yes,
             force,
@@ -614,6 +624,8 @@ async fn run_runtime(command: RuntimeCommand) -> i32 {
                     target,
                     dry_run,
                     path,
+                    openagent_path,
+                    opencode_only,
                     rollback,
                     yes,
                     force,
@@ -623,6 +635,7 @@ async fn run_runtime(command: RuntimeCommand) -> i32 {
                     },
                 },
             )
+            .await
         }
         RuntimeCommand::Register {
             runtime_id,
@@ -813,13 +826,21 @@ fn run_runtime_print_config(state: &lmml_state::AppState, target: RuntimeConfigT
     }
 }
 
-fn run_runtime_configure(state: &lmml_state::AppState, args: RuntimeConfigureArgs) -> i32 {
+async fn run_runtime_configure(state: &lmml_state::AppState, args: RuntimeConfigureArgs) -> i32 {
     match args.target {
         RuntimeConfigTarget::Opencode => {
             let path = args
                 .path
                 .unwrap_or_else(runtime_cli::default_opencode_config_path);
+            let openagent_path = args
+                .openagent_path
+                .unwrap_or_else(runtime_cli::default_openagent_config_path);
+            let sync_openagent = !args.opencode_only && openagent_path.is_file();
             if let Some(backup) = args.rollback {
+                if !args.opencode_only {
+                    eprintln!("rollback restores one file at a time; pass --opencode-only for the OpenCode backup and restore the printed Oh My OpenAgent backup separately");
+                    return 2;
+                }
                 return match runtime_cli::rollback_opencode_config(&backup, &path) {
                     Ok(()) => {
                         println!("restored {} from {}", path.display(), backup.display());
@@ -831,20 +852,39 @@ fn run_runtime_configure(state: &lmml_state::AppState, args: RuntimeConfigureArg
                     }
                 };
             }
-            let plan = match runtime_cli::plan_opencode_configure(
-                state,
-                &path,
-                args.routing,
-                args.force,
-            ) {
-                Ok(plan) => plan,
-                Err(error) => {
-                    eprintln!("configure plan failed: {error}");
-                    return 1;
+            if sync_openagent && args.routing != RoutingOptions::default() {
+                eprintln!("Oh My OpenAgent synchronization requires --model-source lmml and --small-model-source lmml; use --opencode-only for custom routing");
+                return 2;
+            }
+            let (plan, openagent_diff) = if !sync_openagent {
+                match runtime_cli::plan_opencode_configure(state, &path, args.routing, args.force) {
+                    Ok(plan) => (plan, None),
+                    Err(error) => {
+                        eprintln!("configure plan failed: {error}");
+                        return 1;
+                    }
+                }
+            } else {
+                match runtime_cli::plan_opencode_handoff(state, &path, &openagent_path, args.force)
+                {
+                    Ok(handoff) => (handoff.opencode, Some(handoff.openagent_diff)),
+                    Err(error) => {
+                        eprintln!("configure plan failed: {error}");
+                        return 1;
+                    }
                 }
             };
             println!("OpenCode config: {}", plan.path.display());
             print_diff(&plan.diff);
+            if let Some(diff) = &openagent_diff {
+                println!("Oh My OpenAgent config: {}", openagent_path.display());
+                print_diff(diff);
+            } else if !args.opencode_only {
+                println!(
+                    "Oh My OpenAgent config not found at {}; updating OpenCode only",
+                    openagent_path.display()
+                );
+            }
             print_routing(&plan.routing);
             if plan.has_provider_conflicts && !args.force {
                 eprintln!("conflicting lmml-owned provider entries found; rerun with --force after reviewing the diff");
@@ -857,24 +897,76 @@ fn run_runtime_configure(state: &lmml_state::AppState, args: RuntimeConfigureArg
                 println!("dry run only; no files written");
                 return 0;
             }
+            if args.routing.model == RoutingSource::Lmml
+                || args.routing.small_model == RoutingSource::Lmml
+            {
+                let (host, port, model, api_key) = if state.runtime.mode
+                    == lmml_state::OpenCodeRuntimeMode::SingleServer
+                    && !state.model.last_used.as_os_str().is_empty()
+                {
+                    (
+                        state.server.host.as_str(),
+                        state.server.port,
+                        state.model.last_used.as_path(),
+                        (!state.server.api_key.is_empty()).then_some(state.server.api_key.as_str()),
+                    )
+                } else {
+                    let profile = &state.runtime.opencode;
+                    (
+                        profile.host.as_str(),
+                        profile.port,
+                        profile.model.as_path(),
+                        None,
+                    )
+                };
+                match lmml_server::verify_served_model(host, port, model, api_key).await {
+                    Ok(reported) => {
+                        println!("verified live llama-server model: {reported}");
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "refusing to update OpenCode routing because the selected server/model is not healthy: {error}"
+                        );
+                        return 1;
+                    }
+                }
+            }
             if !args.yes && !confirm("Apply OpenCode config changes? [y/N] ") {
                 println!("aborted; no files written");
                 return 2;
             }
-            match runtime_cli::apply_opencode_configure(state, &path, args.routing, args.force) {
-                Ok(applied) => {
-                    println!("updated {}", applied.path.display());
-                    println!("backup: {}", applied.backup_path.display());
-                    println!(
-                        "rollback: lmml runtime configure opencode --path {} --rollback {}",
-                        applied.path.display(),
-                        applied.backup_path.display()
-                    );
-                    0
+            if !sync_openagent {
+                match runtime_cli::apply_opencode_configure(state, &path, args.routing, args.force)
+                {
+                    Ok(applied) => {
+                        println!("updated {}", applied.path.display());
+                        println!("backup: {}", applied.backup_path.display());
+                        println!(
+                            "rollback: lmml runtime configure opencode --opencode-only --path {} --rollback {}",
+                            applied.path.display(),
+                            applied.backup_path.display()
+                        );
+                        0
+                    }
+                    Err(error) => {
+                        eprintln!("configure apply failed: {error}");
+                        1
+                    }
                 }
-                Err(error) => {
-                    eprintln!("configure apply failed: {error}");
-                    1
+            } else {
+                match runtime_cli::apply_opencode_handoff(state, &path, &openagent_path, args.force)
+                {
+                    Ok(applied) => {
+                        println!("updated {}", applied.opencode_path.display());
+                        println!("backup: {}", applied.opencode_backup.display());
+                        println!("updated {}", applied.openagent_path.display());
+                        println!("backup: {}", applied.openagent_backup.display());
+                        0
+                    }
+                    Err(error) => {
+                        eprintln!("configure apply failed: {error}");
+                        1
+                    }
                 }
             }
         }

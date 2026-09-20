@@ -6,9 +6,21 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use lmml_state::{AppState, RuntimeConfig, RuntimeProfile, RuntimeProfileState, RuntimeStatus};
+use lmml_state::{
+    AppState, OpenCodeRuntimeMode, RuntimeConfig, RuntimeProfile, RuntimeProfileState,
+    RuntimeStatus,
+};
 use serde_json::{json, Map, Value};
 use thiserror::Error;
+
+mod model_runtime;
+mod openagent;
+
+pub use model_runtime::{resolve_model_runtime, ResolvedModelRuntime};
+pub use openagent::{
+    apply_opencode_handoff, default_openagent_config_path, plan_opencode_handoff,
+    OpenCodeHandoffApply, OpenCodeHandoffPlan,
+};
 
 /// Result of planning or applying an OpenCode configuration update.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,8 +130,8 @@ pub struct RuntimeStopResult {
 /// Render runtime profile status as a stable table.
 pub fn render_status(state: &AppState) -> String {
     let mut lines = vec![format!(
-        "{:<14} {:<10} {:<7} {:<28} {}",
-        "profile", "status", "pid", "url", "model"
+        "{:<14} {:<10} {:<7} {:<9} {:<28} {:<32} {}",
+        "profile", "status", "pid", "runtime", "url", "model", "binary"
     )];
     for name in RuntimeConfig::profile_names() {
         let Some(profile) = state.runtime.profile(name) else {
@@ -141,11 +153,8 @@ pub fn render_opencode_config(state: &AppState) -> Result<String, RuntimeCliErro
 
 /// Render a Codex profile config that points Codex at lmml's Responses endpoint.
 pub fn render_codex_config(state: &AppState) -> Result<String, RuntimeCliError> {
-    let profile = state
-        .runtime
-        .profile("opencode")
-        .ok_or(RuntimeCliError::UnknownProfile)?;
-    let model = codex_model_name(profile);
+    let profile = opencode_primary_profile(state)?;
+    let model = codex_model_name(&profile);
     let base_url = profile.api_base_url();
     Ok(format!(
         concat!(
@@ -166,10 +175,7 @@ pub fn render_codex_config(state: &AppState) -> Result<String, RuntimeCliError> 
 
 /// Render a DeepSeek Harness custom-provider fragment for LMML's local server.
 pub fn render_deepseek_harness_config(state: &AppState) -> Result<String, RuntimeCliError> {
-    let profile = state
-        .runtime
-        .profile("opencode")
-        .ok_or(RuntimeCliError::UnknownProfile)?;
+    let profile = opencode_primary_profile(state)?;
     let model = profile.model_name();
     let model_id = if model.is_empty() {
         "<select-a-model-in-lmml>"
@@ -200,8 +206,23 @@ fn yaml_quote(value: &str) -> String {
 
 /// Return warning lines for incomplete OpenCode runtime profiles.
 pub fn opencode_config_warnings(state: &AppState) -> Vec<String> {
-    RuntimeConfig::profile_names()
-        .into_iter()
+    if state.runtime.mode == OpenCodeRuntimeMode::SingleServer {
+        return match opencode_primary_profile(state) {
+            Ok(profile) if profile.model.as_os_str().is_empty() => vec![
+                "warning: no interactive LMML model is selected; OpenCode configuration is unavailable"
+                    .to_string(),
+            ],
+            Ok(_) => Vec::new(),
+            Err(error) => vec![format!("warning: OpenCode profile is unavailable: {error}")],
+        };
+    }
+    let profiles = match state.runtime.mode {
+        OpenCodeRuntimeMode::SingleServer => Vec::new(),
+        OpenCodeRuntimeMode::DualManaged => RuntimeConfig::profile_names().to_vec(),
+    };
+    profiles
+        .iter()
+        .copied()
         .filter_map(|name| {
             let profile = state.runtime.profile(name)?;
             profile.model.as_os_str().is_empty().then(|| {
@@ -257,8 +278,9 @@ pub async fn start_profile(
         .profile(profile_name)
         .ok_or_else(|| RuntimeCliError::UnknownProfileName(profile_name.to_string()))?
         .clone();
-    prevent_double_start(state, profile_name)?;
-    validate_start_profile(profile_name, &profile, state)?;
+    validate_start_profile(profile_name, &profile)?;
+    let runtime = resolve_model_runtime(&state.build, &profile.model).await?;
+    prevent_double_start(state, profile_name, &runtime.binary)?;
     lmml_server::check_port_free(&profile.host, profile.port)
         .await
         .map_err(|source| RuntimeCliError::PortUnavailable {
@@ -267,7 +289,7 @@ pub async fn start_profile(
             source,
         })?;
 
-    let caps = lmml_compat::LlamaBinaryCapabilities::probe(&state.build.binary)
+    let caps = lmml_compat::LlamaBinaryCapabilities::probe(&runtime.binary)
         .await
         .map_err(RuntimeCliError::Compat)?;
     let config = profile_to_server_config(&profile);
@@ -292,7 +314,7 @@ pub async fn start_profile(
         source,
     })?;
 
-    let mut command = tokio::process::Command::new(&state.build.binary);
+    let mut command = tokio::process::Command::new(&runtime.binary);
     command
         .args(&argv)
         .stdin(Stdio::null())
@@ -300,14 +322,23 @@ pub async fn start_profile(
         .stderr(Stdio::from(log_err));
     detach_command(&mut command);
     let child = command.spawn().map_err(|source| RuntimeCliError::Spawn {
-        binary: state.build.binary.clone(),
+        binary: runtime.binary.clone(),
         source,
     })?;
     let pid = child.id().ok_or(RuntimeCliError::MissingPid)?;
-    update_runtime_starting(state, profile_name, &profile, pid, &log_path)?;
+    update_runtime_starting(state, profile_name, &profile, &runtime, pid, &log_path)?;
     state.save()?;
 
-    match lmml_server::wait_for_ready(&profile.host, profile.port, startup_timeout).await {
+    let readiness =
+        match lmml_server::wait_for_ready(&profile.host, profile.port, startup_timeout).await {
+            Ok(url) => {
+                lmml_server::verify_served_model(&profile.host, profile.port, &profile.model, None)
+                    .await
+                    .map(|_| url)
+            }
+            Err(error) => Err(error),
+        };
+    match readiness {
         Ok(url) => {
             update_runtime_ready(state, profile_name, &url)?;
             state.save()?;
@@ -350,7 +381,7 @@ pub async fn stop_profile(
     state: &mut AppState,
     profile_name: &str,
 ) -> Result<RuntimeStopResult, RuntimeCliError> {
-    let binary = state.build.binary.clone();
+    let fallback_binary = state.build.binary.clone();
     let runtime = state
         .runtime
         .state
@@ -376,6 +407,11 @@ pub async fn stop_profile(
             message: "stale pid cleared".to_string(),
         });
     }
+    let binary = if runtime.binary.as_os_str().is_empty() {
+        fallback_binary
+    } else {
+        runtime.binary.clone()
+    };
     if !pid_looks_like_llama_server(pid, &binary) {
         runtime.status = RuntimeStatus::Unhealthy;
         runtime.last_health = "recorded pid does not look like llama-server".to_string();
@@ -429,9 +465,9 @@ pub fn plan_opencode_configure(
 ) -> Result<ConfigurePlan, RuntimeCliError> {
     let path = path.as_ref();
     let current = read_json_or_empty(path)?;
+    validate_config_shape(&current, force)?;
     let desired = desired_opencode_patch(state, routing)?;
     let routing_plan = build_routing_plan(&current, state, routing)?;
-    validate_config_shape(&current, force)?;
     let diff = diff_values(
         "",
         &current,
@@ -459,8 +495,8 @@ pub fn apply_opencode_configure(
 ) -> Result<ConfigureApply, RuntimeCliError> {
     let path = path.as_ref();
     let current = read_json_or_empty(path)?;
-    let desired = desired_opencode_patch(state, routing)?;
     validate_config_shape(&current, force)?;
+    let desired = desired_opencode_patch(state, routing)?;
     let has_provider_conflicts = provider_conflicts(&current, &desired);
     if has_provider_conflicts && !force {
         return Err(RuntimeCliError::Conflict);
@@ -552,16 +588,21 @@ fn render_status_row(
         model_name
     };
     format!(
-        "{name:<14} {:<10} {pid:<7} {:<28} {model}",
+        "{name:<14} {:<10} {pid:<7} {:<9} {:<28} {model:<32} {}",
         status_label(runtime.status),
-        profile.api_base_url()
+        runtime.flavor,
+        profile.api_base_url(),
+        if runtime.binary.as_os_str().is_empty() {
+            "-".to_string()
+        } else {
+            runtime.binary.display().to_string()
+        }
     )
 }
 
 fn validate_start_profile(
     profile_name: &str,
     profile: &RuntimeProfile,
-    state: &AppState,
 ) -> Result<(), RuntimeCliError> {
     if profile.model.as_os_str().is_empty() {
         return Err(RuntimeCliError::MissingModel {
@@ -574,15 +615,14 @@ fn validate_start_profile(
             path: profile.model.clone(),
         });
     }
-    if !state.build.binary.exists() {
-        return Err(RuntimeCliError::MissingServerBinary {
-            path: state.build.binary.clone(),
-        });
-    }
     Ok(())
 }
 
-fn prevent_double_start(state: &AppState, profile_name: &str) -> Result<(), RuntimeCliError> {
+fn prevent_double_start(
+    state: &AppState,
+    profile_name: &str,
+    binary: &Path,
+) -> Result<(), RuntimeCliError> {
     let Some(runtime) = state.runtime.state.profile(profile_name) else {
         return Err(RuntimeCliError::UnknownProfileName(
             profile_name.to_string(),
@@ -594,7 +634,7 @@ fn prevent_double_start(state: &AppState, profile_name: &str) -> Result<(), Runt
     if !pid_is_alive(pid) {
         return Ok(());
     }
-    if pid_looks_like_llama_server(pid, &state.build.binary) {
+    if pid_looks_like_llama_server(pid, binary) {
         return Err(RuntimeCliError::AlreadyRunning {
             profile: profile_name.to_string(),
             pid,
@@ -629,6 +669,7 @@ fn update_runtime_starting(
     state: &mut AppState,
     profile_name: &str,
     profile: &RuntimeProfile,
+    resolved: &ResolvedModelRuntime,
     pid: u32,
     log_path: &Path,
 ) -> Result<(), RuntimeCliError> {
@@ -642,6 +683,8 @@ fn update_runtime_starting(
     runtime.host = profile.host.clone();
     runtime.port = profile.port;
     runtime.model = profile.model.clone();
+    runtime.flavor = resolved.flavor;
+    runtime.binary = resolved.binary.clone();
     runtime.log_path = log_path.to_path_buf();
     runtime.started_at = unix_timestamp_string();
     runtime.last_health_at = String::new();
@@ -821,44 +864,60 @@ fn status_label(status: RuntimeStatus) -> &'static str {
 }
 
 fn desired_opencode_config(state: &AppState) -> Result<Value, RuntimeCliError> {
-    let full = state
-        .runtime
-        .profile("opencode")
-        .ok_or(RuntimeCliError::UnknownProfile)?;
-    let fast = state
-        .runtime
-        .profile("opencode-fast")
-        .ok_or(RuntimeCliError::UnknownProfile)?;
-    let full_model = opencode_model_name(full, "opencode");
-    let fast_model = opencode_model_name(fast, "opencode-fast");
-    Ok(json!({
-        "provider": desired_provider_object(full, fast),
-        "model": format!("llamacpp/{full_model}"),
-        "small_model": format!("llamacpp_fast/{fast_model}"),
-        "compaction": {
-            "auto": true,
-            "prune": true,
-            "reserved": 32768
+    let full = opencode_primary_profile(state)?;
+    let full_model = opencode_model_name(&full, "opencode")?;
+    match state.runtime.mode {
+        OpenCodeRuntimeMode::SingleServer => Ok(json!({
+            "provider": desired_single_provider_object(&full, &full_model),
+            "model": format!("llamacpp/{full_model}"),
+            "small_model": format!("llamacpp/{full_model}")
+        })),
+        OpenCodeRuntimeMode::DualManaged => {
+            let fast = state
+                .runtime
+                .profile("opencode-fast")
+                .ok_or(RuntimeCliError::UnknownProfile)?;
+            let fast_model = opencode_model_name(fast, "opencode-fast")?;
+            Ok(json!({
+                "provider": desired_dual_provider_object(&full, &full_model, fast, &fast_model),
+                "model": format!("llamacpp/{full_model}"),
+                "small_model": format!("llamacpp_fast/{fast_model}")
+            }))
         }
-    }))
+    }
 }
 
 fn desired_opencode_patch(
     state: &AppState,
     routing: RoutingOptions,
 ) -> Result<Value, RuntimeCliError> {
-    let full = state
-        .runtime
-        .profile("opencode")
-        .ok_or(RuntimeCliError::UnknownProfile)?;
-    let fast = state
-        .runtime
-        .profile("opencode-fast")
-        .ok_or(RuntimeCliError::UnknownProfile)?;
-    let full_model = opencode_model_name(full, "opencode");
-    let fast_model = opencode_model_name(fast, "opencode-fast");
+    let full = opencode_primary_profile(state)?;
+    let full_model = opencode_model_name(&full, "opencode")?;
     let mut patch = Map::new();
-    patch.insert("provider".to_string(), desired_provider_object(full, fast));
+    let small_model = match state.runtime.mode {
+        OpenCodeRuntimeMode::SingleServer => {
+            patch.insert(
+                "provider".to_string(),
+                json!({
+                    "llamacpp": desired_provider(&full, &full_model, "lmml local model"),
+                    "llamacpp_fast": Value::Null
+                }),
+            );
+            format!("llamacpp/{full_model}")
+        }
+        OpenCodeRuntimeMode::DualManaged => {
+            let fast = state
+                .runtime
+                .profile("opencode-fast")
+                .ok_or(RuntimeCliError::UnknownProfile)?;
+            let fast_model = opencode_model_name(fast, "opencode-fast")?;
+            patch.insert(
+                "provider".to_string(),
+                desired_dual_provider_object(&full, &full_model, fast, &fast_model),
+            );
+            format!("llamacpp_fast/{fast_model}")
+        }
+    };
     if routing.model == RoutingSource::Lmml {
         patch.insert(
             "model".to_string(),
@@ -866,56 +925,79 @@ fn desired_opencode_patch(
         );
     }
     if routing.small_model == RoutingSource::Lmml {
-        patch.insert(
-            "small_model".to_string(),
-            Value::String(format!("llamacpp_fast/{fast_model}")),
-        );
+        patch.insert("small_model".to_string(), Value::String(small_model));
     }
     Ok(Value::Object(patch))
 }
 
-fn desired_provider_object(full: &RuntimeProfile, fast: &RuntimeProfile) -> Value {
-    let full_model = opencode_model_name(full, "opencode");
-    let fast_model = opencode_model_name(fast, "opencode-fast");
+fn desired_single_provider_object(full: &RuntimeProfile, full_model: &str) -> Value {
     json!({
-        "llamacpp": {
-            "npm": "@ai-sdk/openai-compatible",
-            "name": "lmml llama.cpp",
-            "options": {
-                "baseURL": full.api_base_url(),
-                "timeout": 7200000,
-                "chunkTimeout": 300000
-            },
-            "models": {
-                full_model.clone(): {
-                    "name": format!("{full_model} (lmml full)")
-                }
-            }
+        "llamacpp": desired_provider(full, full_model, "lmml local model")
+    })
+}
+
+fn desired_dual_provider_object(
+    full: &RuntimeProfile,
+    full_model: &str,
+    fast: &RuntimeProfile,
+    fast_model: &str,
+) -> Value {
+    json!({
+        "llamacpp": desired_provider(full, full_model, "lmml full"),
+        "llamacpp_fast": desired_provider(fast, fast_model, "lmml fast")
+    })
+}
+
+fn desired_provider(profile: &RuntimeProfile, model: &str, label: &str) -> Value {
+    json!({
+        "npm": "@ai-sdk/openai-compatible",
+        "name": "lmml llama.cpp",
+        "options": {
+            "baseURL": profile.api_base_url(),
+            "timeout": 7200000,
+            "chunkTimeout": 300000
         },
-        "llamacpp_fast": {
-            "npm": "@ai-sdk/openai-compatible",
-            "name": "lmml llama.cpp fast",
-            "options": {
-                "baseURL": fast.api_base_url(),
-                "timeout": 7200000,
-                "chunkTimeout": 300000
-            },
-            "models": {
-                fast_model.clone(): {
-                    "name": format!("{fast_model} (lmml fast)")
-                }
+        "models": {
+            (model): {
+                "name": format!("{model} ({label})")
             }
         }
     })
 }
 
-fn opencode_model_name(profile: &RuntimeProfile, fallback: &str) -> String {
+fn opencode_model_name(
+    profile: &RuntimeProfile,
+    profile_name: &str,
+) -> Result<String, RuntimeCliError> {
     let model_name = profile.model_name();
     if model_name.is_empty() {
-        format!("{fallback}-model-unset.gguf")
+        Err(RuntimeCliError::MissingModel {
+            profile: profile_name.to_string(),
+        })
     } else {
-        model_name
+        Ok(model_name)
     }
+}
+
+fn opencode_primary_profile(state: &AppState) -> Result<RuntimeProfile, RuntimeCliError> {
+    let mut profile = state
+        .runtime
+        .profile("opencode")
+        .ok_or(RuntimeCliError::UnknownProfile)?
+        .clone();
+    if state.runtime.mode == OpenCodeRuntimeMode::SingleServer
+        && !state.model.last_used.as_os_str().is_empty()
+    {
+        profile.model = state.model.last_used.clone();
+        profile.host = state.server.host.clone();
+        profile.port = state.server.port;
+        profile.ctx_size = state.server.ctx_size;
+        profile.gpu_layers = state.server.n_gpu_layers;
+        profile.batch_size = state.server.batch_size;
+        profile.threads = state.server.threads;
+        profile.extra_args = state.server.extra_args.clone();
+    }
+    Ok(profile)
 }
 
 fn codex_model_name(profile: &RuntimeProfile) -> String {
@@ -956,13 +1038,44 @@ fn merge_opencode_config(mut current: Value, patch: Value) -> Result<Value, Runt
             let provider_object = object_mut(provider, "provider")?;
             let desired_providers = object_ref(value, "provider patch")?;
             for (provider_key, provider_value) in desired_providers {
-                provider_object.insert(provider_key.clone(), provider_value.clone());
+                if provider_value.is_null() {
+                    provider_object.remove(provider_key);
+                    continue;
+                }
+                let merged = provider_object
+                    .get(provider_key)
+                    .map(|current| merge_provider_config(current, provider_value))
+                    .transpose()?
+                    .unwrap_or_else(|| provider_value.clone());
+                provider_object.insert(provider_key.clone(), merged);
             }
         } else {
             current_object.insert(key.clone(), value.clone());
         }
     }
     Ok(current)
+}
+
+fn merge_provider_config(current: &Value, desired: &Value) -> Result<Value, RuntimeCliError> {
+    let mut merged = current.clone();
+    let merged_object = object_mut(&mut merged, "provider entry")?;
+    let desired_object = object_ref(desired, "provider patch entry")?;
+    for (key, value) in desired_object {
+        if key == "options" {
+            let options = merged_object
+                .entry(key.clone())
+                .or_insert_with(|| Value::Object(Map::new()));
+            let options_object = object_mut(options, "provider options")?;
+            for (option_key, option_value) in object_ref(value, "provider options patch")? {
+                if option_key == "baseURL" || !options_object.contains_key(option_key) {
+                    options_object.insert(option_key.clone(), option_value.clone());
+                }
+            }
+        } else {
+            merged_object.insert(key.clone(), value.clone());
+        }
+    }
+    Ok(merged)
 }
 
 fn validate_config_shape(value: &Value, force: bool) -> Result<(), RuntimeCliError> {
@@ -1020,19 +1133,22 @@ fn build_routing_plan(
     state: &AppState,
     routing: RoutingOptions,
 ) -> Result<RoutingPlan, RuntimeCliError> {
-    let full = state
-        .runtime
-        .profile("opencode")
-        .ok_or(RuntimeCliError::UnknownProfile)?;
-    let fast = state
-        .runtime
-        .profile("opencode-fast")
-        .ok_or(RuntimeCliError::UnknownProfile)?;
-    let model_lmml = format!("llamacpp/{}", opencode_model_name(full, "opencode"));
-    let small_model_lmml = format!(
-        "llamacpp_fast/{}",
-        opencode_model_name(fast, "opencode-fast")
-    );
+    let full = opencode_primary_profile(state)?;
+    let full_model = opencode_model_name(&full, "opencode")?;
+    let model_lmml = format!("llamacpp/{full_model}");
+    let small_model_lmml = match state.runtime.mode {
+        OpenCodeRuntimeMode::SingleServer => model_lmml.clone(),
+        OpenCodeRuntimeMode::DualManaged => {
+            let fast = state
+                .runtime
+                .profile("opencode-fast")
+                .ok_or(RuntimeCliError::UnknownProfile)?;
+            format!(
+                "llamacpp_fast/{}",
+                opencode_model_name(fast, "opencode-fast")?
+            )
+        }
+    };
     Ok(RoutingPlan {
         model: routing_decision(current, "model", routing.model, model_lmml),
         small_model: routing_decision(
@@ -1082,6 +1198,9 @@ fn provider_conflicts(current: &Value, desired: &Value) -> bool {
         return false;
     };
     ["llamacpp", "llamacpp_fast"].into_iter().any(|key| {
+        if desired_provider.get(key).is_some_and(Value::is_null) {
+            return current_provider.contains_key(key);
+        }
         current_provider
             .get(key)
             .zip(desired_provider.get(key))
@@ -1236,6 +1355,43 @@ pub enum RuntimeCliError {
         /// Missing binary path.
         path: PathBuf,
     },
+    /// GGUF metadata could not be inspected before launch.
+    #[error("could not inspect GGUF runtime compatibility for {path}: {source}")]
+    GgufInspection {
+        /// Model path inspected.
+        path: PathBuf,
+        /// GGUF parser error.
+        #[source]
+        source: lmml_models::GgufError,
+    },
+    /// GGUF tensor types are unsupported by trusted LMML runtimes.
+    #[error("GGUF {path} uses unsupported tensor type IDs {tensor_types:?}")]
+    UnsupportedGguf {
+        /// Model path inspected.
+        path: PathBuf,
+        /// Unsupported raw tensor type identifiers.
+        tensor_types: std::collections::BTreeSet<u32>,
+    },
+    /// An expert runtime override conflicts with the model requirement.
+    #[error(
+        "GGUF {path} requires the {required} runtime, but the configured override selects {selected}"
+    )]
+    RuntimeOverrideIncompatible {
+        /// Model path inspected.
+        path: PathBuf,
+        /// Runtime required by GGUF contents.
+        required: lmml_compat::LlamaRuntimeFlavor,
+        /// Runtime selected by the operator override.
+        selected: lmml_compat::LlamaRuntimeFlavor,
+    },
+    /// The compatible runtime has not been built or configured.
+    #[error("{flavor} runtime is required but its llama-server binary is unavailable: {path}")]
+    RuntimeUnavailable {
+        /// Required runtime flavor.
+        flavor: lmml_compat::LlamaRuntimeFlavor,
+        /// Expected binary path.
+        path: PathBuf,
+    },
     /// Runtime profile already has a live managed process.
     #[error("runtime profile `{profile}` is already running with pid {pid}; stop it first")]
     AlreadyRunning {
@@ -1321,6 +1477,20 @@ pub enum RuntimeCliError {
     /// Existing lmml-owned OpenCode provider differs from the desired value.
     #[error("OpenCode config contains conflicting lmml provider entries; review --dry-run output and rerun with --force if intended")]
     Conflict,
+    /// Oh My OpenAgent routing cannot be synchronized because its config is absent.
+    #[error("Oh My OpenAgent config does not exist: {path}")]
+    MissingOpenAgentConfig {
+        /// Expected config path.
+        path: PathBuf,
+    },
+    /// A two-file config transaction failed and rollback also failed.
+    #[error("configuration transaction failed ({failure}) and rollback failed ({rollback})")]
+    TransactionRollback {
+        /// Original transaction error.
+        failure: String,
+        /// Compensating rollback error.
+        rollback: String,
+    },
     /// JSON had an unsupported shape for safe structural patching.
     #[error("unexpected OpenCode JSON shape at {path}: expected {expected}")]
     UnexpectedJsonShape {
@@ -1425,7 +1595,6 @@ mod tests {
     fn opencode_config_matches_managed_profiles() {
         let mut state = AppState::default();
         state.runtime.opencode.model = PathBuf::from("/models/full.gguf");
-        state.runtime.opencode_fast.model = PathBuf::from("/models/fast.gguf");
 
         let rendered = render_opencode_config(&state).expect("render config");
         let json: Value = serde_json::from_str(&rendered).expect("valid json");
@@ -1434,12 +1603,47 @@ mod tests {
             json["provider"]["llamacpp"]["options"]["baseURL"],
             "http://127.0.0.1:1200/v1"
         );
+        assert!(json["provider"].get("llamacpp_fast").is_none());
+        assert_eq!(json["model"], "llamacpp/full.gguf");
+        assert_eq!(json["small_model"], "llamacpp/full.gguf");
+        assert!(json.get("compaction").is_none());
+    }
+
+    #[test]
+    fn single_server_config_uses_interactive_model_and_endpoint() {
+        let mut state = AppState::default();
+        state.runtime.opencode.model = PathBuf::from("/models/stale-managed.gguf");
+        state.model.last_used = PathBuf::from("/models/live-interactive.gguf");
+        state.server.host = "127.0.0.2".to_string();
+        state.server.port = 1300;
+
+        let rendered = render_opencode_config(&state).expect("render config");
+        let json: Value = serde_json::from_str(&rendered).expect("valid json");
+
+        assert_eq!(json["model"], "llamacpp/live-interactive.gguf");
+        assert_eq!(json["small_model"], "llamacpp/live-interactive.gguf");
         assert_eq!(
-            json["provider"]["llamacpp_fast"]["options"]["baseURL"],
-            "http://127.0.0.1:1200/v1"
+            json["provider"]["llamacpp"]["options"]["baseURL"],
+            "http://127.0.0.2:1300/v1"
         );
+        assert!(json["provider"]["llamacpp"]["models"]
+            .get("stale-managed.gguf")
+            .is_none());
+    }
+
+    #[test]
+    fn opencode_dual_mode_requires_and_renders_two_real_profiles() {
+        let mut state = AppState::default();
+        state.runtime.mode = OpenCodeRuntimeMode::DualManaged;
+        state.runtime.opencode.model = PathBuf::from("/models/full.gguf");
+        state.runtime.opencode_fast.model = PathBuf::from("/models/fast.gguf");
+
+        let rendered = render_opencode_config(&state).expect("render dual config");
+        let json: Value = serde_json::from_str(&rendered).expect("valid json");
+
         assert_eq!(json["model"], "llamacpp/full.gguf");
         assert_eq!(json["small_model"], "llamacpp_fast/fast.gguf");
+        assert!(json["provider"].get("llamacpp_fast").is_some());
     }
 
     #[test]
@@ -1480,7 +1684,8 @@ mod tests {
         )
         .expect("write config");
 
-        let state = AppState::default();
+        let mut state = AppState::default();
+        state.runtime.opencode.model = PathBuf::from("/models/full.gguf");
         let plan = plan_opencode_configure(&state, &config_path, RoutingOptions::default(), false)
             .expect("plan");
 
@@ -1504,7 +1709,8 @@ mod tests {
         )
         .expect("write config");
 
-        let state = AppState::default();
+        let mut state = AppState::default();
+        state.runtime.opencode.model = PathBuf::from("/models/full.gguf");
         let plan = plan_opencode_configure(&state, &config_path, RoutingOptions::default(), false)
             .expect("plan");
 
@@ -1529,7 +1735,6 @@ mod tests {
 
         let mut state = AppState::default();
         state.runtime.opencode.model = PathBuf::from("/models/full.gguf");
-        state.runtime.opencode_fast.model = PathBuf::from("/models/fast.gguf");
         let plan = plan_opencode_configure(&state, &config_path, RoutingOptions::default(), false)
             .expect("plan");
 
@@ -1541,7 +1746,7 @@ mod tests {
         let updated = read_json_or_empty(&config_path).expect("read updated");
 
         assert_eq!(updated["model"], "llamacpp/full.gguf");
-        assert_eq!(updated["small_model"], "llamacpp_fast/fast.gguf");
+        assert_eq!(updated["small_model"], "llamacpp/full.gguf");
     }
 
     #[test]
@@ -1554,7 +1759,8 @@ mod tests {
         )
         .expect("write config");
 
-        let state = AppState::default();
+        let mut state = AppState::default();
+        state.runtime.opencode.model = PathBuf::from("/models/full.gguf");
         let routing = RoutingOptions {
             model: RoutingSource::Existing,
             small_model: RoutingSource::Existing,
@@ -1585,7 +1791,7 @@ mod tests {
         .expect("write config");
 
         let mut state = AppState::default();
-        state.runtime.opencode_fast.model = PathBuf::from("/models/fast.gguf");
+        state.runtime.opencode.model = PathBuf::from("/models/full.gguf");
         let routing = RoutingOptions {
             model: RoutingSource::Existing,
             small_model: RoutingSource::Lmml,
@@ -1598,7 +1804,7 @@ mod tests {
         let updated = read_json_or_empty(&config_path).expect("read updated");
 
         assert_eq!(updated["model"], "anthropic/claude-sonnet-4-5");
-        assert_eq!(updated["small_model"], "llamacpp_fast/fast.gguf");
+        assert_eq!(updated["small_model"], "llamacpp/full.gguf");
     }
 
     #[test]
@@ -1609,13 +1815,12 @@ mod tests {
 
         let mut state = AppState::default();
         state.runtime.opencode.model = PathBuf::from("/models/full.gguf");
-        state.runtime.opencode_fast.model = PathBuf::from("/models/fast.gguf");
         apply_opencode_configure(&state, &config_path, RoutingOptions::default(), false)
             .expect("apply config");
         let updated = read_json_or_empty(&config_path).expect("read updated");
 
         assert_eq!(updated["model"], "llamacpp/full.gguf");
-        assert_eq!(updated["small_model"], "llamacpp_fast/fast.gguf");
+        assert_eq!(updated["small_model"], "llamacpp/full.gguf");
     }
 
     #[test]
@@ -1624,7 +1829,8 @@ mod tests {
         let config_path = tempdir.path().join("opencode.json");
         fs::write(&config_path, r#"[]"#).expect("write config");
 
-        let state = AppState::default();
+        let mut state = AppState::default();
+        state.runtime.opencode.model = PathBuf::from("/models/full.gguf");
         let error = plan_opencode_configure(&state, &config_path, RoutingOptions::default(), false)
             .expect_err("shape error");
 
@@ -1640,7 +1846,8 @@ mod tests {
         let config_path = tempdir.path().join("opencode.json");
         fs::write(&config_path, r#"{"provider":[]}"#).expect("write config");
 
-        let state = AppState::default();
+        let mut state = AppState::default();
+        state.runtime.opencode.model = PathBuf::from("/models/full.gguf");
         let error = plan_opencode_configure(&state, &config_path, RoutingOptions::default(), false)
             .expect_err("shape error");
 
@@ -1656,7 +1863,8 @@ mod tests {
         let config_path = tempdir.path().join("opencode.json");
         fs::write(&config_path, r#"{"plugin":["keep"]}"#).expect("write config");
 
-        let state = AppState::default();
+        let mut state = AppState::default();
+        state.runtime.opencode.model = PathBuf::from("/models/full.gguf");
         let applied =
             apply_opencode_configure(&state, &config_path, RoutingOptions::default(), false)
                 .expect("apply config");
@@ -1676,7 +1884,8 @@ mod tests {
         let config_path = tempdir.path().join("opencode.json");
         fs::write(&config_path, r#"{"plugin":["keep"]}"#).expect("write config");
 
-        let state = AppState::default();
+        let mut state = AppState::default();
+        state.runtime.opencode.model = PathBuf::from("/models/full.gguf");
         let first =
             apply_opencode_configure(&state, &config_path, RoutingOptions::default(), false)
                 .expect("first apply");
@@ -1687,6 +1896,70 @@ mod tests {
         assert_ne!(first.backup_path, second.backup_path);
         assert!(first.backup_path.exists());
         assert!(second.backup_path.exists());
+    }
+
+    #[test]
+    fn single_server_update_preserves_user_settings_and_removes_fake_fast_provider() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let config_path = tempdir.path().join("opencode.json");
+        fs::write(
+            &config_path,
+            r#"{
+                "snapshot": false,
+                "plugin": ["keep"],
+                "compaction": {"auto": true, "prune": true, "reserved": 65536},
+                "provider": {
+                    "llamacpp": {
+                        "npm": "@ai-sdk/openai-compatible",
+                        "name": "old",
+                        "options": {
+                            "baseURL": "http://127.0.0.1:9999/v1",
+                            "timeout": 123456,
+                            "chunkTimeout": 654321,
+                            "apiKey": "preserve"
+                        },
+                        "models": {"old.gguf": {"name": "old"}}
+                    },
+                    "llamacpp_fast": {"name": "obsolete"}
+                }
+            }"#,
+        )
+        .expect("write config");
+        let mut state = AppState::default();
+        state.runtime.opencode.model = PathBuf::from("/models/current.gguf");
+
+        apply_opencode_configure(&state, &config_path, RoutingOptions::default(), true)
+            .expect("apply single-server config");
+        let updated = read_json_or_empty(&config_path).expect("read updated");
+
+        assert_eq!(updated["snapshot"], false);
+        assert_eq!(updated["plugin"][0], "keep");
+        assert_eq!(updated["compaction"]["reserved"], 65_536);
+        assert_eq!(
+            updated["provider"]["llamacpp"]["options"]["timeout"],
+            123_456
+        );
+        assert_eq!(
+            updated["provider"]["llamacpp"]["options"]["chunkTimeout"],
+            654_321
+        );
+        assert_eq!(
+            updated["provider"]["llamacpp"]["options"]["apiKey"],
+            "preserve"
+        );
+        assert!(updated["provider"].get("llamacpp_fast").is_none());
+        assert_eq!(updated["model"], "llamacpp/current.gguf");
+        assert_eq!(updated["small_model"], "llamacpp/current.gguf");
+    }
+
+    #[test]
+    fn opencode_config_refuses_unset_model_instead_of_emitting_placeholder() {
+        let error = render_opencode_config(&AppState::default()).expect_err("unset model");
+
+        assert!(matches!(
+            error,
+            RuntimeCliError::MissingModel { ref profile } if profile == "opencode"
+        ));
     }
 
     #[test]

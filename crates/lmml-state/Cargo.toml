@@ -7,6 +7,7 @@ license = "Apache-2.0"
 repository = "https://github.com/soulhash-labs/lmml"
 
 [dependencies]
+lmml-compat = { path = "../lmml-compat" }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 toml = "0.8"

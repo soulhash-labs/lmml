@@ -10,7 +10,8 @@ repository = "https://github.com/soulhash-labs/lmml"
 libc = "0.2"
 lmml-compat = { path = "../lmml-compat" }
 lmml-models = { path = "../lmml-models" }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt", "sync", "time"] }
 tracing = "0.1"

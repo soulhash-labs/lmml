@@ -108,6 +108,13 @@ fn selected_model_lines(app: &App) -> Vec<Line<'static>> {
         ))];
     };
     let fit = app.model_vram_fit(model);
+    let runtime_label = match &model.runtime {
+        lmml_models::GgufRuntimeRequirement::Upstream => "upstream".to_string(),
+        lmml_models::GgufRuntimeRequirement::Prism => "prism".to_string(),
+        lmml_models::GgufRuntimeRequirement::Unsupported { tensor_types } => {
+            format!("unsupported ({})", format_tensor_types(tensor_types))
+        }
+    };
     let mut lines = vec![
         Line::from(format!("Name: {}", model.name)),
         Line::from(format!("Path: {}", model.path.display())),
@@ -124,6 +131,11 @@ fn selected_model_lines(app: &App) -> Vec<Line<'static>> {
             lmml_models::format_size(model.size_bytes)
         )),
         Line::from(format!("Quant: {}", model.quant)),
+        Line::from(format!("Required runtime: {runtime_label}")),
+        Line::from(format!(
+            "Tensor type IDs: {}",
+            format_tensor_types(&model.tensor_types)
+        )),
         Line::from(format!(
             "Architecture: {}",
             model.architecture.as_deref().unwrap_or("unknown")
@@ -142,6 +154,22 @@ fn selected_model_lines(app: &App) -> Vec<Line<'static>> {
             app.model_recommended_ngl(model)
         )),
     ];
+
+    if let Some(flavor) = model.runtime.flavor() {
+        let binary = app.state.build.runtime_binary(flavor);
+        lines.push(Line::from(format!(
+            "Runtime binary: {} ({})",
+            binary.display(),
+            if binary.is_file() {
+                "ready"
+            } else {
+                "not built"
+            }
+        )));
+    }
+    for key in &model.prism_metadata_keys {
+        lines.push(Line::from(format!("Prism metadata: {key}")));
+    }
 
     let catalog_match = lmml_models::catalog::match_known_model_name(&model.name).or_else(|| {
         model
@@ -183,6 +211,17 @@ fn selected_model_lines(app: &App) -> Vec<Line<'static>> {
     }
 
     lines
+}
+
+fn format_tensor_types(types: &std::collections::BTreeSet<u32>) -> String {
+    if types.is_empty() {
+        return "none detected".to_string();
+    }
+    types
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 trait VramFitLabel {

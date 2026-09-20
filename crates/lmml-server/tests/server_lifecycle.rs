@@ -105,6 +105,33 @@ async fn stub_that_never_listens_fails_with_timeout() {
 }
 
 #[tokio::test]
+async fn ready_server_with_wrong_model_is_rejected() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let binary = write_stub_server(tempdir.path());
+    let port = free_port();
+    let manager = ServerManager {
+        binary,
+        caps: caps(),
+    };
+    let (log_tx, _log_rx) = mpsc::channel(32);
+    let mut config = config(port);
+    config.extra_args = vec!["--stub-mode".to_string(), "wrong-model".to_string()];
+
+    let error = manager
+        .start_with_timeout(
+            &model(tempdir.path()),
+            &config,
+            log_tx,
+            Duration::from_secs(2),
+        )
+        .await
+        .expect_err("mismatched model identity must fail admission");
+
+    assert!(error.to_string().contains("other.gguf"));
+    assert!(error.to_string().contains("model.gguf"));
+}
+
+#[tokio::test]
 async fn occupied_port_fails_before_spawn() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let binary = write_stub_server(tempdir.path());
@@ -139,12 +166,14 @@ fn write_stub_server(dir: &Path) -> PathBuf {
 MODE="ready"
 HOST="127.0.0.1"
 PORT="8080"
+MODEL=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --host) shift; HOST="$1" ;;
     --port) shift; PORT="$1" ;;
+    --model|-m) shift; MODEL="$1" ;;
     --stub-mode) shift; MODE="$1" ;;
-    --model|-m|--ctx-size|--context-size|-c|-ngl|--n-gpu-layers|--batch-size|-b|--threads|-t|--ubatch-size|--micro-batch-size|-ub) shift ;;
+    --ctx-size|--context-size|-c|-ngl|--n-gpu-layers|--batch-size|-b|--threads|-t|--ubatch-size|--micro-batch-size|-ub) shift ;;
   esac
   shift
 done
@@ -152,13 +181,19 @@ if [ "$MODE" = "never" ]; then
   sleep 60
   exit 0
 fi
+if [ "$MODE" = "wrong-model" ]; then
+  MODEL="other.gguf"
+fi
 sleep 0.5
-exec python3 -u - "$HOST" "$PORT" <<'PY'
+exec python3 -u - "$HOST" "$PORT" "$MODEL" <<'PY'
 import http.server
+import json
+import os
 import sys
 
 host = sys.argv[1]
 port = int(sys.argv[2])
+model = os.path.basename(sys.argv[3])
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -166,6 +201,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"ok")
+        elif self.path == "/v1/models":
+            body = json.dumps({"data": [{"id": model}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         else:
             self.send_response(404)
             self.end_headers()
@@ -215,6 +257,9 @@ fn model(dir: &Path) -> ModelEntry {
         quant: "unknown".to_string(),
         context_length: None,
         architecture: None,
+        runtime: lmml_models::GgufRuntimeRequirement::Upstream,
+        tensor_types: std::collections::BTreeSet::new(),
+        prism_metadata_keys: std::collections::BTreeSet::new(),
         aliased: false,
     }
 }

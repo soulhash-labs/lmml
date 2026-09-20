@@ -613,6 +613,9 @@ mod tests {
             context_length: Some(4096),
             architecture: Some("llama".to_string()),
             aliased: false,
+            runtime: lmml_models::GgufRuntimeRequirement::Upstream,
+            tensor_types: std::collections::BTreeSet::new(),
+            prism_metadata_keys: std::collections::BTreeSet::new(),
         }
     }
 }

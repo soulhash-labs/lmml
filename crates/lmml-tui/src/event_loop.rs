@@ -373,7 +373,20 @@ impl EventLoop {
                     return;
                 };
                 let config = app.server_config(&model);
-                let binary = app.state.build.binary.clone();
+                let runtime =
+                    match crate::runtime_cli::resolve_model_runtime(&app.state.build, &model.path)
+                        .await
+                    {
+                        Ok(runtime) => runtime,
+                        Err(error) => {
+                            let _ignored = tx
+                                .send(AppEvent::ServerStarted(Err(error.to_string())))
+                                .await;
+                            return;
+                        }
+                    };
+                app.prepare_server_start(model.clone(), &runtime);
+                let binary = runtime.binary;
                 spawn_server_start(tx, binary, model, config, None);
             }
             Action::ProbeServerCapabilities => {
@@ -400,12 +413,25 @@ impl EventLoop {
             }
             Action::ConfirmModelSwap(model) => {
                 app.dispatch(Action::ConfirmModelSwap(model.clone()));
+                let tx = self.app_tx.clone();
+                let config = app.server_config(&model);
+                let runtime =
+                    match crate::runtime_cli::resolve_model_runtime(&app.state.build, &model.path)
+                        .await
+                    {
+                        Ok(runtime) => runtime,
+                        Err(error) => {
+                            let _ignored = tx
+                                .send(AppEvent::ServerStarted(Err(error.to_string())))
+                                .await;
+                            return;
+                        }
+                    };
+                app.prepare_server_start(model.clone(), &runtime);
                 if let Some(handle) = self.server_handle.take() {
                     handle.stop().await;
                 }
-                let tx = self.app_tx.clone();
-                let config = app.server_config(&model);
-                let binary = app.state.build.binary.clone();
+                let binary = runtime.binary;
                 spawn_server_start(tx, binary, model.clone(), config, Some(model));
             }
             Action::Quit => {
@@ -453,8 +479,9 @@ async fn current_fingerprint(
 ) -> Result<lmml_build::BuildFingerprint, lmml_build::BuildError> {
     let commit = lmml_build::current_commit(&config.source_dir).await?;
     let args = lmml_build::cmake_configure_args(config);
-    Ok(lmml_build::build_fingerprint(
+    Ok(lmml_build::build_fingerprint_for_config(
         commit,
+        config,
         &args,
         lmml_build::expected_server_binary(&config.source_dir),
     ))
@@ -465,12 +492,32 @@ fn persisted_fingerprint_matches(
     config: &lmml_build::BuildConfig,
     fingerprint: &lmml_build::BuildFingerprint,
 ) -> bool {
-    !fingerprint.needs_rebuild()
-        && persisted.commit == fingerprint.commit
-        && persisted.cmake_hash == lmml_build::hash_to_hex(&fingerprint.cmake_hash)
-        && persisted.backend == backend_name(&config.backend)
-        && persisted.archs == backend_archs(&config.backend)
-        && persisted.sccache_used == config.sccache.is_some()
+    if fingerprint.needs_rebuild()
+        || fingerprint.flavor != config.flavor
+        || fingerprint.source_url != config.flavor.repository_url()
+    {
+        return false;
+    }
+    let cmake_hash = lmml_build::hash_to_hex(&fingerprint.cmake_hash);
+    let backend = backend_name(&config.backend);
+    let archs = backend_archs(&config.backend);
+    match fingerprint.flavor {
+        lmml_compat::LlamaRuntimeFlavor::Upstream => {
+            persisted.commit == fingerprint.commit
+                && persisted.cmake_hash == cmake_hash
+                && persisted.backend == backend
+                && persisted.archs == archs
+                && persisted.sccache_used == config.sccache.is_some()
+        }
+        lmml_compat::LlamaRuntimeFlavor::Prism => {
+            persisted.prism.source_url == fingerprint.source_url
+                && persisted.prism.commit == fingerprint.commit
+                && persisted.prism.cmake_hash == cmake_hash
+                && persisted.prism.backend == backend
+                && persisted.prism.archs == archs
+                && persisted.prism.sccache_used == config.sccache.is_some()
+        }
+    }
 }
 
 fn backend_name(backend: &lmml_detect::BuildBackend) -> String {
@@ -673,6 +720,39 @@ mod tests {
 
         assert!(!persisted_fingerprint_matches(
             &persisted, &config, &changed
+        ));
+    }
+
+    #[test]
+    fn persisted_prism_fingerprint_is_isolated_from_upstream_state() {
+        let binary = std::env::current_exe().expect("current test executable");
+        let config = lmml_build::BuildConfig::for_flavor(
+            PathBuf::from("/tmp/lmml-prism"),
+            BuildBackend::Cuda {
+                archs: vec!["sm_120"],
+            },
+            lmml_compat::LlamaRuntimeFlavor::Prism,
+        );
+        let args = lmml_build::cmake_configure_args(&config);
+        let fingerprint = lmml_build::build_fingerprint_for_config(
+            "prism-commit",
+            &config,
+            &args,
+            binary.clone(),
+        );
+        let mut persisted = lmml_state::BuildState::default();
+        persisted.binary = PathBuf::from("/tmp/upstream/llama-server");
+        persisted.commit = "upstream-commit".to_string();
+        persisted.prism.binary = binary;
+        persisted.prism.commit = "prism-commit".to_string();
+        persisted.prism.cmake_hash = lmml_build::hash_to_hex(&fingerprint.cmake_hash);
+        persisted.prism.backend = "Cuda".to_string();
+        persisted.prism.archs = vec!["sm_120".to_string()];
+
+        assert!(persisted_fingerprint_matches(
+            &persisted,
+            &config,
+            &fingerprint
         ));
     }
 

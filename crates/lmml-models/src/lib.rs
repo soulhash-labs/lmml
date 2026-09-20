@@ -30,8 +30,40 @@ pub struct ModelEntry {
     pub context_length: Option<u32>,
     /// Architecture from GGUF metadata.
     pub architecture: Option<String>,
+    /// Runtime implementation required by this GGUF.
+    pub runtime: GgufRuntimeRequirement,
+    /// Raw GGML tensor type identifiers found in the GGUF.
+    pub tensor_types: BTreeSet<u32>,
+    /// Prism-specific activation-transform metadata keys.
+    pub prism_metadata_keys: BTreeSet<String>,
     /// True when the model came from an alias/external path.
     pub aliased: bool,
+}
+
+/// Runtime compatibility inferred from GGUF contents.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum GgufRuntimeRequirement {
+    /// All observed tensor types are supported by upstream llama.cpp.
+    #[default]
+    Upstream,
+    /// Prism tensor types or activation-transform metadata require PrismML.
+    Prism,
+    /// The file contains tensor types unsupported by known trusted runtimes.
+    Unsupported {
+        /// Raw unsupported GGML tensor type identifiers.
+        tensor_types: BTreeSet<u32>,
+    },
+}
+
+impl GgufRuntimeRequirement {
+    /// Return the trusted runtime flavor when the model is supported.
+    pub fn flavor(&self) -> Option<lmml_compat::LlamaRuntimeFlavor> {
+        match self {
+            Self::Upstream => Some(lmml_compat::LlamaRuntimeFlavor::Upstream),
+            Self::Prism => Some(lmml_compat::LlamaRuntimeFlavor::Prism),
+            Self::Unsupported { .. } => None,
+        }
+    }
 }
 
 impl ModelEntry {
@@ -481,6 +513,14 @@ pub struct GgufMetadata {
     pub block_count: Option<u32>,
     /// Quantization inferred from tensor types.
     pub quant: Option<String>,
+    /// Raw value of `general.file_type` when present.
+    pub file_type: Option<u32>,
+    /// Raw GGML tensor type identifiers retained even when unknown.
+    pub tensor_types: BTreeSet<u32>,
+    /// Metadata keys that request Prism activation transforms.
+    pub prism_metadata_keys: BTreeSet<String>,
+    /// Runtime requirement inferred from tensor IDs and metadata.
+    pub runtime: GgufRuntimeRequirement,
 }
 
 /// Parse a GGUF file into a [`ModelEntry`].
@@ -516,6 +556,20 @@ pub async fn parse_model_file(path: impl AsRef<Path>, aliased: bool) -> Option<M
         quant,
         context_length: gguf.as_ref().and_then(|metadata| metadata.context_length),
         architecture,
+        runtime: gguf
+            .as_ref()
+            .map(|metadata| metadata.runtime.clone())
+            .unwrap_or_else(|| GgufRuntimeRequirement::Unsupported {
+                tensor_types: BTreeSet::new(),
+            }),
+        tensor_types: gguf
+            .as_ref()
+            .map(|metadata| metadata.tensor_types.clone())
+            .unwrap_or_default(),
+        prism_metadata_keys: gguf
+            .as_ref()
+            .map(|metadata| metadata.prism_metadata_keys.clone())
+            .unwrap_or_default(),
         aliased,
     })
 }
@@ -551,10 +605,13 @@ where
         let key = read_string(reader).await?;
         let value_type = read_u32(reader).await?;
         let value = read_value(reader, value_type).await?;
+        if key.starts_with("prism.hadamard.") {
+            metadata.prism_metadata_keys.insert(key.clone());
+        }
         apply_metadata_value(&mut metadata, &key, value);
     }
 
-    let mut tensor_types = BTreeSet::new();
+    let mut quant_types = BTreeSet::new();
     for _ in 0..tensor_count {
         let _name = read_string(reader).await?;
         let dimensions = read_u32(reader).await?;
@@ -563,11 +620,13 @@ where
         }
         let tensor_type = read_u32(reader).await?;
         let _offset = read_u64(reader).await?;
+        metadata.tensor_types.insert(tensor_type);
         if let Some(quant) = tensor_type_to_quant(tensor_type) {
-            tensor_types.insert(quant.to_string());
+            quant_types.insert(quant.to_string());
         }
     }
-    metadata.quant = quant_from_tensor_types(&tensor_types);
+    metadata.quant = quant_from_tensor_types(&quant_types);
+    metadata.runtime = classify_runtime(&metadata.tensor_types, &metadata.prism_metadata_keys);
     Ok(metadata)
 }
 
@@ -643,6 +702,7 @@ fn apply_metadata_value(metadata: &mut GgufMetadata, key: &str, value: GgufValue
     match (key, value) {
         ("general.name", GgufValue::String(value)) => metadata.name = Some(value),
         ("general.architecture", GgufValue::String(value)) => metadata.architecture = Some(value),
+        ("general.file_type", value) => metadata.file_type = value_to_u32(value),
         (key, value) if key.ends_with(".context_length") => {
             metadata.context_length = value_to_u32(value);
         }
@@ -811,7 +871,32 @@ fn tensor_type_to_quant(tensor_type: u32) -> Option<&'static str> {
         13 => Some("Q5_K"),
         14 => Some("Q6_K"),
         15 => Some("Q8_K"),
+        42 => Some("Q2_0"),
+        142 => Some("PQ2_0"),
+        143 => Some("PTQ1_0"),
         _ => None,
+    }
+}
+
+fn classify_runtime(
+    tensor_types: &BTreeSet<u32>,
+    prism_metadata_keys: &BTreeSet<String>,
+) -> GgufRuntimeRequirement {
+    if tensor_types.contains(&142) || tensor_types.contains(&143) || !prism_metadata_keys.is_empty()
+    {
+        return GgufRuntimeRequirement::Prism;
+    }
+    let unsupported = tensor_types
+        .iter()
+        .copied()
+        .filter(|tensor_type| *tensor_type > 42)
+        .collect::<BTreeSet<_>>();
+    if unsupported.is_empty() {
+        GgufRuntimeRequirement::Upstream
+    } else {
+        GgufRuntimeRequirement::Unsupported {
+            tensor_types: unsupported,
+        }
     }
 }
 
@@ -893,7 +978,82 @@ mod tests {
                 embedding_length: Some(4096),
                 block_count: Some(32),
                 quant: Some("Q4_K".to_string()),
+                file_type: Some(12),
+                tensor_types: BTreeSet::from([12]),
+                prism_metadata_keys: BTreeSet::new(),
+                runtime: GgufRuntimeRequirement::Upstream,
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn classifies_prism_and_unknown_tensor_formats_from_contents() {
+        for tensor_type in [142, 143] {
+            let mut reader = std::io::Cursor::new(fixture_gguf_with(tensor_type, false));
+            let metadata = parse_gguf_reader(&mut reader)
+                .await
+                .expect("parse Prism GGUF");
+            assert_eq!(metadata.runtime, GgufRuntimeRequirement::Prism);
+            assert_eq!(metadata.tensor_types, BTreeSet::from([tensor_type]));
+        }
+
+        let mut reader = std::io::Cursor::new(fixture_gguf_with(144, false));
+        let metadata = parse_gguf_reader(&mut reader)
+            .await
+            .expect("parse unknown GGUF tensor type");
+        assert_eq!(
+            metadata.runtime,
+            GgufRuntimeRequirement::Unsupported {
+                tensor_types: BTreeSet::from([144]),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn prism_activation_metadata_requires_prism_with_upstream_tensor_types() {
+        let mut reader = std::io::Cursor::new(fixture_gguf_with(12, true));
+        let metadata = parse_gguf_reader(&mut reader)
+            .await
+            .expect("parse Prism metadata");
+
+        assert_eq!(metadata.runtime, GgufRuntimeRequirement::Prism);
+        assert_eq!(
+            metadata.prism_metadata_keys,
+            BTreeSet::from(["prism.hadamard.output".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn official_type_42_remains_upstream_compatible() {
+        let mut reader = std::io::Cursor::new(fixture_gguf_with(42, false));
+        let metadata = parse_gguf_reader(&mut reader)
+            .await
+            .expect("parse Q2_0 GGUF");
+
+        assert_eq!(metadata.quant.as_deref(), Some("Q2_0"));
+        assert_eq!(metadata.runtime, GgufRuntimeRequirement::Upstream);
+    }
+
+    #[tokio::test]
+    async fn reparsing_replaced_file_recomputes_runtime_requirement() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir.path().join("replaceable.gguf");
+        std::fs::write(&path, fixture_gguf_with(12, false)).expect("write upstream fixture");
+        assert_eq!(
+            parse_gguf_metadata(&path)
+                .await
+                .expect("parse upstream")
+                .runtime,
+            GgufRuntimeRequirement::Upstream
+        );
+
+        std::fs::write(&path, fixture_gguf_with(142, false)).expect("replace with Prism fixture");
+        assert_eq!(
+            parse_gguf_metadata(&path)
+                .await
+                .expect("parse Prism")
+                .runtime,
+            GgufRuntimeRequirement::Prism
         );
     }
 
@@ -928,6 +1088,9 @@ mod tests {
             quant: "Q4_K_M".to_string(),
             context_length: None,
             architecture: None,
+            runtime: GgufRuntimeRequirement::Upstream,
+            tensor_types: BTreeSet::new(),
+            prism_metadata_keys: BTreeSet::new(),
             aliased: false,
         };
         let gpu = GpuInfo {
@@ -990,6 +1153,11 @@ mod tests {
             quant: "unknown".to_string(),
             context_length: None,
             architecture: None,
+            runtime: GgufRuntimeRequirement::Unsupported {
+                tensor_types: BTreeSet::new(),
+            },
+            tensor_types: BTreeSet::new(),
+            prism_metadata_keys: BTreeSet::new(),
             aliased: false,
         };
 
@@ -1068,21 +1236,29 @@ mod tests {
     }
 
     fn fixture_gguf() -> Vec<u8> {
+        fixture_gguf_with(12, false)
+    }
+
+    fn fixture_gguf_with(tensor_type: u32, prism_metadata: bool) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"GGUF");
         bytes.extend_from_slice(&3_u32.to_le_bytes());
         bytes.extend_from_slice(&1_u64.to_le_bytes());
-        bytes.extend_from_slice(&5_u64.to_le_bytes());
+        bytes.extend_from_slice(&(if prism_metadata { 7_u64 } else { 6_u64 }).to_le_bytes());
         write_kv_string(&mut bytes, "general.name", "Mistral Test");
         write_kv_string(&mut bytes, "general.architecture", "llama");
+        write_kv_u32(&mut bytes, "general.file_type", tensor_type);
         write_kv_u32(&mut bytes, "llama.context_length", 4096);
         write_kv_u32(&mut bytes, "llama.embedding_length", 4096);
         write_kv_u32(&mut bytes, "llama.block_count", 32);
+        if prism_metadata {
+            write_kv_u32(&mut bytes, "prism.hadamard.output", 1);
+        }
         write_string(&mut bytes, "blk.0.attn_q.weight");
         bytes.extend_from_slice(&2_u32.to_le_bytes());
         bytes.extend_from_slice(&4096_u64.to_le_bytes());
         bytes.extend_from_slice(&4096_u64.to_le_bytes());
-        bytes.extend_from_slice(&12_u32.to_le_bytes());
+        bytes.extend_from_slice(&tensor_type.to_le_bytes());
         bytes.extend_from_slice(&0_u64.to_le_bytes());
         bytes
     }

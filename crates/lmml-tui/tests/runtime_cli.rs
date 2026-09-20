@@ -26,7 +26,8 @@ fn runtime_read_only_commands_do_not_create_state_file() {
         .output()
         .expect("run runtime print-config");
 
-    assert!(output.status.success());
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no model configured"));
     assert!(!state_path.exists());
 
     let output = Command::new(env!("CARGO_BIN_EXE_lmml"))
@@ -51,7 +52,7 @@ fn runtime_start_logs_and_stop_manage_detached_profile() {
 
     let server = write_stub_server(tempdir.path());
     let model = tempdir.path().join("model.gguf");
-    fs::write(&model, b"stub model").expect("model");
+    fs::write(&model, fixture_gguf()).expect("model");
     let port = free_port();
     let state_path = lmml_config_dir.join("state.toml");
     let mut state = lmml_state::AppState::default();
@@ -126,7 +127,7 @@ fn runtime_start_failure_kills_detached_descendant() {
     let server = write_stub_server(tempdir.path());
     let model = tempdir.path().join("model.gguf");
     let child_pid_file = tempdir.path().join("child.pid");
-    fs::write(&model, b"stub model").expect("model");
+    fs::write(&model, fixture_gguf()).expect("model");
     let port = free_port();
     let state_path = lmml_config_dir.join("state.toml");
     let mut state = lmml_state::AppState::default();
@@ -170,7 +171,7 @@ fn runtime_start_refuses_existing_live_profile_before_overwriting_pid() {
 
     let server = write_stub_server(tempdir.path());
     let model = tempdir.path().join("model.gguf");
-    fs::write(&model, b"stub model").expect("model");
+    fs::write(&model, fixture_gguf()).expect("model");
     let first_port = free_port();
     let state_path = lmml_config_dir.join("state.toml");
     let mut state = lmml_state::AppState::default();
@@ -246,13 +247,15 @@ HOST="127.0.0.1"
 PORT="8080"
 MODE="ready"
 PID_FILE=""
+MODEL=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --host) shift; HOST="$1" ;;
     --port) shift; PORT="$1" ;;
     --stub-mode) shift; MODE="$1" ;;
     --pid-file) shift; PID_FILE="$1" ;;
-    --model|-m|--ctx-size|--context-size|-c|-ngl|--n-gpu-layers|--batch-size|-b|--threads|-t|--ubatch-size|--micro-batch-size|-ub) shift ;;
+    --model|-m) shift; MODEL="$1" ;;
+    --ctx-size|--context-size|-c|-ngl|--n-gpu-layers|--batch-size|-b|--threads|-t|--ubatch-size|--micro-batch-size|-ub) shift ;;
   esac
   shift
 done
@@ -264,12 +267,15 @@ if [ "$MODE" = "never-child" ]; then
   exit 0
 fi
 echo "stub runtime ready on $HOST:$PORT"
-python3 -u - "$HOST" "$PORT" <<'PY' &
+python3 -u - "$HOST" "$PORT" "$MODEL" <<'PY' &
 import http.server
+import json
+import os
 import sys
 
 host = sys.argv[1]
 port = int(sys.argv[2])
+model = os.path.basename(sys.argv[3])
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -277,6 +283,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"ok")
+        elif self.path == "/v1/models":
+            body = json.dumps({"data": [{"id": model}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         else:
             self.send_response(404)
             self.end_headers()
@@ -298,6 +311,34 @@ wait "$!"
 fn free_port() -> u16 {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind free port");
     listener.local_addr().expect("local addr").port()
+}
+
+fn fixture_gguf() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"GGUF");
+    bytes.extend_from_slice(&3_u32.to_le_bytes());
+    bytes.extend_from_slice(&1_u64.to_le_bytes());
+    bytes.extend_from_slice(&2_u64.to_le_bytes());
+    write_kv_string(&mut bytes, "general.name", "Runtime Test");
+    write_kv_string(&mut bytes, "general.architecture", "llama");
+    write_string(&mut bytes, "blk.0.attn_q.weight");
+    bytes.extend_from_slice(&2_u32.to_le_bytes());
+    bytes.extend_from_slice(&1_u64.to_le_bytes());
+    bytes.extend_from_slice(&1_u64.to_le_bytes());
+    bytes.extend_from_slice(&12_u32.to_le_bytes());
+    bytes.extend_from_slice(&0_u64.to_le_bytes());
+    bytes
+}
+
+fn write_kv_string(bytes: &mut Vec<u8>, key: &str, value: &str) {
+    write_string(bytes, key);
+    bytes.extend_from_slice(&8_u32.to_le_bytes());
+    write_string(bytes, value);
+}
+
+fn write_string(bytes: &mut Vec<u8>, value: &str) {
+    bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(value.as_bytes());
 }
 
 fn wait_for_pid_file(path: &Path) -> u32 {

@@ -16,12 +16,15 @@ use thiserror::Error;
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::{mpsc, watch};
 
-const LLAMA_CPP_URL: &str = "https://github.com/ggml-org/llama.cpp.git";
+mod verification;
+
 const DEFAULT_LOG_TAIL_LINES: usize = 500;
 
 /// Build configuration for a llama.cpp source tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildConfig {
+    /// Trusted runtime flavor whose source tree is being built.
+    pub flavor: lmml_compat::LlamaRuntimeFlavor,
     /// Directory where llama.cpp source should exist.
     pub source_dir: PathBuf,
     /// Optional ref passed to `git checkout` after clone/update.
@@ -53,9 +56,23 @@ pub struct BuildConfig {
 impl BuildConfig {
     /// Create a build config with conservative defaults for a source directory.
     pub fn new(source_dir: PathBuf, backend: BuildBackend) -> Self {
-        Self {
+        Self::for_flavor(
             source_dir,
-            git_ref: None,
+            backend,
+            lmml_compat::LlamaRuntimeFlavor::Upstream,
+        )
+    }
+
+    /// Create a build config for one isolated trusted runtime flavor.
+    pub fn for_flavor(
+        source_dir: PathBuf,
+        backend: BuildBackend,
+        flavor: lmml_compat::LlamaRuntimeFlavor,
+    ) -> Self {
+        Self {
+            flavor,
+            source_dir,
+            git_ref: flavor.initial_ref().map(ToOwned::to_owned),
             backend,
             sccache: None,
             cuda_compiler: None,
@@ -162,6 +179,10 @@ impl RealBuildRunner {
 /// Fingerprint used to decide if a source tree needs rebuilding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildFingerprint {
+    /// Runtime flavor built by this invocation.
+    pub flavor: lmml_compat::LlamaRuntimeFlavor,
+    /// Trusted source repository used for the build.
+    pub source_url: String,
     /// Resolved source commit.
     pub commit: String,
     /// SHA-256 hash of the full CMake argv.
@@ -372,6 +393,26 @@ pub fn build_fingerprint(
     binary: PathBuf,
 ) -> BuildFingerprint {
     BuildFingerprint {
+        flavor: lmml_compat::LlamaRuntimeFlavor::Upstream,
+        source_url: lmml_compat::LlamaRuntimeFlavor::Upstream
+            .repository_url()
+            .to_string(),
+        commit: commit.into(),
+        cmake_hash: cmake_hash(cmake_args),
+        binary,
+    }
+}
+
+/// Build a fingerprint that binds source, flavor, CMake arguments, and binary.
+pub fn build_fingerprint_for_config(
+    commit: impl Into<String>,
+    config: &BuildConfig,
+    cmake_args: &[String],
+    binary: PathBuf,
+) -> BuildFingerprint {
+    BuildFingerprint {
+        flavor: config.flavor,
+        source_url: config.flavor.repository_url().to_string(),
         commit: commit.into(),
         cmake_hash: cmake_hash(cmake_args),
         binary,
@@ -476,8 +517,10 @@ async fn run_build_inner(
                 "-C".to_string(),
                 path_arg(&config.source_dir),
                 "fetch".to_string(),
-                "--tags".to_string(),
+                "--depth".to_string(),
+                "1".to_string(),
                 "origin".to_string(),
+                git_ref.clone(),
             ],
             tx,
             log_tail,
@@ -490,6 +533,7 @@ async fn run_build_inner(
                 "-C".to_string(),
                 path_arg(&config.source_dir),
                 "checkout".to_string(),
+                "--detach".to_string(),
                 git_ref.clone(),
             ],
             tx,
@@ -525,7 +569,7 @@ async fn run_build_inner(
     )
     .await;
     let server = expected_server_binary(&config.source_dir);
-    let fingerprint = build_fingerprint(commit, &configure_args, server.clone());
+    let fingerprint = build_fingerprint_for_config(commit, config, &configure_args, server.clone());
     let configure_env = cmake_configure_env(config);
     stream_command_with_env(
         "cmake",
@@ -569,12 +613,8 @@ async fn run_build_inner(
     verify_binary_help(&mtmd_cli).await?;
     verify_binary(&finetune).await?;
     verify_binary(&export_lora).await?;
-    if !is_executable(&server) {
-        return Err(BuildError::Verification(format!(
-            "expected server binary missing or not executable: {}",
-            server.display()
-        )));
-    }
+    verify_binary(&server).await?;
+    verification::verify_runtime(config, &server).await?;
     tracing::info!(binary = %server.display(), elapsed_ms = started.elapsed().as_millis(), "build completed");
 
     send_event(
@@ -627,20 +667,39 @@ async fn ensure_repo(
     log_tail: &mut LogTail,
     cancel_rx: &mut watch::Receiver<bool>,
 ) -> Result<(), BuildError> {
+    let repository_url = config.flavor.repository_url();
     if config.source_dir.join("CMakeLists.txt").exists() {
-        stream_command(
-            "git",
-            &[
-                "-C".to_string(),
-                path_arg(&config.source_dir),
-                "pull".to_string(),
-                "--ff-only".to_string(),
-            ],
-            tx,
-            log_tail,
-            cancel_rx,
-        )
-        .await
+        let source_dir = path_arg(&config.source_dir);
+        let actual_url = run_git(vec!["-C", &source_dir, "remote", "get-url", "origin"])
+            .await?
+            .trim()
+            .to_string();
+        if actual_url != repository_url {
+            return Err(BuildError::Verification(format!(
+                "{} runtime source mismatch at {}: expected {}, found {}; refusing to mix runtime source trees",
+                config.flavor,
+                config.source_dir.display(),
+                repository_url,
+                actual_url
+            )));
+        }
+        if config.git_ref.is_some() {
+            Ok(())
+        } else {
+            stream_command(
+                "git",
+                &[
+                    "-C".to_string(),
+                    path_arg(&config.source_dir),
+                    "pull".to_string(),
+                    "--ff-only".to_string(),
+                ],
+                tx,
+                log_tail,
+                cancel_rx,
+            )
+            .await
+        }
     } else {
         if let Some(parent) = config.source_dir.parent() {
             tokio::fs::create_dir_all(parent).await.map_err(|error| {
@@ -650,7 +709,7 @@ async fn ensure_repo(
         send_event(
             tx,
             BuildEvent::Cloning {
-                url: LLAMA_CPP_URL.to_string(),
+                url: repository_url.to_string(),
             },
         )
         .await;
@@ -660,7 +719,7 @@ async fn ensure_repo(
                 "clone".to_string(),
                 "--depth".to_string(),
                 "1".to_string(),
-                LLAMA_CPP_URL.to_string(),
+                repository_url.to_string(),
                 path_arg(&config.source_dir),
             ],
             tx,
@@ -1171,6 +1230,45 @@ mod tests {
             fs::set_permissions(&binary, perms).expect("chmod");
         }
         assert!(!fingerprint.needs_rebuild());
+    }
+
+    #[test]
+    fn runtime_flavors_use_isolated_sources_refs_and_fingerprints() {
+        let upstream = BuildConfig::for_flavor(
+            PathBuf::from("/data/runtimes/upstream/llama.cpp"),
+            BuildBackend::CpuFallback,
+            lmml_compat::LlamaRuntimeFlavor::Upstream,
+        );
+        let prism = BuildConfig::for_flavor(
+            PathBuf::from("/data/runtimes/prism/llama.cpp"),
+            BuildBackend::CpuFallback,
+            lmml_compat::LlamaRuntimeFlavor::Prism,
+        );
+        let args = vec!["cmake".to_string()];
+        let upstream_fingerprint = build_fingerprint_for_config(
+            "same-commit",
+            &upstream,
+            &args,
+            expected_server_binary(&upstream.source_dir),
+        );
+        let prism_fingerprint = build_fingerprint_for_config(
+            "same-commit",
+            &prism,
+            &args,
+            expected_server_binary(&prism.source_dir),
+        );
+
+        assert_eq!(upstream.git_ref, None);
+        assert_eq!(
+            prism.git_ref.as_deref(),
+            Some("d8f26eec76da6d09bb708bcba51ef64b8cd868a3")
+        );
+        assert_ne!(upstream.source_dir, prism.source_dir);
+        assert_ne!(upstream_fingerprint, prism_fingerprint);
+        assert_eq!(
+            prism_fingerprint.source_url,
+            "https://github.com/PrismML-Eng/llama.cpp.git"
+        );
     }
 
     #[test]
