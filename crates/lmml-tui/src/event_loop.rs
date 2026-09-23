@@ -516,6 +516,9 @@ fn persisted_fingerprint_matches(
                 && persisted.prism.backend == backend
                 && persisted.prism.archs == archs
                 && persisted.prism.sccache_used == config.sccache.is_some()
+                && crate::runtime_cli::prism_attestation_gaps(&persisted.prism).is_empty()
+                && (!matches!(config.backend, lmml_detect::BuildBackend::Rocm { .. })
+                    || persisted.prism.verified_rocm_targets == archs)
         }
     }
 }
@@ -748,7 +751,53 @@ mod tests {
         persisted.prism.cmake_hash = lmml_build::hash_to_hex(&fingerprint.cmake_hash);
         persisted.prism.backend = "Cuda".to_string();
         persisted.prism.archs = vec!["sm_120".to_string()];
+        persisted.prism.verification_version = lmml_build::RUNTIME_VERIFICATION_VERSION;
+        persisted.prism.verified_prism_tensor_types = vec![142, 143];
+        persisted.prism.verified_server_sha256 = "a".repeat(64);
 
+        assert!(persisted_fingerprint_matches(
+            &persisted,
+            &config,
+            &fingerprint
+        ));
+    }
+
+    #[test]
+    fn persisted_prism_rocm_fingerprint_requires_current_target_attestation() {
+        let binary = std::env::current_exe().expect("current test executable");
+        let config = lmml_build::BuildConfig::for_flavor(
+            PathBuf::from("/tmp/lmml-prism-rocm"),
+            BuildBackend::Rocm {
+                targets: vec!["gfx1201".to_string()],
+            },
+            lmml_compat::LlamaRuntimeFlavor::Prism,
+        );
+        let args = lmml_build::cmake_configure_args(&config);
+        let fingerprint = lmml_build::build_fingerprint_for_config(
+            "prism-rocm-commit",
+            &config,
+            &args,
+            binary.clone(),
+        );
+        let mut persisted = lmml_state::BuildState::default();
+        persisted.prism.binary = binary;
+        persisted.prism.commit = "prism-rocm-commit".to_string();
+        persisted.prism.cmake_hash = lmml_build::hash_to_hex(&fingerprint.cmake_hash);
+        persisted.prism.backend = "Rocm".to_string();
+        persisted.prism.archs = vec!["gfx1201".to_string()];
+
+        assert!(!persisted_fingerprint_matches(
+            &persisted,
+            &config,
+            &fingerprint
+        ));
+
+        persisted.prism.verification_version = lmml_build::RUNTIME_VERIFICATION_VERSION;
+        persisted.prism.verified_prism_tensor_types = vec![142, 143];
+        persisted.prism.verified_rocm_targets = vec!["gfx1201".to_string()];
+        persisted.prism.verified_server_sha256 = "a".repeat(64);
+        persisted.prism.verified_hip_library = PathBuf::from("/tmp/libggml-hip.so");
+        persisted.prism.verified_hip_library_sha256 = "b".repeat(64);
         assert!(persisted_fingerprint_matches(
             &persisted,
             &config,

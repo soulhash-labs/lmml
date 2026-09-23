@@ -216,6 +216,7 @@ pub struct App {
     pub build_log: Vec<String>,
     /// Whether a build is currently running.
     pub build_running: bool,
+    active_build_flavor: Option<lmml_compat::LlamaRuntimeFlavor>,
     /// Last completed build binary, if any.
     pub build_binary: Option<PathBuf>,
     /// Last build error, if any.
@@ -312,6 +313,7 @@ impl App {
             detect_log: Vec::new(),
             build_log: Vec::new(),
             build_running: false,
+            active_build_flavor: None,
             build_binary: None,
             build_error: None,
             server_log: Vec::new(),
@@ -533,6 +535,7 @@ impl App {
                 self.status_message = "Detecting system".to_string();
             }
             Action::StartBuild => {
+                self.invalidate_selected_prism_build("Prism build requested");
                 self.first_run_onboarding = false;
                 self.build_running = true;
                 self.build_error = None;
@@ -540,6 +543,7 @@ impl App {
                 self.status_message = "Build requested".to_string();
             }
             Action::CleanBuild => {
+                self.invalidate_selected_prism_build("Prism clean build requested");
                 self.first_run_onboarding = false;
                 self.build_running = true;
                 self.build_error = None;
@@ -646,6 +650,7 @@ impl App {
                 self.status_message = "Checking for updates".to_string();
             }
             Action::UpdateAndRebuild => {
+                self.invalidate_selected_prism_build("Prism update requested");
                 self.first_run_onboarding = false;
                 self.build_running = true;
                 self.build_error = None;
@@ -1116,6 +1121,13 @@ impl App {
 
     fn handle_build_event(&mut self, event: BuildEvent) {
         match event {
+            BuildEvent::Started { flavor } => {
+                self.active_build_flavor = Some(flavor);
+                if flavor == lmml_compat::LlamaRuntimeFlavor::Prism {
+                    invalidate_prism_verification(&mut self.state.build.prism);
+                    self.save_state_after("Prism build started");
+                }
+            }
             BuildEvent::Cloning { url } => {
                 self.build_running = true;
                 self.push_build_log(format!("Cloning {url}"));
@@ -1138,6 +1150,7 @@ impl App {
                 backend,
                 archs,
                 sccache_used,
+                verification,
                 ..
             } => {
                 self.build_running = false;
@@ -1164,8 +1177,16 @@ impl App {
                         prism.sccache_used = sccache_used;
                         prism.last_built = built_at.clone();
                         prism.last_verified = built_at;
+                        prism.verification_version = verification.version;
+                        prism.verified_prism_tensor_types = verification.prism_tensor_types;
+                        prism.verified_rocm_targets = verification.rocm_targets;
+                        prism.verified_server_sha256 = verification.server_sha256;
+                        prism.verified_hip_library = verification.hip_library.unwrap_or_default();
+                        prism.verified_hip_library_sha256 =
+                            verification.hip_library_sha256.unwrap_or_default();
                     }
                 }
+                self.active_build_flavor = None;
                 self.build_binary = Some(binary.clone());
                 self.build_error = None;
                 self.push_build_log(format!("Build complete: {}", binary.display()));
@@ -1177,6 +1198,14 @@ impl App {
                 log_tail,
             } => {
                 self.build_running = false;
+                let flavor = self
+                    .active_build_flavor
+                    .take()
+                    .unwrap_or_else(|| self.state.build.selected_build_flavor());
+                if flavor == lmml_compat::LlamaRuntimeFlavor::Prism {
+                    invalidate_prism_verification(&mut self.state.build.prism);
+                    self.save_state_after("Prism build failed");
+                }
                 for line in log_tail {
                     self.push_build_log(line);
                 }
@@ -1186,7 +1215,11 @@ impl App {
             BuildEvent::Cancelled => {
                 self.build_running = false;
                 self.build_error = Some("cancelled".to_string());
-                match self.state.build.selected_build_flavor() {
+                let flavor = self
+                    .active_build_flavor
+                    .take()
+                    .unwrap_or_else(|| self.state.build.selected_build_flavor());
+                match flavor {
                     lmml_compat::LlamaRuntimeFlavor::Upstream => {
                         self.state.build.cmake_hash.clear();
                         self.state.build.last_built.clear();
@@ -1194,7 +1227,7 @@ impl App {
                     lmml_compat::LlamaRuntimeFlavor::Prism => {
                         self.state.build.prism.cmake_hash.clear();
                         self.state.build.prism.last_built.clear();
-                        self.state.build.prism.last_verified.clear();
+                        invalidate_prism_verification(&mut self.state.build.prism);
                     }
                 }
                 self.push_build_log("Build cancelled");
@@ -1203,6 +1236,7 @@ impl App {
             }
             BuildEvent::Skipped { reason } => {
                 self.build_running = false;
+                self.active_build_flavor = None;
                 self.build_error = None;
                 self.build_binary = Some(
                     self.state
@@ -1217,13 +1251,22 @@ impl App {
     }
 
     fn sync_build_backend_after_detection(&mut self, profile: &SystemProfile) {
-        let BuildBackend::Cuda { archs } = profile.recommended_backend() else {
-            return;
+        let (backend_name, detected_archs, label) = match profile.recommended_backend() {
+            BuildBackend::Cuda { archs } => (
+                "Cuda",
+                archs
+                    .iter()
+                    .map(|arch| (*arch).to_string())
+                    .collect::<Vec<_>>(),
+                "CUDA build archs",
+            ),
+            BuildBackend::Rocm { targets } => ("Rocm", targets, "ROCm build targets"),
+            BuildBackend::Metal
+            | BuildBackend::Vulkan
+            | BuildBackend::CpuAvx2
+            | BuildBackend::CpuAvx
+            | BuildBackend::CpuFallback => return,
         };
-        let detected_archs = archs
-            .iter()
-            .map(|arch| (*arch).to_string())
-            .collect::<Vec<_>>();
         let flavor = self.state.build.selected_build_flavor();
         let (backend, persisted_archs) = match flavor {
             lmml_compat::LlamaRuntimeFlavor::Upstream => {
@@ -1234,7 +1277,10 @@ impl App {
                 &mut self.state.build.prism.archs,
             ),
         };
-        if backend != "Cuda" || detected_archs.is_empty() || detected_archs == *persisted_archs {
+        if backend != backend_name
+            || detected_archs.is_empty()
+            || detected_archs == *persisted_archs
+        {
             return;
         }
 
@@ -1249,15 +1295,23 @@ impl App {
             lmml_compat::LlamaRuntimeFlavor::Prism => {
                 self.state.build.prism.cmake_hash.clear();
                 self.state.build.prism.last_built.clear();
-                self.state.build.prism.last_verified.clear();
+                invalidate_prism_verification(&mut self.state.build.prism);
             }
         }
-        let label = match flavor {
-            lmml_compat::LlamaRuntimeFlavor::Upstream => "CUDA build archs".to_string(),
-            lmml_compat::LlamaRuntimeFlavor::Prism => "prism CUDA build archs".to_string(),
+        let label = if flavor == lmml_compat::LlamaRuntimeFlavor::Prism {
+            format!("prism {label}")
+        } else {
+            label.to_string()
         };
         self.detect_log
             .push(format!("{label} updated: {previous} -> {current}"));
+    }
+
+    fn invalidate_selected_prism_build(&mut self, reason: &str) {
+        if self.state.build.selected_build_flavor() == lmml_compat::LlamaRuntimeFlavor::Prism {
+            invalidate_prism_verification(&mut self.state.build.prism);
+            self.save_state_after(reason);
+        }
     }
 
     /// Build a `lmml-build` config from current app state.
@@ -1801,18 +1855,31 @@ fn refresh_backend_for_detected_profile(
                 | None => backend,
             }
         }
-        BuildBackend::Rocm { targets } if targets.is_empty() => {
-            if let Some(profile) = profile {
-                if profile.rocm.available && !profile.rocm.targets.is_empty() {
-                    return BuildBackend::Rocm {
-                        targets: profile.rocm.targets.clone(),
-                    };
-                }
+        BuildBackend::Rocm { targets } => match profile.map(SystemProfile::recommended_backend) {
+            Some(BuildBackend::Rocm { targets: detected }) if !detected.is_empty() => {
+                BuildBackend::Rocm { targets: detected }
             }
-            BuildBackend::Rocm { targets }
-        }
+            Some(BuildBackend::Cuda { .. })
+            | Some(BuildBackend::Metal)
+            | Some(BuildBackend::Rocm { .. })
+            | Some(BuildBackend::Vulkan)
+            | Some(BuildBackend::CpuAvx2)
+            | Some(BuildBackend::CpuAvx)
+            | Some(BuildBackend::CpuFallback)
+            | None => BuildBackend::Rocm { targets },
+        },
         backend => backend,
     }
+}
+
+fn invalidate_prism_verification(prism: &mut lmml_state::RuntimeFlavorBuildState) {
+    prism.last_verified.clear();
+    prism.verification_version = 0;
+    prism.verified_prism_tensor_types.clear();
+    prism.verified_rocm_targets.clear();
+    prism.verified_server_sha256.clear();
+    prism.verified_hip_library.clear();
+    prism.verified_hip_library_sha256.clear();
 }
 
 fn format_arch_list(archs: &[String]) -> String {
@@ -2401,7 +2468,7 @@ mod tests {
         app.handle_event(AppEvent::BuildEvent(BuildEvent::Completed {
             binary: binary.clone(),
             elapsed: std::time::Duration::from_secs(1),
-            fingerprint: lmml_build::BuildFingerprint {
+            fingerprint: Box::new(lmml_build::BuildFingerprint {
                 flavor: lmml_compat::LlamaRuntimeFlavor::Prism,
                 source_url: lmml_compat::LlamaRuntimeFlavor::Prism
                     .repository_url()
@@ -2409,12 +2476,20 @@ mod tests {
                 commit: "prism-commit".to_string(),
                 cmake_hash: [7; 32],
                 binary: binary.clone(),
-            },
+            }),
             backend: BuildBackend::Cuda {
                 archs: vec!["sm_120"],
             },
             archs: vec!["sm_120".to_string()],
             sccache_used: true,
+            verification: lmml_build::RuntimeVerification {
+                version: lmml_build::RUNTIME_VERIFICATION_VERSION,
+                prism_tensor_types: vec![142, 143],
+                rocm_targets: Vec::new(),
+                server_sha256: "a".repeat(64),
+                hip_library: None,
+                hip_library_sha256: None,
+            },
         }));
 
         assert_eq!(app.state.build.binary, upstream_binary);
@@ -2423,6 +2498,51 @@ mod tests {
         assert_eq!(app.state.build.prism.archs, vec!["sm_120"]);
         assert!(app.state.build.prism.sccache_used);
         assert!(!app.state.build.prism.last_verified.is_empty());
+        assert_eq!(
+            app.state.build.prism.verification_version,
+            lmml_build::RUNTIME_VERIFICATION_VERSION
+        );
+        assert_eq!(
+            app.state.build.prism.verified_prism_tensor_types,
+            vec![142, 143]
+        );
+        assert_eq!(app.state.build.prism.verified_server_sha256, "a".repeat(64));
+    }
+
+    #[test]
+    fn prism_build_start_and_failure_invalidate_artifact_attestation() {
+        let mut app = App::default();
+        app.state.build.prism.verification_version = lmml_build::RUNTIME_VERIFICATION_VERSION;
+        app.state.build.prism.verified_prism_tensor_types = vec![142, 143];
+        app.state.build.prism.verified_server_sha256 = "a".repeat(64);
+        app.state.build.prism.verified_hip_library = PathBuf::from("/tmp/libggml-hip.so");
+        app.state.build.prism.verified_hip_library_sha256 = "b".repeat(64);
+        app.state.build.build_flavor = lmml_compat::LlamaRuntimeFlavor::Prism;
+
+        app.dispatch(Action::StartBuild);
+        assert_eq!(app.state.build.prism.verification_version, 0);
+        assert!(app.state.build.prism.verified_server_sha256.is_empty());
+
+        app.state.build.prism.verified_server_sha256 = "stale".to_string();
+        app.handle_event(AppEvent::BuildEvent(BuildEvent::Started {
+            flavor: lmml_compat::LlamaRuntimeFlavor::Prism,
+        }));
+        assert_eq!(app.state.build.prism.verification_version, 0);
+        assert!(app.state.build.prism.verified_server_sha256.is_empty());
+        assert!(app
+            .state
+            .build
+            .prism
+            .verified_hip_library
+            .as_os_str()
+            .is_empty());
+
+        app.state.build.prism.verified_server_sha256 = "stale".to_string();
+        app.handle_event(AppEvent::BuildEvent(BuildEvent::Failed {
+            last_error: "compile failed".to_string(),
+            log_tail: Vec::new(),
+        }));
+        assert!(app.state.build.prism.verified_server_sha256.is_empty());
     }
 
     #[test]
@@ -2475,7 +2595,7 @@ mod tests {
         assert_eq!(config.rocm_hip_path, Some(PathBuf::from("/opt/rocm")));
 
         app.state.build.backend = "Rocm".to_string();
-        app.state.build.archs.clear();
+        app.state.build.archs = vec!["gfx1030".to_string()];
         let config = app.build_config(false);
 
         assert_eq!(
@@ -2484,6 +2604,47 @@ mod tests {
                 targets: vec!["gfx1100".to_string()],
             }
         );
+    }
+
+    #[test]
+    fn rocm_detection_change_invalidates_prism_attestation() {
+        let mut app = App::default();
+        app.state.build.build_flavor = lmml_compat::LlamaRuntimeFlavor::Prism;
+        app.state.build.prism.backend = "Rocm".to_string();
+        app.state.build.prism.archs = vec!["gfx1100".to_string()];
+        app.state.build.prism.cmake_hash = "old".to_string();
+        app.state.build.prism.last_verified = "old".to_string();
+        app.state.build.prism.verification_version = lmml_build::RUNTIME_VERIFICATION_VERSION;
+        app.state.build.prism.verified_prism_tensor_types = vec![142, 143];
+        app.state.build.prism.verified_rocm_targets = vec!["gfx1100".to_string()];
+        app.state.build.prism.verified_server_sha256 = "a".repeat(64);
+        app.state.build.prism.verified_hip_library = PathBuf::from("/tmp/libggml-hip.so");
+        app.state.build.prism.verified_hip_library_sha256 = "b".repeat(64);
+        let mut profile = cuda_profile();
+        profile.cuda = lmml_detect::CudaCompatibility::NoGpu;
+        profile.gpus.clear();
+        profile.rocm = lmml_detect::RocmSupport {
+            available: true,
+            targets: vec!["gfx1201".to_string()],
+            ..lmml_detect::RocmSupport::default()
+        };
+
+        app.handle_event(AppEvent::DetectComplete(Box::new(profile)));
+
+        assert_eq!(app.state.build.prism.archs, vec!["gfx1201"]);
+        assert!(app.state.build.prism.cmake_hash.is_empty());
+        assert_eq!(app.state.build.prism.verification_version, 0);
+        assert!(app.state.build.prism.verified_prism_tensor_types.is_empty());
+        assert!(app.state.build.prism.verified_rocm_targets.is_empty());
+        assert!(app.state.build.prism.verified_server_sha256.is_empty());
+        assert!(app
+            .state
+            .build
+            .prism
+            .verified_hip_library
+            .as_os_str()
+            .is_empty());
+        assert!(app.state.build.prism.verified_hip_library_sha256.is_empty());
     }
 
     #[test]

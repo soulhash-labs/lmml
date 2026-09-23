@@ -3,6 +3,7 @@
 //! Selection happens before process management so deterministic format errors
 //! cannot stop a healthy server or degrade into a readiness timeout.
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
 
 use super::RuntimeCliError;
@@ -16,11 +17,45 @@ pub struct ResolvedModelRuntime {
     pub binary: PathBuf,
 }
 
+trait AcceleratorTargetProbe {
+    fn rocm_targets(
+        &self,
+    ) -> impl Future<Output = Result<Vec<String>, lmml_detect::AcceleratorTargetProbeError>> + Send;
+
+    fn cuda_archs(
+        &self,
+    ) -> impl Future<Output = Result<Vec<String>, lmml_detect::AcceleratorTargetProbeError>> + Send;
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LiveAcceleratorTargetProbe;
+
+impl AcceleratorTargetProbe for LiveAcceleratorTargetProbe {
+    async fn rocm_targets(&self) -> Result<Vec<String>, lmml_detect::AcceleratorTargetProbeError> {
+        lmml_detect::probe_live_rocm_targets().await
+    }
+
+    async fn cuda_archs(&self) -> Result<Vec<String>, lmml_detect::AcceleratorTargetProbeError> {
+        lmml_detect::probe_live_cuda_archs().await
+    }
+}
+
 /// Inspect a GGUF and resolve the trusted compatible runtime before launch.
 pub async fn resolve_model_runtime(
     build: &lmml_state::BuildState,
     model: &Path,
 ) -> Result<ResolvedModelRuntime, RuntimeCliError> {
+    resolve_model_runtime_with_probe(build, model, &LiveAcceleratorTargetProbe).await
+}
+
+async fn resolve_model_runtime_with_probe<P>(
+    build: &lmml_state::BuildState,
+    model: &Path,
+    probe: &P,
+) -> Result<ResolvedModelRuntime, RuntimeCliError>
+where
+    P: AcceleratorTargetProbe + Sync,
+{
     let metadata = lmml_models::parse_gguf_metadata(model)
         .await
         .map_err(|source| RuntimeCliError::GgufInspection {
@@ -58,10 +93,124 @@ pub async fn resolve_model_runtime(
             path: binary,
         });
     }
+    if selected == lmml_compat::LlamaRuntimeFlavor::Prism {
+        verify_prism_attestation(build, probe).await?;
+        let prism = &build.prism;
+        lmml_build::verify_runtime_artifacts(
+            &binary,
+            &prism.verified_server_sha256,
+            (prism.backend == "Rocm").then_some(prism.verified_hip_library.as_path()),
+            (prism.backend == "Rocm").then_some(prism.verified_hip_library_sha256.as_str()),
+        )
+        .await
+        .map_err(|source| RuntimeCliError::PrismArtifactVerification {
+            path: binary.clone(),
+            source,
+        })?;
+    }
     Ok(ResolvedModelRuntime {
         flavor: selected,
         binary,
     })
+}
+
+async fn verify_prism_attestation<P>(
+    build: &lmml_state::BuildState,
+    probe: &P,
+) -> Result<(), RuntimeCliError>
+where
+    P: AcceleratorTargetProbe + Sync,
+{
+    let prism = &build.prism;
+    let gaps = prism_attestation_gaps(prism);
+    if !gaps.is_empty() {
+        return Err(RuntimeCliError::PrismVerificationRequired {
+            expected_version: lmml_build::RUNTIME_VERIFICATION_VERSION,
+            found_version: prism.verification_version,
+            missing_evidence: gaps,
+        });
+    }
+
+    match prism.backend.as_str() {
+        "Rocm" => {
+            let detected = probe.rocm_targets().await.map_err(|source| {
+                RuntimeCliError::PrismAcceleratorProbe {
+                    backend: "ROCm",
+                    source,
+                }
+            })?;
+            verify_target_match(&detected, &prism.verified_rocm_targets, "ROCm")
+        }
+        "Cuda" => {
+            let detected = probe.cuda_archs().await.map_err(|source| {
+                RuntimeCliError::PrismAcceleratorProbe {
+                    backend: "CUDA",
+                    source,
+                }
+            })?;
+            verify_target_match(&detected, &prism.archs, "CUDA")
+        }
+        "Auto" | "Metal" | "Vulkan" | "CpuAvx2" | "CpuAvx" | "CpuFallback" => Ok(()),
+        _ => Ok(()),
+    }
+}
+
+fn verify_target_match(
+    detected: &[String],
+    verified: &[String],
+    backend: &'static str,
+) -> Result<(), RuntimeCliError> {
+    if detected.iter().all(|target| verified.contains(target)) {
+        Ok(())
+    } else {
+        Err(RuntimeCliError::PrismAcceleratorTargetMismatch {
+            backend,
+            detected_targets: detected.to_vec(),
+            verified_targets: verified.to_vec(),
+        })
+    }
+}
+
+pub(crate) fn prism_attestation_gaps(prism: &lmml_state::RuntimeFlavorBuildState) -> Vec<String> {
+    let mut gaps = Vec::new();
+    if prism.verification_version != lmml_build::RUNTIME_VERIFICATION_VERSION {
+        gaps.push("verification version".to_string());
+    }
+    for tensor_type in [142_u32, 143_u32] {
+        if !prism.verified_prism_tensor_types.contains(&tensor_type) {
+            gaps.push(format!("tensor type {tensor_type}"));
+        }
+    }
+    if !is_sha256(&prism.verified_server_sha256) {
+        gaps.push("llama-server SHA-256".to_string());
+    }
+    if prism.backend == "Rocm" {
+        if prism.verified_rocm_targets.is_empty() {
+            gaps.push("ROCm targets".to_string());
+        } else if prism.archs != prism.verified_rocm_targets {
+            gaps.push("ROCm build target binding".to_string());
+        }
+        if prism.verified_hip_library.as_os_str().is_empty() {
+            gaps.push("libggml-hip path".to_string());
+        }
+        if !is_sha256(&prism.verified_hip_library_sha256) {
+            gaps.push("libggml-hip SHA-256".to_string());
+        }
+    }
+    if prism.backend == "Cuda" && prism.archs.is_empty() {
+        gaps.push("CUDA targets".to_string());
+    }
+    if !matches!(
+        prism.backend.as_str(),
+        "Cuda" | "Metal" | "Rocm" | "Vulkan" | "CpuAvx2" | "CpuAvx" | "CpuFallback"
+    ) {
+        gaps.push("recognized build backend".to_string());
+    }
+    gaps
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 #[cfg(test)]
@@ -87,6 +236,10 @@ mod tests {
         let mut build = lmml_state::BuildState::default();
         build.binary = upstream_binary.clone();
         build.prism.binary = prism_binary.clone();
+        build.prism.backend = "CpuAvx2".to_string();
+        build.prism.verification_version = lmml_build::RUNTIME_VERIFICATION_VERSION;
+        build.prism.verified_prism_tensor_types = vec![142, 143];
+        build.prism.verified_server_sha256 = file_sha256(&prism_binary);
 
         assert_eq!(
             resolve_model_runtime(&build, &upstream_model)
@@ -149,6 +302,155 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn requires_verified_prism_rocm_target_before_spawn() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let model = tempdir.path().join("ternary.gguf");
+        let binary = tempdir.path().join("prism/llama-server");
+        fs::create_dir_all(binary.parent().expect("binary parent")).expect("binary directory");
+        fs::write(&binary, b"binary").expect("Prism binary");
+        fs::write(&model, fixture_gguf(142)).expect("Prism model");
+        let mut build = lmml_state::BuildState::default();
+        build.prism.binary = binary.clone();
+        build.prism.backend = "Rocm".to_string();
+        build.prism.archs = vec!["gfx1201".to_string()];
+        build.prism.verification_version = lmml_build::RUNTIME_VERIFICATION_VERSION;
+        build.prism.verified_prism_tensor_types = vec![142, 143];
+        build.prism.verified_rocm_targets = vec!["gfx1201".to_string()];
+        build.prism.verified_server_sha256 = file_sha256(&binary);
+        build.prism.verified_hip_library = tempdir.path().join("libggml-hip.so");
+        build.prism.verified_hip_library_sha256 = "1".repeat(64);
+
+        assert!(
+            verify_prism_attestation(&build, &FakeProbe::success("gfx1201", "sm_120"))
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            verify_prism_attestation(&build, &FakeProbe::failure()).await,
+            Err(RuntimeCliError::PrismAcceleratorProbe {
+                backend: "ROCm",
+                ..
+            })
+        ));
+        assert!(matches!(
+            verify_prism_attestation(&build, &FakeProbe::success("gfx1100", "sm_120")).await,
+            Err(RuntimeCliError::PrismAcceleratorTargetMismatch {
+                backend: "ROCm",
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn cuda_prism_uses_cuda_probe_on_mixed_host() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let binary = tempdir.path().join("prism/llama-server");
+        fs::create_dir_all(binary.parent().expect("binary parent")).expect("binary directory");
+        fs::write(&binary, b"binary").expect("Prism binary");
+        let mut build = lmml_state::BuildState::default();
+        build.prism.binary = binary.clone();
+        build.prism.backend = "Cuda".to_string();
+        build.prism.archs = vec!["sm_120".to_string()];
+        build.prism.verification_version = lmml_build::RUNTIME_VERIFICATION_VERSION;
+        build.prism.verified_prism_tensor_types = vec![142, 143];
+        build.prism.verified_server_sha256 = file_sha256(&binary);
+        let probe = FakeProbe {
+            rocm: Ok(vec!["gfx1201".to_string()]),
+            cuda: Ok(vec!["sm_120".to_string()]),
+        };
+
+        assert!(verify_prism_attestation(&build, &probe).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn rejects_prism_binary_changed_after_admission() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let model = tempdir.path().join("ternary.gguf");
+        let binary = tempdir.path().join("prism/llama-server");
+        fs::create_dir_all(binary.parent().expect("binary parent")).expect("binary directory");
+        fs::write(&binary, b"admitted binary").expect("Prism binary");
+        fs::write(&model, fixture_gguf(142)).expect("Prism model");
+        let mut build = lmml_state::BuildState::default();
+        build.prism.binary = binary.clone();
+        build.prism.backend = "CpuAvx2".to_string();
+        build.prism.verification_version = lmml_build::RUNTIME_VERIFICATION_VERSION;
+        build.prism.verified_prism_tensor_types = vec![142, 143];
+        build.prism.verified_server_sha256 = file_sha256(&binary);
+        fs::write(&binary, b"replaced binary").expect("replace Prism binary");
+
+        assert!(matches!(
+            resolve_model_runtime_with_probe(&build, &model, &FakeProbe::failure()).await,
+            Err(RuntimeCliError::PrismArtifactVerification { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn rejects_legacy_prism_build_without_attestation() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let model = tempdir.path().join("ternary.gguf");
+        let binary = tempdir.path().join("prism/llama-server");
+        fs::create_dir_all(binary.parent().expect("binary parent")).expect("binary directory");
+        fs::write(&binary, b"binary").expect("Prism binary");
+        fs::write(&model, fixture_gguf(143)).expect("Prism model");
+        let mut build = lmml_state::BuildState::default();
+        build.prism.binary = binary;
+
+        assert!(matches!(
+            resolve_model_runtime(&build, &model).await,
+            Err(RuntimeCliError::PrismVerificationRequired {
+                expected_version: lmml_build::RUNTIME_VERIFICATION_VERSION,
+                found_version: 0,
+                ref missing_evidence,
+            }) if missing_evidence.contains(&"tensor type 143".to_string())
+        ));
+    }
+
+    #[derive(Clone)]
+    struct FakeProbe {
+        rocm: Result<Vec<String>, lmml_detect::AcceleratorTargetProbeError>,
+        cuda: Result<Vec<String>, lmml_detect::AcceleratorTargetProbeError>,
+    }
+
+    impl FakeProbe {
+        fn success(rocm: &str, cuda: &str) -> Self {
+            Self {
+                rocm: Ok(vec![rocm.to_string()]),
+                cuda: Ok(vec![cuda.to_string()]),
+            }
+        }
+
+        fn failure() -> Self {
+            let error = lmml_detect::AcceleratorTargetProbeError::NoSupportedTarget {
+                program: "test-probe",
+            };
+            Self {
+                rocm: Err(error.clone()),
+                cuda: Err(error),
+            }
+        }
+    }
+
+    impl AcceleratorTargetProbe for FakeProbe {
+        async fn rocm_targets(
+            &self,
+        ) -> Result<Vec<String>, lmml_detect::AcceleratorTargetProbeError> {
+            self.rocm.clone()
+        }
+
+        async fn cuda_archs(
+            &self,
+        ) -> Result<Vec<String>, lmml_detect::AcceleratorTargetProbeError> {
+            self.cuda.clone()
+        }
+    }
+
+    fn file_sha256(path: &Path) -> String {
+        lmml_substrate::sha256_file(path)
+            .expect("file digest")
+            .to_string()
     }
 
     fn fixture_gguf(tensor_type: u32) -> Vec<u8> {

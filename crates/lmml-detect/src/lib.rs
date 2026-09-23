@@ -32,6 +32,25 @@ pub struct CommandOutput {
     pub stderr: String,
 }
 
+/// Failure returned by a live accelerator-target probe.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum AcceleratorTargetProbeError {
+    /// The vendor utility could not provide usable output.
+    #[error("{program} target probe failed: {reason}")]
+    CommandFailed {
+        /// Vendor utility used for the probe.
+        program: &'static str,
+        /// Diagnostic returned by the utility or process runner.
+        reason: String,
+    },
+    /// The utility ran but did not report a supported target.
+    #[error("{program} did not report a supported accelerator target")]
+    NoSupportedTarget {
+        /// Vendor utility used for the probe.
+        program: &'static str,
+    },
+}
+
 /// Abstraction over process execution so probes can be tested without invoking host tools.
 pub trait CommandRunner {
     /// Run `program` with `args`, optionally piping `stdin` into the child.
@@ -364,6 +383,98 @@ impl SystemProfile {
             });
         }
         warnings
+    }
+}
+
+/// Probe the currently visible AMD GPUs and return normalized ROCm targets.
+///
+/// This lightweight launch-time probe intentionally bypasses persisted LMML
+/// state so runtime admission reflects the host visible to this process.
+///
+/// # Example
+/// ```no_run
+/// # async fn example() -> Result<(), lmml_detect::AcceleratorTargetProbeError> {
+/// let targets = lmml_detect::probe_live_rocm_targets().await?;
+/// assert!(targets.iter().all(|target| target.starts_with("gfx")));
+/// # Ok(())
+/// # }
+/// ```
+pub async fn probe_live_rocm_targets() -> Result<Vec<String>, AcceleratorTargetProbeError> {
+    probe_live_rocm_targets_with_runner(&RealCommandRunner).await
+}
+
+async fn probe_live_rocm_targets_with_runner<R>(
+    runner: &R,
+) -> Result<Vec<String>, AcceleratorTargetProbeError>
+where
+    R: CommandRunner + Sync,
+{
+    let output = runner.run("rocminfo", &[], None).await;
+    if !output.success {
+        return Err(AcceleratorTargetProbeError::CommandFailed {
+            program: "rocminfo",
+            reason: probe_failure_reason(&output),
+        });
+    }
+    let targets = parse_rocm_targets(&output.stdout);
+    if targets.is_empty() {
+        Err(AcceleratorTargetProbeError::NoSupportedTarget {
+            program: "rocminfo",
+        })
+    } else {
+        Ok(targets)
+    }
+}
+
+/// Probe the currently visible NVIDIA GPUs and return canonical CUDA targets.
+///
+/// # Example
+/// ```no_run
+/// # async fn example() -> Result<(), lmml_detect::AcceleratorTargetProbeError> {
+/// let targets = lmml_detect::probe_live_cuda_archs().await?;
+/// assert!(targets.iter().all(|target| target.starts_with("sm_")));
+/// # Ok(())
+/// # }
+/// ```
+pub async fn probe_live_cuda_archs() -> Result<Vec<String>, AcceleratorTargetProbeError> {
+    probe_live_cuda_archs_with_runner(&RealCommandRunner).await
+}
+
+async fn probe_live_cuda_archs_with_runner<R>(
+    runner: &R,
+) -> Result<Vec<String>, AcceleratorTargetProbeError>
+where
+    R: CommandRunner + Sync,
+{
+    let probe = detect_gpus(runner).await;
+    if let Some(reason) = probe.error {
+        return Err(AcceleratorTargetProbeError::CommandFailed {
+            program: "nvidia-smi",
+            reason,
+        });
+    }
+    let archs = probe
+        .devices
+        .iter()
+        .filter_map(|gpu| gpu.arch.map(str::to_string))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if archs.is_empty() {
+        Err(AcceleratorTargetProbeError::NoSupportedTarget {
+            program: "nvidia-smi",
+        })
+    } else {
+        Ok(archs)
+    }
+}
+
+fn probe_failure_reason(output: &CommandOutput) -> String {
+    let reason = first_line(&output.stderr, &output.stdout);
+    if reason.is_empty() {
+        "command unavailable or returned no diagnostic".to_string()
+    } else {
+        reason
     }
 }
 
@@ -1590,7 +1701,8 @@ pub fn parse_rocm_targets(output: &str) -> Vec<String> {
         .collect()
 }
 
-fn normalize_rocm_target(token: &str) -> Option<String> {
+/// Normalize one ROCm target token using LMML's detector rules.
+pub fn normalize_rocm_target(token: &str) -> Option<String> {
     let token = token.trim();
     let suffix = token.strip_prefix("gfx")?;
     if suffix.len() < 3 || !suffix.chars().all(|ch| ch.is_ascii_alphanumeric()) {
@@ -2094,6 +2206,41 @@ mod tests {
     fn cuda_arches_are_unique_and_sorted() {
         let gpus = vec![gpu("A", 24, "8.9"), gpu("B", 8, "8.6"), gpu("C", 8, "8.6")];
         assert_eq!(cuda_arches_for_gpus(&gpus), vec!["sm_86", "sm_89"]);
+    }
+
+    #[tokio::test]
+    async fn live_rocm_probe_uses_normalized_current_targets() {
+        let runner = FakeRunner::default().with(
+            "rocminfo",
+            &[],
+            FakeRunner::success("Name: gfx1201\nName: gfx000\nName: gfx1035\n"),
+        );
+
+        assert_eq!(
+            probe_live_rocm_targets_with_runner(&runner)
+                .await
+                .expect("live ROCm targets"),
+            vec!["gfx1030", "gfx1201"]
+        );
+    }
+
+    #[tokio::test]
+    async fn live_cuda_probe_reports_current_archs() {
+        let runner = FakeRunner::default().with(
+            "nvidia-smi",
+            &[
+                "--query-gpu=name,memory.total,compute_cap",
+                "--format=csv,noheader",
+            ],
+            FakeRunner::success("RTX 5090, 32768 MiB, 12.0\n"),
+        );
+
+        assert_eq!(
+            probe_live_cuda_archs_with_runner(&runner)
+                .await
+                .expect("live CUDA targets"),
+            vec!["sm_120"]
+        );
     }
 
     #[test]

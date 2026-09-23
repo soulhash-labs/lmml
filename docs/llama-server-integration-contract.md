@@ -54,7 +54,21 @@ trusted Prism source is pinned to commit
 `d8f26eec76da6d09bb708bcba51ef64b8cd868a3`; its checkout lives below
 `~/.local/share/lmml/runtimes/prism/llama.cpp`. Build verification checks the
 Prism tensor registry and rejects `libggml`, `libllama`, or `libmtmd` resolved
-outside that build tree.
+outside that build tree. On ROCm, LMML also rejects empty or generic targets,
+checks the Prism PQ2/PTQ1 and Hadamard source paths, verifies that the HIP
+matrix-vector kernel was compiled for each concrete `gfx*` target, and confirms
+that the isolated `libggml-hip` carries those target markers. The resulting
+versioned attestation records tensor IDs, ROCm targets, and SHA-256 identities
+for `llama-server` and the linked HIP library.
+
+Before spawning a ROCm Prism runtime, LMML runs `rocminfo` rather than trusting
+cached state, matches its normalized targets against the attestation, resolves
+the current HIP dependency, and rehashes both runtime artifacts. CUDA Prism
+uses its own live CUDA target probe, including on mixed-vendor hosts. A target
+change, replaced artifact, failed rebuild, or older unattested build requires a
+clean Prism rebuild. This is a build and launch capability gate, not evidence
+that a model produced coherent output; the hardware smoke test remains a
+separate admission step.
 
 The first unprofiled Prism launch is capped at 32K context with one slot, flash
 attention, Jinja, temperature `1.0`, top-p `0.95`, and top-k `20`. A dedicated

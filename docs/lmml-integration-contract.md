@@ -132,6 +132,29 @@ The upstream and Prism source trees, build directories, binaries, commits, and
 fingerprints are separate. `runtime_selection = "auto"` is the normal launch
 policy. An `upstream` override cannot launch a Prism-required model.
 
+Prism ROCm builds require concrete detected `gfx*` targets; generic targets and
+empty target lists are rejected. Build admission verifies all of the following:
+
+- the Prism source contains the private type-142/type-143 dispatch and the
+  `prism.hadamard.*` loader;
+- the HIP build graph includes the Prism CUDA/HIP kernel sources;
+- `compile_commands.json` shows the PQ2/PTQ1 matrix-vector kernel compiled with
+  `GGML_USE_HIP` for every requested target;
+- the linked, flavor-isolated `libggml-hip` contains each requested target;
+- SHA-256 identities bind the attestation to the admitted `llama-server` and
+  linked `libggml-hip` bytes.
+
+LMML persists this evidence as a versioned runtime attestation. Launch refuses
+an older unattested Prism build, a runtime that lacks a required private tensor
+type, or a runtime whose verified targets do not include the AMD target reported
+by a live `rocminfo` probe. Cached hardware state is advisory and cannot satisfy
+runtime admission. LMML also rehashes the executable and resolves and rehashes
+its HIP library before process creation. Starting a Prism build invalidates the
+old attestation, including when that build fails. CUDA Prism builds use a live
+CUDA probe and do not inherit ROCm checks on mixed-vendor hosts. Rebuilding
+Prism refreshes the attestation. These checks do not replace the model-level
+coherence and throughput smoke test.
+
 LMML requires both `/health` and `/v1/models` to identify the selected GGUF
 before it records a server as ready. This verification does not claim that the
 Prism hardware acceptance test has run.

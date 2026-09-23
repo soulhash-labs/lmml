@@ -16,6 +16,7 @@ use thiserror::Error;
 mod model_runtime;
 mod openagent;
 
+pub(crate) use model_runtime::prism_attestation_gaps;
 pub use model_runtime::{resolve_model_runtime, ResolvedModelRuntime};
 pub use openagent::{
     apply_opencode_handoff, default_openagent_config_path, plan_opencode_handoff,
@@ -1391,6 +1392,48 @@ pub enum RuntimeCliError {
         flavor: lmml_compat::LlamaRuntimeFlavor,
         /// Expected binary path.
         path: PathBuf,
+    },
+    /// Prism runtime predates or failed the current capability verification contract.
+    #[error(
+        "Prism runtime verification is stale or incomplete (expected version {expected_version}, found {found_version}, missing evidence {missing_evidence:?}); rebuild the Prism runtime"
+    )]
+    PrismVerificationRequired {
+        /// Verification contract required by this LMML build.
+        expected_version: u32,
+        /// Verification contract recorded for the runtime.
+        found_version: u32,
+        /// Required evidence absent from the attestation.
+        missing_evidence: Vec<String>,
+    },
+    /// Live accelerator detection failed before Prism launch.
+    #[error("Prism {backend} launch-time target probe failed: {source}")]
+    PrismAcceleratorProbe {
+        /// Backend selected by the admitted Prism build.
+        backend: &'static str,
+        /// Vendor-probe failure.
+        #[source]
+        source: lmml_detect::AcceleratorTargetProbeError,
+    },
+    /// Live accelerator targets do not match the admitted build targets.
+    #[error(
+        "Prism {backend} runtime was verified for {verified_targets:?}, but this host reports {detected_targets:?}; rebuild Prism for the detected target"
+    )]
+    PrismAcceleratorTargetMismatch {
+        /// Backend selected by the admitted Prism build.
+        backend: &'static str,
+        /// Concrete targets detected during launch admission.
+        detected_targets: Vec<String>,
+        /// Targets admitted with the built runtime.
+        verified_targets: Vec<String>,
+    },
+    /// Runtime bytes no longer match the admitted Prism build.
+    #[error("Prism runtime artifact verification failed for {path}: {source}; rebuild Prism")]
+    PrismArtifactVerification {
+        /// Prism executable selected for launch.
+        path: PathBuf,
+        /// Artifact-verification failure.
+        #[source]
+        source: lmml_build::BuildError,
     },
     /// Runtime profile already has a live managed process.
     #[error("runtime profile `{profile}` is already running with pid {pid}; stop it first")]

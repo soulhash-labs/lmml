@@ -43,6 +43,27 @@ pub fn render(area: Rect, app: &App, frame: &mut Frame) {
                 "not active".to_string()
             }
         });
+    let (build_archs, verification) = match flavor {
+        lmml_compat::LlamaRuntimeFlavor::Upstream => (
+            app.state.build.archs.as_slice(),
+            "not required for upstream".to_string(),
+        ),
+        lmml_compat::LlamaRuntimeFlavor::Prism => {
+            let prism = &app.state.build.prism;
+            let gaps = crate::runtime_cli::prism_attestation_gaps(prism);
+            let verification = if gaps.is_empty() {
+                format!(
+                    "v{}; tensors {:?}; ROCm {:?}; bytes bound",
+                    prism.verification_version,
+                    prism.verified_prism_tensor_types,
+                    prism.verified_rocm_targets
+                )
+            } else {
+                format!("not verified ({}); clean rebuild required", gaps.join(", "))
+            };
+            (prism.archs.as_slice(), verification)
+        }
+    };
     let status = if app.build_running {
         status_line("BUILDING", Color::Yellow)
     } else if let Some(error) = &app.build_error {
@@ -72,6 +93,15 @@ pub fn render(area: Rect, app: &App, frame: &mut Frame) {
         Line::from(format!("Source: {}", source_dir.display())),
         Line::from(format!("Binary: {}", binary.display())),
         Line::from(format!("Backend: {backend}")),
+        Line::from(format!(
+            "Targets: {}",
+            if build_archs.is_empty() {
+                "automatic".to_string()
+            } else {
+                build_archs.join(", ")
+            }
+        )),
+        Line::from(format!("Verification: {verification}")),
         Line::from(format!("sccache: {sccache}")),
         Line::from(format!("Update: {update}")),
     ];

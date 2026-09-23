@@ -20,6 +20,9 @@ mod verification;
 
 const DEFAULT_LOG_TAIL_LINES: usize = 500;
 
+/// Current post-build capability-verification contract.
+pub const RUNTIME_VERIFICATION_VERSION: u32 = 2;
+
 /// Build configuration for a llama.cpp source tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildConfig {
@@ -91,6 +94,11 @@ impl BuildConfig {
 /// Build progress event emitted by [`BuildRunner`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuildEvent {
+    /// A build that may replace runtime artifacts has started.
+    Started {
+        /// Runtime flavor whose prior attestation must be invalidated.
+        flavor: lmml_compat::LlamaRuntimeFlavor,
+    },
     /// llama.cpp is being cloned from the given URL.
     Cloning {
         /// Repository URL.
@@ -112,13 +120,15 @@ pub enum BuildEvent {
         /// Total elapsed build time.
         elapsed: Duration,
         /// Fingerprint describing the source and CMake invocation that produced the binary.
-        fingerprint: BuildFingerprint,
+        fingerprint: Box<BuildFingerprint>,
         /// Backend used for the build.
         backend: BuildBackend,
-        /// CUDA architectures used for the build.
+        /// CUDA architectures or ROCm targets used for the build.
         archs: Vec<String>,
         /// Whether sccache was injected into the build.
         sccache_used: bool,
+        /// Runtime capabilities proven after compilation and linking.
+        verification: RuntimeVerification,
     },
     /// Build failed with a human-readable error and recent log lines.
     Failed {
@@ -191,6 +201,23 @@ pub struct BuildFingerprint {
     pub binary: PathBuf,
 }
 
+/// Capabilities proven while admitting a completed runtime build.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RuntimeVerification {
+    /// Verification contract version used to admit the build.
+    pub version: u32,
+    /// Prism-private GGML tensor type IDs present in the verified execution path.
+    pub prism_tensor_types: Vec<u32>,
+    /// ROCm targets found in kernel compile commands and the linked HIP library.
+    pub rocm_targets: Vec<String>,
+    /// SHA-256 digest of the admitted `llama-server` executable.
+    pub server_sha256: String,
+    /// Canonical linked `libggml-hip` path for a ROCm runtime.
+    pub hip_library: Option<PathBuf>,
+    /// SHA-256 digest of the admitted linked `libggml-hip`.
+    pub hip_library_sha256: Option<String>,
+}
+
 impl BuildFingerprint {
     /// Return true when the expected binary is missing or not executable.
     pub fn needs_rebuild(&self) -> bool {
@@ -249,6 +276,7 @@ pub fn cmake_configure_args(config: &BuildConfig) -> Vec<String> {
         build_dir.to_string_lossy().into_owned(),
         "-DCMAKE_BUILD_TYPE=Release".to_string(),
         "-DLLAMA_BUILD_SERVER=ON".to_string(),
+        "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON".to_string(),
     ];
 
     match &config.backend {
@@ -386,6 +414,38 @@ pub fn hash_to_hex(hash: &[u8; 32]) -> String {
     hash.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// Verify that a runtime still resolves to the executable and HIP library
+/// bytes admitted by the last successful build.
+///
+/// # Example
+/// ```no_run
+/// # async fn example() -> Result<(), lmml_build::BuildError> {
+/// # use std::path::Path;
+/// lmml_build::verify_runtime_artifacts(
+///     Path::new("/opt/lmml/llama-server"),
+///     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+///     None,
+///     None,
+/// )
+/// .await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn verify_runtime_artifacts(
+    server: &Path,
+    expected_server_sha256: &str,
+    expected_hip_library: Option<&Path>,
+    expected_hip_library_sha256: Option<&str>,
+) -> Result<(), BuildError> {
+    verification::verify_artifact_attestation(
+        server,
+        expected_server_sha256,
+        expected_hip_library,
+        expected_hip_library_sha256,
+    )
+    .await
+}
+
 /// Build a fingerprint from commit, CMake args, and expected binary path.
 pub fn build_fingerprint(
     commit: impl Into<String>,
@@ -483,6 +543,13 @@ async fn run_build(
     cancel_rx: watch::Receiver<bool>,
 ) {
     tracing::info!(source_dir = %config.source_dir.display(), clean = config.clean, "build started");
+    send_event(
+        &tx,
+        BuildEvent::Started {
+            flavor: config.flavor,
+        },
+    )
+    .await;
     let started = Instant::now();
     let mut log_tail = LogTail::new(config.log_tail_lines);
     let result = run_build_inner(&config, &tx, &mut log_tail, started, cancel_rx).await;
@@ -557,6 +624,8 @@ async fn run_build_inner(
         }
     }
 
+    verification::preflight_build(config).await?;
+
     send_event(tx, BuildEvent::CmakeConfiguring).await;
     write_cuda_glibc_compat_shim(config).await?;
     let commit = current_commit(&config.source_dir).await?;
@@ -614,7 +683,7 @@ async fn run_build_inner(
     verify_binary(&finetune).await?;
     verify_binary(&export_lora).await?;
     verify_binary(&server).await?;
-    verification::verify_runtime(config, &server).await?;
+    let verification = verification::verify_runtime(config, &server).await?;
     tracing::info!(binary = %server.display(), elapsed_ms = started.elapsed().as_millis(), "build completed");
 
     send_event(
@@ -622,10 +691,11 @@ async fn run_build_inner(
         BuildEvent::Completed {
             binary: server,
             elapsed: started.elapsed(),
-            fingerprint,
+            fingerprint: Box::new(fingerprint),
             backend: config.backend.clone(),
             archs: backend_archs(&config.backend),
             sccache_used: config.sccache.is_some(),
+            verification,
         },
     )
     .await;
@@ -1063,6 +1133,7 @@ mod tests {
                 "/tmp/llama.cpp/build",
                 "-DCMAKE_BUILD_TYPE=Release",
                 "-DLLAMA_BUILD_SERVER=ON",
+                "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
                 "-DGGML_CUDA=ON",
                 "-DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.4/bin/nvcc",
                 "-DCMAKE_CUDA_ARCHITECTURES=75;86",
@@ -1174,6 +1245,7 @@ mod tests {
                 "/tmp/llama.cpp/build",
                 "-DCMAKE_BUILD_TYPE=Release",
                 "-DLLAMA_BUILD_SERVER=ON",
+                "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
                 "-DGGML_HIP=ON",
                 "-DGPU_TARGETS=gfx1201;gfx1100",
             ]

@@ -11,6 +11,8 @@ lmml-compat = { path = "../lmml-compat" }
 lmml-detect = { path = "../lmml-detect" }
 libc = "0.2"
 sha2 = "0.10"
+serde_json = "1"
+shlex = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt", "sync", "time"] }
 tracing = "0.1"

@@ -290,6 +290,18 @@ pub struct RuntimeFlavorBuildState {
     pub last_built: String,
     /// Last successful verification timestamp.
     pub last_verified: String,
+    /// Version of the build-verification contract that admitted this runtime.
+    pub verification_version: u32,
+    /// Prism-private tensor type IDs proven by source and backend verification.
+    pub verified_prism_tensor_types: Vec<u32>,
+    /// Concrete ROCm targets proven in compiled Prism HIP kernels.
+    pub verified_rocm_targets: Vec<String>,
+    /// SHA-256 digest of the admitted Prism `llama-server` executable.
+    pub verified_server_sha256: String,
+    /// Canonical `libggml-hip` path resolved during ROCm build admission.
+    pub verified_hip_library: PathBuf,
+    /// SHA-256 digest of the admitted `libggml-hip` bytes.
+    pub verified_hip_library_sha256: String,
 }
 
 impl RuntimeFlavorBuildState {
@@ -312,6 +324,12 @@ impl RuntimeFlavorBuildState {
             sccache_used: false,
             last_built: String::new(),
             last_verified: String::new(),
+            verification_version: 0,
+            verified_prism_tensor_types: Vec::new(),
+            verified_rocm_targets: Vec::new(),
+            verified_server_sha256: String::new(),
+            verified_hip_library: PathBuf::new(),
+            verified_hip_library_sha256: String::new(),
         }
     }
 }
@@ -2144,7 +2162,13 @@ mod tests {
     fn round_trips_state_toml() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let path = tempdir.path().join("lmml").join("state.toml");
-        let state = sample_state();
+        let mut state = sample_state();
+        state.build.prism.verification_version = 2;
+        state.build.prism.verified_prism_tensor_types = vec![142, 143];
+        state.build.prism.verified_rocm_targets = vec!["gfx1201".to_string()];
+        state.build.prism.verified_server_sha256 = "a".repeat(64);
+        state.build.prism.verified_hip_library = PathBuf::from("/runtime/libggml-hip.so");
+        state.build.prism.verified_hip_library_sha256 = "b".repeat(64);
 
         state.save_to_path(&path).expect("save state");
         let loaded = AppState::load_from_path(&path).expect("load state");
