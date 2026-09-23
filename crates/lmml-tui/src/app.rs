@@ -1172,6 +1172,7 @@ impl App {
             } => {
                 self.build_running = false;
                 let built_at = unix_timestamp_string();
+                let verification = *verification;
                 match fingerprint.flavor {
                     lmml_compat::LlamaRuntimeFlavor::Upstream => {
                         self.state.build.binary = binary.clone();
@@ -1197,10 +1198,14 @@ impl App {
                         prism.verification_version = verification.version;
                         prism.verified_prism_tensor_types = verification.prism_tensor_types;
                         prism.verified_rocm_targets = verification.rocm_targets;
+                        prism.verified_cuda_targets = verification.cuda_targets;
                         prism.verified_server_sha256 = verification.server_sha256;
                         prism.verified_hip_library = verification.hip_library.unwrap_or_default();
                         prism.verified_hip_library_sha256 =
                             verification.hip_library_sha256.unwrap_or_default();
+                        prism.verified_cuda_library = verification.cuda_library.unwrap_or_default();
+                        prism.verified_cuda_library_sha256 =
+                            verification.cuda_library_sha256.unwrap_or_default();
                     }
                 }
                 self.active_build_flavor = None;
@@ -1894,9 +1899,12 @@ fn invalidate_prism_verification(prism: &mut lmml_state::RuntimeFlavorBuildState
     prism.verification_version = 0;
     prism.verified_prism_tensor_types.clear();
     prism.verified_rocm_targets.clear();
+    prism.verified_cuda_targets.clear();
     prism.verified_server_sha256.clear();
     prism.verified_hip_library.clear();
     prism.verified_hip_library_sha256.clear();
+    prism.verified_cuda_library.clear();
+    prism.verified_cuda_library_sha256.clear();
 }
 
 fn format_arch_list(archs: &[String]) -> String {
@@ -2499,14 +2507,17 @@ mod tests {
             },
             archs: vec!["sm_120".to_string()],
             sccache_used: true,
-            verification: lmml_build::RuntimeVerification {
+            verification: Box::new(lmml_build::RuntimeVerification {
                 version: lmml_build::RUNTIME_VERIFICATION_VERSION,
                 prism_tensor_types: vec![142, 143],
                 rocm_targets: Vec::new(),
+                cuda_targets: vec!["sm_120".to_string()],
                 server_sha256: "a".repeat(64),
                 hip_library: None,
                 hip_library_sha256: None,
-            },
+                cuda_library: Some(PathBuf::from("/tmp/libggml-cuda.so")),
+                cuda_library_sha256: Some("b".repeat(64)),
+            }),
         }));
 
         assert_eq!(app.state.build.binary, upstream_binary);
@@ -2524,6 +2535,11 @@ mod tests {
             vec![142, 143]
         );
         assert_eq!(app.state.build.prism.verified_server_sha256, "a".repeat(64));
+        assert_eq!(app.state.build.prism.verified_cuda_targets, vec!["sm_120"]);
+        assert_eq!(
+            app.state.build.prism.verified_cuda_library,
+            PathBuf::from("/tmp/libggml-cuda.so")
+        );
     }
 
     #[test]
@@ -2534,6 +2550,9 @@ mod tests {
         app.state.build.prism.verified_server_sha256 = "a".repeat(64);
         app.state.build.prism.verified_hip_library = PathBuf::from("/tmp/libggml-hip.so");
         app.state.build.prism.verified_hip_library_sha256 = "b".repeat(64);
+        app.state.build.prism.verified_cuda_targets = vec!["sm_120".to_string()];
+        app.state.build.prism.verified_cuda_library = PathBuf::from("/tmp/libggml-cuda.so");
+        app.state.build.prism.verified_cuda_library_sha256 = "c".repeat(64);
         app.state.build.build_flavor = lmml_compat::LlamaRuntimeFlavor::Prism;
 
         app.dispatch(Action::StartBuild);
@@ -2551,6 +2570,14 @@ mod tests {
             .build
             .prism
             .verified_hip_library
+            .as_os_str()
+            .is_empty());
+        assert!(app.state.build.prism.verified_cuda_targets.is_empty());
+        assert!(app
+            .state
+            .build
+            .prism
+            .verified_cuda_library
             .as_os_str()
             .is_empty());
 

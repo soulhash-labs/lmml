@@ -1046,6 +1046,7 @@ async fn run_smoke() -> i32 {
         eprintln!("hard prerequisites are missing; run `lmml doctor` for details");
         return 1;
     }
+    println!("model-aware runtime selection: supported");
     println!("ok");
     0
 }

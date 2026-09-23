@@ -12,7 +12,12 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 
-use crate::{BuildConfig, BuildError, RuntimeVerification, RUNTIME_VERIFICATION_VERSION};
+use crate::{
+    AcceleratorLibraryKind, BuildConfig, BuildError, RuntimeLibraryIdentity, RuntimeVerification,
+    RUNTIME_VERIFICATION_VERSION,
+};
+
+mod cuda;
 
 const PRISM_TENSOR_TYPES: [u32; 2] = [142, 143];
 
@@ -22,9 +27,17 @@ pub(super) async fn preflight_build(config: &BuildConfig) -> Result<(), BuildErr
     }
 
     verify_prism_source(config).await?;
-    if let BuildBackend::Rocm { targets } = &config.backend {
-        validate_rocm_targets(targets)?;
-        verify_prism_hip_source(config).await?;
+    match &config.backend {
+        BuildBackend::Cuda { archs } => cuda::preflight(config, archs).await?,
+        BuildBackend::Rocm { targets } => {
+            validate_rocm_targets(targets)?;
+            verify_prism_hip_source(config).await?;
+        }
+        BuildBackend::Metal
+        | BuildBackend::Vulkan
+        | BuildBackend::CpuAvx2
+        | BuildBackend::CpuAvx
+        | BuildBackend::CpuFallback => {}
     }
     Ok(())
 }
@@ -34,7 +47,7 @@ pub(super) async fn verify_runtime(
     server: &Path,
 ) -> Result<RuntimeVerification, BuildError> {
     preflight_build(config).await?;
-    let hip_library = verify_linux_dependencies(config, server).await?;
+    let linked_libraries = verify_linux_dependencies(config, server).await?;
     let mut report = RuntimeVerification {
         version: RUNTIME_VERIFICATION_VERSION,
         prism_tensor_types: if config.flavor == lmml_compat::LlamaRuntimeFlavor::Prism {
@@ -43,24 +56,46 @@ pub(super) async fn verify_runtime(
             Vec::new()
         },
         rocm_targets: Vec::new(),
+        cuda_targets: Vec::new(),
         server_sha256: String::new(),
         hip_library: None,
         hip_library_sha256: None,
+        cuda_library: None,
+        cuda_library_sha256: None,
     };
 
     if config.flavor == lmml_compat::LlamaRuntimeFlavor::Prism {
-        if let BuildBackend::Rocm { targets } = &config.backend {
-            verify_rocm_compile_commands(config, targets).await?;
-            let hip_library = hip_library.ok_or_else(|| {
-                BuildError::Verification(format!(
-                    "Prism ROCm runtime {} is not linked to an isolated libggml-hip",
-                    server.display()
-                ))
-            })?;
-            verify_rocm_binary_targets(&hip_library, targets).await?;
-            report.rocm_targets = targets.clone();
-            report.hip_library_sha256 = Some(sha256_file(&hip_library).await?);
-            report.hip_library = Some(hip_library);
+        match &config.backend {
+            BuildBackend::Cuda { archs } => {
+                let cuda_library = linked_libraries.cuda.ok_or_else(|| {
+                    BuildError::Verification(format!(
+                        "Prism CUDA runtime {} is not linked to an isolated libggml-cuda",
+                        server.display()
+                    ))
+                })?;
+                cuda::verify_compiled_runtime(config, &cuda_library, archs).await?;
+                report.cuda_targets = archs.iter().map(|arch| (*arch).to_string()).collect();
+                report.cuda_library_sha256 = Some(sha256_file(&cuda_library).await?);
+                report.cuda_library = Some(cuda_library);
+            }
+            BuildBackend::Rocm { targets } => {
+                verify_rocm_compile_commands(config, targets).await?;
+                let hip_library = linked_libraries.hip.ok_or_else(|| {
+                    BuildError::Verification(format!(
+                        "Prism ROCm runtime {} is not linked to an isolated libggml-hip",
+                        server.display()
+                    ))
+                })?;
+                verify_rocm_binary_targets(&hip_library, targets).await?;
+                report.rocm_targets = targets.clone();
+                report.hip_library_sha256 = Some(sha256_file(&hip_library).await?);
+                report.hip_library = Some(hip_library);
+            }
+            BuildBackend::Metal
+            | BuildBackend::Vulkan
+            | BuildBackend::CpuAvx2
+            | BuildBackend::CpuAvx
+            | BuildBackend::CpuFallback => {}
         }
     }
     report.server_sha256 = sha256_file(server).await?;
@@ -70,51 +105,56 @@ pub(super) async fn verify_runtime(
 pub(super) async fn verify_artifact_attestation(
     server: &Path,
     expected_server_sha256: &str,
-    expected_hip_library: Option<&Path>,
-    expected_hip_library_sha256: Option<&str>,
+    expected_library: Option<RuntimeLibraryIdentity<'_>>,
 ) -> Result<(), BuildError> {
     verify_hash(server, expected_server_sha256, "llama-server").await?;
-    match (expected_hip_library, expected_hip_library_sha256) {
-        (Some(expected_path), Some(expected_hash)) => {
-            let actual_path = linked_hip_library(server).await?;
-            verify_resolved_hip_identity(
-                server,
-                expected_path,
-                expected_hash,
-                actual_path.as_deref(),
-            )
-            .await
-        }
-        (None, None) => Ok(()),
-        _ => Err(BuildError::Verification(
-            "Prism ROCm attestation has incomplete libggml-hip identity".to_string(),
-        )),
+    if let Some(expected) = expected_library {
+        let actual_path = linked_accelerator_library(server, expected.kind).await?;
+        verify_resolved_library_identity(
+            server,
+            expected.kind,
+            expected.path,
+            expected.sha256,
+            actual_path.as_deref(),
+        )
+        .await
+    } else {
+        Ok(())
     }
 }
 
-async fn verify_resolved_hip_identity(
+async fn verify_resolved_library_identity(
     server: &Path,
+    kind: AcceleratorLibraryKind,
     expected_path: &Path,
     expected_hash: &str,
     resolved_path: Option<&Path>,
 ) -> Result<(), BuildError> {
+    let label = accelerator_library_name(kind);
     let actual_path = resolved_path.ok_or_else(|| {
         BuildError::Verification(format!(
-            "{} no longer resolves a linked libggml-hip",
-            server.display()
+            "{} no longer resolves a linked {label}",
+            server.display(),
         ))
     })?;
     let expected_path = canonical_path(expected_path)?;
     let actual_path = canonical_path(actual_path)?;
     if actual_path != expected_path {
         return Err(BuildError::Verification(format!(
-            "{} now resolves libggml-hip at {}, expected {}",
+            "{} now resolves {label} at {}, expected {}",
             server.display(),
             actual_path.display(),
             expected_path.display()
         )));
     }
-    verify_hash(&actual_path, expected_hash, "libggml-hip").await
+    verify_hash(&actual_path, expected_hash, label).await
+}
+
+fn accelerator_library_name(kind: AcceleratorLibraryKind) -> &'static str {
+    match kind {
+        AcceleratorLibraryKind::Hip => "libggml-hip",
+        AcceleratorLibraryKind::Cuda => "libggml-cuda",
+    }
 }
 
 async fn verify_hash(path: &Path, expected: &str, label: &str) -> Result<(), BuildError> {
@@ -129,7 +169,7 @@ async fn verify_hash(path: &Path, expected: &str, label: &str) -> Result<(), Bui
     }
 }
 
-async fn sha256_file(path: &Path) -> Result<String, BuildError> {
+pub(super) async fn sha256_file(path: &Path) -> Result<String, BuildError> {
     let mut file = tokio::fs::File::open(path).await.map_err(|error| {
         BuildError::Verification(format!("failed to hash {}: {error}", path.display()))
     })?;
@@ -202,7 +242,11 @@ async fn verify_prism_hip_source(config: &BuildConfig) -> Result<(), BuildError>
     .await
 }
 
-async fn require_markers(path: &Path, markers: &[&str], label: &str) -> Result<(), BuildError> {
+pub(super) async fn require_markers(
+    path: &Path,
+    markers: &[&str],
+    label: &str,
+) -> Result<(), BuildError> {
     let source = tokio::fs::read_to_string(path).await.map_err(|error| {
         BuildError::Verification(format!(
             "failed to inspect {label} {}: {error}",
@@ -360,7 +404,7 @@ async fn verify_rocm_compile_commands(
     }
 }
 
-fn compile_command_args(entry: &Value) -> Option<Vec<String>> {
+pub(super) fn compile_command_args(entry: &Value) -> Option<Vec<String>> {
     if let Some(arguments) = entry.get("arguments").and_then(Value::as_array) {
         return Some(
             arguments
@@ -408,7 +452,7 @@ async fn verify_rocm_binary_targets(
     }
 }
 
-async fn binary_contains(path: &Path, needle: &[u8]) -> Result<bool, BuildError> {
+pub(super) async fn binary_contains(path: &Path, needle: &[u8]) -> Result<bool, BuildError> {
     let mut file = tokio::fs::File::open(path).await.map_err(|error| {
         BuildError::Verification(format!("failed to inspect {}: {error}", path.display()))
     })?;
@@ -457,11 +501,15 @@ async fn linked_dependencies(_server: &Path) -> Result<String, BuildError> {
 }
 
 #[cfg(target_os = "linux")]
-async fn linked_hip_library(server: &Path) -> Result<Option<PathBuf>, BuildError> {
+async fn linked_accelerator_library(
+    server: &Path,
+    kind: AcceleratorLibraryKind,
+) -> Result<Option<PathBuf>, BuildError> {
     let dependencies = linked_dependencies(server).await?;
+    let library_name = accelerator_library_name(kind);
     for line in dependencies
         .lines()
-        .filter(|line| line.contains("libggml-hip"))
+        .filter(|line| line.contains(library_name))
     {
         if line.contains("not found") {
             return Err(BuildError::Verification(format!(
@@ -477,18 +525,27 @@ async fn linked_hip_library(server: &Path) -> Result<Option<PathBuf>, BuildError
 }
 
 #[cfg(not(target_os = "linux"))]
-async fn linked_hip_library(_server: &Path) -> Result<Option<PathBuf>, BuildError> {
+async fn linked_accelerator_library(
+    _server: &Path,
+    _kind: AcceleratorLibraryKind,
+) -> Result<Option<PathBuf>, BuildError> {
     Ok(None)
+}
+
+#[derive(Debug, Default)]
+struct LinkedAcceleratorLibraries {
+    hip: Option<PathBuf>,
+    cuda: Option<PathBuf>,
 }
 
 #[cfg(target_os = "linux")]
 async fn verify_linux_dependencies(
     config: &BuildConfig,
     server: &Path,
-) -> Result<Option<PathBuf>, BuildError> {
+) -> Result<LinkedAcceleratorLibraries, BuildError> {
     let build_root = canonical_path(&config.source_dir.join("build"))?;
     let dependencies = linked_dependencies(server).await?;
-    let mut hip_library = None;
+    let mut libraries = LinkedAcceleratorLibraries::default();
     for line in dependencies.lines().filter(|line| {
         ["libggml", "libllama", "libmtmd"]
             .iter()
@@ -513,18 +570,20 @@ async fn verify_linux_dependencies(
             )));
         }
         if line.contains("libggml-hip") {
-            hip_library = Some(resolved);
+            libraries.hip = Some(resolved);
+        } else if line.contains("libggml-cuda") {
+            libraries.cuda = Some(resolved);
         }
     }
-    Ok(hip_library)
+    Ok(libraries)
 }
 
 #[cfg(not(target_os = "linux"))]
 async fn verify_linux_dependencies(
     _config: &BuildConfig,
     _server: &Path,
-) -> Result<Option<PathBuf>, BuildError> {
-    Ok(None)
+) -> Result<LinkedAcceleratorLibraries, BuildError> {
+    Ok(LinkedAcceleratorLibraries::default())
 }
 
 #[cfg(target_os = "linux")]
@@ -629,11 +688,11 @@ mod tests {
         fs::write(&server, b"admitted").expect("server fixture");
         let digest = sha256_file(&server).await.expect("server digest");
 
-        verify_artifact_attestation(&server, &digest, None, None)
+        verify_artifact_attestation(&server, &digest, None)
             .await
             .expect("matching artifact");
         fs::write(&server, b"replaced").expect("replace server fixture");
-        assert!(verify_artifact_attestation(&server, &digest, None, None)
+        assert!(verify_artifact_attestation(&server, &digest, None)
             .await
             .is_err());
     }
@@ -648,11 +707,15 @@ mod tests {
         let digest = sha256_file(&hip_library).await.expect("HIP digest");
         fs::write(&hip_library, b"replaced HIP library").expect("replace HIP fixture");
 
-        assert!(
-            verify_resolved_hip_identity(&server, &hip_library, &digest, Some(&hip_library))
-                .await
-                .is_err()
-        );
+        assert!(verify_resolved_library_identity(
+            &server,
+            AcceleratorLibraryKind::Hip,
+            &hip_library,
+            &digest,
+            Some(&hip_library)
+        )
+        .await
+        .is_err());
     }
 
     #[tokio::test]
@@ -668,38 +731,71 @@ mod tests {
         fs::write(&resolved, b"same bytes").expect("resolved HIP fixture");
         let digest = sha256_file(&expected).await.expect("HIP digest");
 
-        assert!(
-            verify_resolved_hip_identity(&server, &expected, &digest, Some(&resolved))
-                .await
-                .is_err()
-        );
+        assert!(verify_resolved_library_identity(
+            &server,
+            AcceleratorLibraryKind::Hip,
+            &expected,
+            &digest,
+            Some(&resolved)
+        )
+        .await
+        .is_err());
     }
 
     #[tokio::test]
-    async fn hip_identity_rejects_missing_resolution_and_incomplete_evidence() {
+    async fn hip_identity_rejects_missing_resolution() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let server = tempdir.path().join("llama-server");
         let hip_library = tempdir.path().join("libggml-hip.so");
         fs::write(&server, b"server").expect("server fixture");
         fs::write(&hip_library, b"HIP library").expect("HIP fixture");
-        let server_digest = sha256_file(&server).await.expect("server digest");
         let hip_digest = sha256_file(&hip_library).await.expect("HIP digest");
 
-        assert!(
-            verify_resolved_hip_identity(&server, &hip_library, &hip_digest, None)
-                .await
-                .is_err()
-        );
-        assert!(
-            verify_artifact_attestation(&server, &server_digest, Some(&hip_library), None)
-                .await
-                .is_err()
-        );
-        assert!(
-            verify_artifact_attestation(&server, &server_digest, None, Some(&hip_digest))
-                .await
-                .is_err()
-        );
+        assert!(verify_resolved_library_identity(
+            &server,
+            AcceleratorLibraryKind::Hip,
+            &hip_library,
+            &hip_digest,
+            None
+        )
+        .await
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn cuda_identity_rejects_changed_bytes_and_resolved_path() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let server = tempdir.path().join("llama-server");
+        let expected = tempdir.path().join("admitted/libggml-cuda.so");
+        let replacement = tempdir.path().join("replacement/libggml-cuda.so");
+        fs::create_dir_all(expected.parent().expect("expected parent")).expect("expected dir");
+        fs::create_dir_all(replacement.parent().expect("replacement parent"))
+            .expect("replacement dir");
+        fs::write(&server, b"server").expect("server fixture");
+        fs::write(&expected, b"admitted CUDA library").expect("expected CUDA fixture");
+        fs::write(&replacement, b"admitted CUDA library").expect("replacement CUDA fixture");
+        let digest = sha256_file(&expected).await.expect("CUDA digest");
+
+        assert!(verify_resolved_library_identity(
+            &server,
+            AcceleratorLibraryKind::Cuda,
+            &expected,
+            &digest,
+            Some(&replacement)
+        )
+        .await
+        .is_err());
+
+        fs::write(&expected, b"replaced CUDA library").expect("replace CUDA fixture");
+        assert!(verify_resolved_library_identity(
+            &server,
+            AcceleratorLibraryKind::Cuda,
+            &expected,
+            &digest,
+            Some(&expected)
+        )
+        .await
+        .is_err());
     }
 
     #[cfg(target_os = "linux")]

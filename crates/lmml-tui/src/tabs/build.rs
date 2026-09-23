@@ -52,11 +52,17 @@ pub fn render(area: Rect, app: &App, frame: &mut Frame) {
             let prism = &app.state.build.prism;
             let gaps = crate::runtime_cli::prism_attestation_gaps(prism);
             let verification = if gaps.is_empty() {
+                let targets = match prism.backend.as_str() {
+                    "Cuda" => &prism.verified_cuda_targets,
+                    "Rocm" => &prism.verified_rocm_targets,
+                    _ => &prism.archs,
+                };
                 format!(
-                    "v{}; tensors {:?}; ROCm {:?}; bytes bound",
+                    "v{}; tensors {:?}; {} {:?}; bytes bound",
                     prism.verification_version,
                     prism.verified_prism_tensor_types,
-                    prism.verified_rocm_targets
+                    prism.backend,
+                    targets
                 )
             } else {
                 format!("not verified ({}); clean rebuild required", gaps.join(", "))

@@ -21,7 +21,7 @@ mod verification;
 const DEFAULT_LOG_TAIL_LINES: usize = 500;
 
 /// Current post-build capability-verification contract.
-pub const RUNTIME_VERIFICATION_VERSION: u32 = 2;
+pub const RUNTIME_VERIFICATION_VERSION: u32 = 3;
 
 /// Build configuration for a llama.cpp source tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,7 +128,7 @@ pub enum BuildEvent {
         /// Whether sccache was injected into the build.
         sccache_used: bool,
         /// Runtime capabilities proven after compilation and linking.
-        verification: RuntimeVerification,
+        verification: Box<RuntimeVerification>,
     },
     /// Build failed with a human-readable error and recent log lines.
     Failed {
@@ -210,12 +210,39 @@ pub struct RuntimeVerification {
     pub prism_tensor_types: Vec<u32>,
     /// ROCm targets found in kernel compile commands and the linked HIP library.
     pub rocm_targets: Vec<String>,
+    /// CUDA targets found in kernel compile commands and the linked CUDA library.
+    pub cuda_targets: Vec<String>,
     /// SHA-256 digest of the admitted `llama-server` executable.
     pub server_sha256: String,
     /// Canonical linked `libggml-hip` path for a ROCm runtime.
     pub hip_library: Option<PathBuf>,
     /// SHA-256 digest of the admitted linked `libggml-hip`.
     pub hip_library_sha256: Option<String>,
+    /// Canonical linked `libggml-cuda` path for a CUDA runtime.
+    pub cuda_library: Option<PathBuf>,
+    /// SHA-256 digest of the admitted linked `libggml-cuda`.
+    pub cuda_library_sha256: Option<String>,
+}
+
+/// Accelerator library whose canonical path and bytes are bound to a runtime
+/// attestation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcceleratorLibraryKind {
+    /// ROCm/HIP `libggml-hip` backend library.
+    Hip,
+    /// NVIDIA CUDA `libggml-cuda` backend library.
+    Cuda,
+}
+
+/// Expected accelerator-library identity for launch-time verification.
+#[derive(Debug, Clone, Copy)]
+pub struct RuntimeLibraryIdentity<'a> {
+    /// Backend library kind used to resolve the live dependency.
+    pub kind: AcceleratorLibraryKind,
+    /// Canonical library path recorded after build admission.
+    pub path: &'a Path,
+    /// SHA-256 digest recorded after build admission.
+    pub sha256: &'a str,
 }
 
 impl BuildFingerprint {
@@ -414,8 +441,8 @@ pub fn hash_to_hex(hash: &[u8; 32]) -> String {
     hash.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// Verify that a runtime still resolves to the executable and HIP library
-/// bytes admitted by the last successful build.
+/// Verify that a runtime still resolves to the executable and accelerator
+/// library bytes admitted by the last successful build.
 ///
 /// # Example
 /// ```no_run
@@ -425,7 +452,6 @@ pub fn hash_to_hex(hash: &[u8; 32]) -> String {
 ///     Path::new("/opt/lmml/llama-server"),
 ///     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 ///     None,
-///     None,
 /// )
 /// .await?;
 /// # Ok(())
@@ -434,16 +460,10 @@ pub fn hash_to_hex(hash: &[u8; 32]) -> String {
 pub async fn verify_runtime_artifacts(
     server: &Path,
     expected_server_sha256: &str,
-    expected_hip_library: Option<&Path>,
-    expected_hip_library_sha256: Option<&str>,
+    expected_library: Option<RuntimeLibraryIdentity<'_>>,
 ) -> Result<(), BuildError> {
-    verification::verify_artifact_attestation(
-        server,
-        expected_server_sha256,
-        expected_hip_library,
-        expected_hip_library_sha256,
-    )
-    .await
+    verification::verify_artifact_attestation(server, expected_server_sha256, expected_library)
+        .await
 }
 
 /// Build a fingerprint from commit, CMake args, and expected binary path.
@@ -695,7 +715,7 @@ async fn run_build_inner(
             backend: config.backend.clone(),
             archs: backend_archs(&config.backend),
             sccache_used: config.sccache.is_some(),
-            verification,
+            verification: Box::new(verification),
         },
     )
     .await;

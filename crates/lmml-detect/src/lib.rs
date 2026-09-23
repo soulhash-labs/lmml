@@ -918,6 +918,45 @@ pub fn compute_cap_to_arch(cap: &str) -> Option<&'static str> {
     }
 }
 
+/// Normalize a CUDA compute capability or architecture to LMML's canonical
+/// `sm_` spelling.
+///
+/// This keeps persisted build targets and live launch probes comparable while
+/// rejecting generic or unknown architecture values.
+pub fn normalize_cuda_arch(value: &str) -> Option<&'static str> {
+    let value = value.trim().to_ascii_lowercase();
+    if let Some(arch) = compute_cap_to_arch(&value) {
+        return Some(arch);
+    }
+    match value.as_str() {
+        "sm_37" => Some("sm_37"),
+        "sm_50" => Some("sm_50"),
+        "sm_52" => Some("sm_52"),
+        "sm_53" => Some("sm_53"),
+        "sm_60" => Some("sm_60"),
+        "sm_61" => Some("sm_61"),
+        "sm_62" => Some("sm_62"),
+        "sm_70" => Some("sm_70"),
+        "sm_72" => Some("sm_72"),
+        "sm_75" => Some("sm_75"),
+        "sm_80" => Some("sm_80"),
+        "sm_86" => Some("sm_86"),
+        "sm_87" => Some("sm_87"),
+        "sm_89" => Some("sm_89"),
+        "sm_90" => Some("sm_90"),
+        "sm_90a" => Some("sm_90a"),
+        "sm_100" => Some("sm_100"),
+        "sm_100a" => Some("sm_100a"),
+        "sm_101" => Some("sm_101"),
+        "sm_101a" => Some("sm_101a"),
+        "sm_102" => Some("sm_102"),
+        "sm_102a" => Some("sm_102a"),
+        "sm_120" => Some("sm_120"),
+        "sm_120a" => Some("sm_120a"),
+        _ => None,
+    }
+}
+
 /// Collect unique CUDA architecture strings from detected GPUs.
 pub fn cuda_arches_for_gpus(gpus: &[GpuInfo]) -> Vec<&'static str> {
     gpus.iter()
@@ -2200,6 +2239,14 @@ mod tests {
             assert_eq!(compute_cap_to_arch(cap), Some(arch));
         }
         assert_eq!(compute_cap_to_arch("13.0"), None);
+    }
+
+    #[test]
+    fn normalizes_only_supported_cuda_architectures() {
+        assert_eq!(normalize_cuda_arch("8.6"), Some("sm_86"));
+        assert_eq!(normalize_cuda_arch(" SM_120A "), Some("sm_120a"));
+        assert_eq!(normalize_cuda_arch("native"), None);
+        assert_eq!(normalize_cuda_arch("sm_000"), None);
     }
 
     #[test]

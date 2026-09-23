@@ -96,11 +96,24 @@ where
     if selected == lmml_compat::LlamaRuntimeFlavor::Prism {
         verify_prism_attestation(build, probe).await?;
         let prism = &build.prism;
+        let expected_library = match prism.backend.as_str() {
+            "Rocm" => Some(lmml_build::RuntimeLibraryIdentity {
+                kind: lmml_build::AcceleratorLibraryKind::Hip,
+                path: &prism.verified_hip_library,
+                sha256: &prism.verified_hip_library_sha256,
+            }),
+            "Cuda" => Some(lmml_build::RuntimeLibraryIdentity {
+                kind: lmml_build::AcceleratorLibraryKind::Cuda,
+                path: &prism.verified_cuda_library,
+                sha256: &prism.verified_cuda_library_sha256,
+            }),
+            "Auto" | "Metal" | "Vulkan" | "CpuAvx2" | "CpuAvx" | "CpuFallback" => None,
+            _ => None,
+        };
         lmml_build::verify_runtime_artifacts(
             &binary,
             &prism.verified_server_sha256,
-            (prism.backend == "Rocm").then_some(prism.verified_hip_library.as_path()),
-            (prism.backend == "Rocm").then_some(prism.verified_hip_library_sha256.as_str()),
+            expected_library,
         )
         .await
         .map_err(|source| RuntimeCliError::PrismArtifactVerification {
@@ -148,7 +161,7 @@ where
                     source,
                 }
             })?;
-            verify_target_match(&detected, &prism.archs, "CUDA")
+            verify_target_match(&detected, &prism.verified_cuda_targets, "CUDA")
         }
         "Auto" | "Metal" | "Vulkan" | "CpuAvx2" | "CpuAvx" | "CpuFallback" => Ok(()),
         _ => Ok(()),
@@ -197,8 +210,18 @@ pub(crate) fn prism_attestation_gaps(prism: &lmml_state::RuntimeFlavorBuildState
             gaps.push("libggml-hip SHA-256".to_string());
         }
     }
-    if prism.backend == "Cuda" && prism.archs.is_empty() {
-        gaps.push("CUDA targets".to_string());
+    if prism.backend == "Cuda" {
+        if prism.verified_cuda_targets.is_empty() {
+            gaps.push("CUDA targets".to_string());
+        } else if prism.archs != prism.verified_cuda_targets {
+            gaps.push("CUDA build target binding".to_string());
+        }
+        if prism.verified_cuda_library.as_os_str().is_empty() {
+            gaps.push("libggml-cuda path".to_string());
+        }
+        if !is_sha256(&prism.verified_cuda_library_sha256) {
+            gaps.push("libggml-cuda SHA-256".to_string());
+        }
     }
     if !matches!(
         prism.backend.as_str(),
@@ -358,13 +381,23 @@ mod tests {
         build.prism.archs = vec!["sm_120".to_string()];
         build.prism.verification_version = lmml_build::RUNTIME_VERIFICATION_VERSION;
         build.prism.verified_prism_tensor_types = vec![142, 143];
+        build.prism.verified_cuda_targets = vec!["sm_120".to_string()];
         build.prism.verified_server_sha256 = file_sha256(&binary);
+        build.prism.verified_cuda_library = tempdir.path().join("libggml-cuda.so");
+        build.prism.verified_cuda_library_sha256 = "1".repeat(64);
         let probe = FakeProbe {
             rocm: Ok(vec!["gfx1201".to_string()]),
             cuda: Ok(vec!["sm_120".to_string()]),
         };
 
         assert!(verify_prism_attestation(&build, &probe).await.is_ok());
+        assert!(matches!(
+            verify_prism_attestation(&build, &FakeProbe::success("gfx1201", "sm_89")).await,
+            Err(RuntimeCliError::PrismAcceleratorTargetMismatch {
+                backend: "CUDA",
+                ..
+            })
+        ));
     }
 
     #[tokio::test]

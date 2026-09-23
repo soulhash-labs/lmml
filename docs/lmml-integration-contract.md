@@ -144,16 +144,28 @@ empty target lists are rejected. Build admission verifies all of the following:
 - SHA-256 identities bind the attestation to the admitted `llama-server` and
   linked `libggml-hip` bytes.
 
+Prism CUDA builds require concrete detected `sm_*` targets. Build admission
+also verifies that:
+
+- the CUDA source contains PQ2/PTQ1 MMQ and MMVQ dispatch and dot-product
+  kernels;
+- `compile_commands.json` shows both `mmq.cu` and `mmvq.cu` compiled for each
+  requested CUDA target;
+- the linked, flavor-isolated `libggml-cuda` contains the requested target and
+  PQ2/PTQ1 kernel markers;
+- SHA-256 identities bind the attestation to the admitted `llama-server` and
+  linked `libggml-cuda` bytes.
+
 LMML persists this evidence as a versioned runtime attestation. Launch refuses
 an older unattested Prism build, a runtime that lacks a required private tensor
-type, or a runtime whose verified targets do not include the AMD target reported
-by a live `rocminfo` probe. Cached hardware state is advisory and cannot satisfy
-runtime admission. LMML also rehashes the executable and resolves and rehashes
-its HIP library before process creation. Starting a Prism build invalidates the
-old attestation, including when that build fails. CUDA Prism builds use a live
-CUDA probe and do not inherit ROCm checks on mixed-vendor hosts. Rebuilding
-Prism refreshes the attestation. These checks do not replace the model-level
-coherence and throughput smoke test.
+type, or a runtime whose verified targets do not include the target reported by
+the backend's live accelerator probe. Cached hardware state is advisory and
+cannot satisfy runtime admission. LMML also rehashes the executable and
+resolves and rehashes its selected HIP or CUDA library before process creation.
+Starting a Prism build invalidates the old attestation, including when that
+build fails. CUDA Prism builds use a live CUDA probe and do not inherit ROCm
+checks on mixed-vendor hosts. Rebuilding Prism refreshes the attestation. These
+checks do not replace the model-level coherence and throughput smoke test.
 
 LMML requires both `/health` and `/v1/models` to identify the selected GGUF
 before it records a server as ready. This verification does not claim that the

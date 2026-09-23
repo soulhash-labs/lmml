@@ -296,12 +296,18 @@ pub struct RuntimeFlavorBuildState {
     pub verified_prism_tensor_types: Vec<u32>,
     /// Concrete ROCm targets proven in compiled Prism HIP kernels.
     pub verified_rocm_targets: Vec<String>,
+    /// Concrete CUDA targets proven in compiled Prism CUDA kernels.
+    pub verified_cuda_targets: Vec<String>,
     /// SHA-256 digest of the admitted Prism `llama-server` executable.
     pub verified_server_sha256: String,
     /// Canonical `libggml-hip` path resolved during ROCm build admission.
     pub verified_hip_library: PathBuf,
     /// SHA-256 digest of the admitted `libggml-hip` bytes.
     pub verified_hip_library_sha256: String,
+    /// Canonical `libggml-cuda` path resolved during CUDA build admission.
+    pub verified_cuda_library: PathBuf,
+    /// SHA-256 digest of the admitted `libggml-cuda` bytes.
+    pub verified_cuda_library_sha256: String,
 }
 
 impl RuntimeFlavorBuildState {
@@ -327,9 +333,12 @@ impl RuntimeFlavorBuildState {
             verification_version: 0,
             verified_prism_tensor_types: Vec::new(),
             verified_rocm_targets: Vec::new(),
+            verified_cuda_targets: Vec::new(),
             verified_server_sha256: String::new(),
             verified_hip_library: PathBuf::new(),
             verified_hip_library_sha256: String::new(),
+            verified_cuda_library: PathBuf::new(),
+            verified_cuda_library_sha256: String::new(),
         }
     }
 }
@@ -2166,9 +2175,12 @@ mod tests {
         state.build.prism.verification_version = 2;
         state.build.prism.verified_prism_tensor_types = vec![142, 143];
         state.build.prism.verified_rocm_targets = vec!["gfx1201".to_string()];
+        state.build.prism.verified_cuda_targets = vec!["sm_86".to_string()];
         state.build.prism.verified_server_sha256 = "a".repeat(64);
         state.build.prism.verified_hip_library = PathBuf::from("/runtime/libggml-hip.so");
         state.build.prism.verified_hip_library_sha256 = "b".repeat(64);
+        state.build.prism.verified_cuda_library = PathBuf::from("/runtime/libggml-cuda.so");
+        state.build.prism.verified_cuda_library_sha256 = "c".repeat(64);
 
         state.save_to_path(&path).expect("save state");
         let loaded = AppState::load_from_path(&path).expect("load state");

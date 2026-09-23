@@ -410,7 +410,14 @@ case ":$PATH:" in
 esac
 
 "$install_dir/lmml" doctor || fail "lmml installed, but preflight checks failed." "Fix the hard prerequisites above, then run: $install_dir/lmml doctor"
-"$install_dir/lmml" smoke || fail "lmml installed, but smoke check failed." "Run $install_dir/lmml smoke for details."
+smoke_output=$("$install_dir/lmml" smoke) || fail "lmml installed, but smoke check failed." "Run $install_dir/lmml smoke for details."
+printf '%s\n' "$smoke_output"
+case "$smoke_output" in
+  *"model-aware runtime selection: supported"*) ;;
+  *)
+    fail "installed lmml is missing model-aware runtime selection" "The downloaded binary is stale. Use INSTALL_MODE=source or publish a release built from the current source."
+    ;;
+esac
 
 echo "✓ lmml $VERSION installed to $install_dir/lmml"
 echo

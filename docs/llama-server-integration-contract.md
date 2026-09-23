@@ -57,18 +57,20 @@ Prism tensor registry and rejects `libggml`, `libllama`, or `libmtmd` resolved
 outside that build tree. On ROCm, LMML also rejects empty or generic targets,
 checks the Prism PQ2/PTQ1 and Hadamard source paths, verifies that the HIP
 matrix-vector kernel was compiled for each concrete `gfx*` target, and confirms
-that the isolated `libggml-hip` carries those target markers. The resulting
-versioned attestation records tensor IDs, ROCm targets, and SHA-256 identities
-for `llama-server` and the linked HIP library.
+that the isolated `libggml-hip` carries those target markers. CUDA admission
+applies the corresponding checks to concrete `sm_*` targets, both PQ2/PTQ1
+MMQ and MMVQ translation units, and the linked `libggml-cuda`. The resulting
+versioned attestation records tensor IDs, backend targets, and SHA-256
+identities for `llama-server` and the linked accelerator library.
 
-Before spawning a ROCm Prism runtime, LMML runs `rocminfo` rather than trusting
-cached state, matches its normalized targets against the attestation, resolves
-the current HIP dependency, and rehashes both runtime artifacts. CUDA Prism
-uses its own live CUDA target probe, including on mixed-vendor hosts. A target
-change, replaced artifact, failed rebuild, or older unattested build requires a
-clean Prism rebuild. This is a build and launch capability gate, not evidence
-that a model produced coherent output; the hardware smoke test remains a
-separate admission step.
+Before spawning a Prism runtime, LMML probes the live accelerator rather than
+trusting cached state, matches normalized targets against the attestation,
+resolves the current backend dependency, and rehashes both runtime artifacts.
+CUDA uses its own target probe, including on mixed-vendor hosts; ROCm uses
+`rocminfo`. A target change, replaced artifact, failed rebuild, or older
+unattested build requires a clean Prism rebuild. This is a build and launch
+capability gate, not evidence that a model produced coherent output; the
+hardware smoke test remains a separate admission step.
 
 The first unprofiled Prism launch is capped at 32K context with one slot, flash
 attention, Jinja, temperature `1.0`, top-p `0.95`, and top-k `20`. A dedicated
