@@ -11,6 +11,8 @@ struct MergeEvidence {
     base: PathBuf,
     adapter: PathBuf,
     candidate_path: PathBuf,
+    merge_tool: String,
+    merge_tool_version: String,
     requested_dtype: String,
     effective_load_dtype: String,
     merge_dtype: String,
@@ -151,8 +153,12 @@ pub(super) fn register_candidate(options: CandidateOptions<'_>, data_root: &Path
         Ok(base) => base,
         Err(error) => return fail("successor merge", error),
     };
-    let training = match read_and_parse(
-        options.training_manifest,
+    let training_manifest_path = match options.training_manifest.canonicalize() {
+        Ok(path) => path,
+        Err(error) => return fail("successor merge", error.to_string()),
+    };
+    let (training, training_manifest_hash) = match read_and_parse_hashed(
+        &training_manifest_path,
         lmml_substrate::parse_training_run_manifest_json,
     ) {
         Ok(training) => training,
@@ -236,8 +242,12 @@ pub(super) fn register_candidate(options: CandidateOptions<'_>, data_root: &Path
         candidate_id: options.candidate_id.to_string(),
         parent_lineage_id: base.model.lineage_id.clone(),
         training_run_id: training.training_run_id.clone(),
+        training_manifest_path,
+        training_manifest_hash,
         adapter_artifact_id: training.adapter.artifact_id.clone(),
         candidate_path,
+        merge_tool: evidence.merge_tool,
+        merge_tool_version: evidence.merge_tool_version,
         requested_dtype: evidence.requested_dtype,
         effective_load_dtype: evidence.effective_load_dtype,
         merge_dtype: evidence.merge_dtype,
@@ -287,14 +297,14 @@ pub(super) fn admit(
     data_root: &Path,
     json: bool,
 ) -> i32 {
-    let candidate = match read_and_parse(
+    let (candidate, candidate_manifest_hash) = match read_and_parse_hashed(
         candidate_manifest,
         lmml_substrate::parse_successor_candidate_manifest_json,
     ) {
         Ok(candidate) => candidate,
         Err(error) => return fail("successor admission", error),
     };
-    let baseline = match read_and_parse(
+    let (baseline, baseline_hash) = match read_and_parse_hashed(
         baseline_manifest,
         lmml_substrate::parse_baseline_manifest_json,
     ) {
@@ -305,13 +315,28 @@ pub(super) fn admit(
         Ok(successor) => successor,
         Err(error) => return fail("successor admission", error),
     };
-    let baseline_hash = match lmml_substrate::sha256_file(baseline_manifest) {
-        Ok(hash) => hash,
-        Err(error) => return fail("successor admission", error.to_string()),
+    let (training, training_manifest_hash) = match read_and_parse_hashed(
+        &candidate.training_manifest_path,
+        lmml_substrate::parse_training_run_manifest_json,
+    ) {
+        Ok(training) => training,
+        Err(error) => return fail("successor admission", error),
     };
     if let Err(error) =
         lmml_substrate::validate_successor_baseline(&successor, &baseline, &baseline_hash)
             .and_then(|()| lmml_substrate::validate_successor_admission(&successor, &candidate))
+            .and_then(|()| {
+                lmml_substrate::validate_candidate_against_training(&candidate, &training)
+            })
+            .and_then(|()| {
+                lmml_substrate::validate_successor_provenance(
+                    &successor,
+                    &candidate,
+                    &candidate_manifest_hash,
+                    &training,
+                    &training_manifest_hash,
+                )
+            })
             .and_then(|()| verify_successor_candidate_payload(&candidate))
     {
         return fail("successor admission gate", error.to_string());
@@ -353,6 +378,18 @@ fn read_and_parse<T>(
     let payload =
         std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
     parse(&payload).map_err(|error| format!("{}: {error}", path.display()))
+}
+
+fn read_and_parse_hashed<T>(
+    path: &Path,
+    parse: impl FnOnce(&str) -> Result<T, lmml_substrate::SubstrateError>,
+) -> Result<(T, lmml_substrate::Hash256), String> {
+    let payload = std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let hash = lmml_substrate::sha256_data(&payload);
+    let payload =
+        std::str::from_utf8(&payload).map_err(|error| format!("{}: {error}", path.display()))?;
+    let value = parse(payload).map_err(|error| format!("{}: {error}", path.display()))?;
+    Ok((value, hash))
 }
 
 fn validate_merge_evidence_paths(
@@ -454,6 +491,8 @@ mod tests {
             base: base.canonicalize().expect("canonical base"),
             adapter: adapter.canonicalize().expect("canonical adapter"),
             candidate_path: candidate.canonicalize().expect("canonical candidate"),
+            merge_tool: "scripts/merge_lora.py".into(),
+            merge_tool_version: "sha256:test".into(),
             requested_dtype: "bfloat16".into(),
             effective_load_dtype: "bfloat16".into(),
             merge_dtype: "bfloat16".into(),
@@ -536,8 +575,13 @@ mod tests {
             candidate_id: "candidate-1".into(),
             parent_lineage_id: "qwen38-27b".into(),
             training_run_id: "train-1".into(),
+            training_manifest_path: directory.path().join("training_manifest.json"),
+            training_manifest_hash: lmml_substrate::Hash256::parse("e".repeat(64))
+                .expect("training hash"),
             adapter_artifact_id: "adapter-1".into(),
             candidate_path: candidate_path.clone(),
+            merge_tool: "scripts/merge_lora.py".into(),
+            merge_tool_version: "sha256:test".into(),
             requested_dtype: "bfloat16".into(),
             effective_load_dtype: "bfloat16".into(),
             merge_dtype: "bfloat16".into(),
@@ -561,6 +605,170 @@ mod tests {
         std::fs::write(shard, bytes).expect("mutated shard");
 
         assert!(verify_successor_candidate_payload(&candidate).is_err());
+    }
+
+    #[test]
+    fn successor_admission_rejects_changed_training_record() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let data_root = directory.path().join("data");
+        let candidate_path = directory.path().join("candidate");
+        std::fs::create_dir(&candidate_path).expect("candidate");
+        write_safetensors_fixture(&candidate_path);
+        let checkpoint = lmml_substrate::import_successor_safetensors(
+            &candidate_path,
+            "qwen38-successor-1",
+            "qwen38-27b",
+        )
+        .expect("candidate checkpoint");
+        let hash = |value: char| {
+            lmml_substrate::Hash256::parse(value.to_string().repeat(64)).expect("hash")
+        };
+        let training = lmml_substrate::TrainingRunManifest {
+            schema_version: lmml_substrate::SCHEMA_VERSION,
+            training_run_id: "train-1".into(),
+            authorization_id: "authorize-1".into(),
+            authorization_hash: hash('a'),
+            base_lineage_id: "qwen38-27b".into(),
+            base_manifest_hash: hash('b'),
+            config_hash: hash('c'),
+            tokenizer_hash: hash('d'),
+            dataset_hash: hash('e'),
+            seed: 42,
+            training_config: std::collections::BTreeMap::new(),
+            approved_allowlist: vec!["model.layers.*".into()],
+            trainable_parameters: vec!["model.layers.0.self_attn.q_proj.lora_A".into()],
+            final_loss: 1.0,
+            gradient_norms: vec![0.5],
+            adapter: lmml_substrate::ArtifactIdentity {
+                artifact_id: "adapter-1".into(),
+                model_lineage_id: "qwen38-27b".into(),
+                representation: lmml_substrate::ModelRepresentation::Safetensors,
+                quantization: None,
+                artifact_hash: hash('f'),
+            },
+            adapter_path: directory.path().join("adapter.safetensors"),
+            adapter_tensors: vec![checkpoint.tensors[0].clone()],
+            created_at: "2026-09-23T00:00:00Z".into(),
+        };
+        let training_path = directory.path().join("training.json");
+        lmml_substrate::store_training_run_manifest(&training_path, &training)
+            .expect("training record");
+        let training_hash = lmml_substrate::sha256_file(&training_path).expect("training hash");
+        let candidate = lmml_substrate::SuccessorCandidateManifest {
+            schema_version: lmml_substrate::SCHEMA_VERSION,
+            candidate_id: "candidate-1".into(),
+            parent_lineage_id: "qwen38-27b".into(),
+            training_run_id: training.training_run_id.clone(),
+            training_manifest_path: training_path.clone(),
+            training_manifest_hash: training_hash.clone(),
+            adapter_artifact_id: training.adapter.artifact_id.clone(),
+            candidate_path: candidate_path.clone(),
+            merge_tool: "scripts/merge_lora.py".into(),
+            merge_tool_version: "sha256:test".into(),
+            requested_dtype: "bfloat16".into(),
+            effective_load_dtype: "bfloat16".into(),
+            merge_dtype: "bfloat16".into(),
+            output_dtype: "bfloat16".into(),
+            candidate_manifest: checkpoint,
+            delta: lmml_substrate::MergeDelta {
+                changed_tensor_count: 1,
+                unchanged_tensor_count: 0,
+                max_absolute_delta: 1.0,
+                aggregate_norm_delta: 1.0,
+            },
+            equivalence_max_absolute_delta: 0.0,
+            equivalence_tolerance: 1e-4,
+            created_at: "2026-09-23T00:00:00Z".into(),
+        };
+        let candidate_record = directory.path().join("candidate.json");
+        lmml_substrate::store_successor_candidate_manifest(&candidate_record, &candidate)
+            .expect("candidate record");
+        let candidate_hash =
+            lmml_substrate::sha256_file(&candidate_record).expect("candidate hash");
+        let baseline_output = "baseline".to_string();
+        let baseline = lmml_substrate::BaselineManifest {
+            schema_version: lmml_substrate::SCHEMA_VERSION,
+            baseline_id: "baseline-1".into(),
+            model_lineage_id: "qwen38-27b".into(),
+            artifact_id: "qwen38-q8".into(),
+            artifact_hash: hash('1'),
+            backend: "llama.cpp".into(),
+            backend_version: "test".into(),
+            parameters: vec!["--temp".into(), "0".into()],
+            cases: vec![lmml_substrate::BaselineCase {
+                case_id: "anchor-1".into(),
+                prompt: "anchor prompt".into(),
+                output_hash: lmml_substrate::sha256_data(baseline_output.as_bytes()),
+                output: baseline_output,
+            }],
+            created_at: "2026-09-23T00:00:00Z".into(),
+        };
+        let baseline_path = directory.path().join("baseline.json");
+        lmml_substrate::store_baseline_manifest(&baseline_path, &baseline)
+            .expect("baseline record");
+        let baseline_hash = lmml_substrate::sha256_file(&baseline_path).expect("baseline hash");
+        let successor_hash = candidate
+            .candidate_manifest
+            .model
+            .canonical_manifest_hash
+            .clone();
+        let successor = lmml_substrate::SuccessorManifest {
+            schema_version: lmml_substrate::SCHEMA_VERSION,
+            successor_lineage_id: "qwen38-successor-1".into(),
+            parent_lineage_id: "qwen38-27b".into(),
+            candidate_id: candidate.candidate_id.clone(),
+            training_run_id: training.training_run_id.clone(),
+            training_manifest_hash: training_hash,
+            candidate_manifest_hash: candidate_hash,
+            adapter_artifact_id: training.adapter.artifact_id.clone(),
+            dataset_hash: training.dataset_hash.clone(),
+            seed: training.seed,
+            training_config: training.training_config.clone(),
+            approved_allowlist: training.approved_allowlist.clone(),
+            trainable_parameters: training.trainable_parameters.clone(),
+            requested_dtype: candidate.requested_dtype.clone(),
+            effective_load_dtype: candidate.effective_load_dtype.clone(),
+            merge_dtype: candidate.merge_dtype.clone(),
+            output_dtype: candidate.output_dtype.clone(),
+            merge_tool: candidate.merge_tool.clone(),
+            merge_tool_version: candidate.merge_tool_version.clone(),
+            tensor_manifest_hash: successor_hash.clone(),
+            merge_delta: candidate.delta.clone(),
+            equivalence_max_absolute_delta: candidate.equivalence_max_absolute_delta,
+            equivalence_tolerance: candidate.equivalence_tolerance,
+            parent_baseline_id: baseline.baseline_id.clone(),
+            parent_baseline_hash: baseline_hash,
+            successor_hash,
+            regression: vec![lmml_substrate::RegressionResult {
+                case_id: "anchor-1".into(),
+                parent_metric: 1.0,
+                candidate_metric: 1.0,
+                delta: 0.0,
+                maximum_degradation: 0.1,
+                passed: true,
+            }],
+            admitted_at: "2026-09-23T00:00:00Z".into(),
+        };
+        let report = directory.path().join("successor.json");
+        lmml_substrate::store_successor_manifest(&report, &successor).expect("successor report");
+        let mut payload = std::fs::read(&training_path).expect("training bytes");
+        payload.push(b'\n');
+        std::fs::write(&training_path, payload).expect("changed training record");
+
+        assert_eq!(
+            admit(
+                &candidate_record,
+                &baseline_path,
+                &report,
+                None,
+                &data_root,
+                false,
+            ),
+            1
+        );
+        assert!(!data_root
+            .join("lmml/models/successors/qwen38-successor-1/successor_manifest.json")
+            .exists());
     }
 
     fn write_safetensors_fixture(root: &Path) {

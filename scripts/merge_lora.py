@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import hashlib
 import json
 import math
 import os
 import shutil
 import sys
 import tempfile
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 import torch
@@ -28,6 +30,27 @@ DTYPES = {
     "bfloat16": torch.bfloat16,
     "float32": torch.float32,
 }
+
+
+def package_version(distribution: str) -> str:
+    try:
+        return version(distribution)
+    except PackageNotFoundError:
+        return "unknown"
+
+
+def tool_provenance() -> tuple[str, str]:
+    path = Path(__file__).resolve()
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    versions = ";".join(
+        [
+            f"script_sha256={digest}",
+            f"torch={torch.__version__}",
+            f"transformers={package_version('transformers')}",
+            f"peft={package_version('peft')}",
+        ]
+    )
+    return str(path), versions
 
 
 def parse_args() -> argparse.Namespace:
@@ -167,6 +190,7 @@ def is_relative_to(path: Path, parent: Path) -> bool:
 
 def main() -> int:
     args = parse_args()
+    merge_tool, merge_tool_version = tool_provenance()
     base_path = args.base.resolve(strict=True)
     adapter_path = args.adapter.resolve(strict=True)
     output_path = args.output.resolve(strict=False)
@@ -232,6 +256,8 @@ def main() -> int:
         "base": str(base_path),
         "adapter": str(adapter_path),
         "candidate_path": str(output_path),
+        "merge_tool": merge_tool,
+        "merge_tool_version": merge_tool_version,
         "requested_dtype": args.dtype,
         "effective_load_dtype": effective_dtype,
         "merge_dtype": effective_dtype,

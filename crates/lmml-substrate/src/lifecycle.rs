@@ -16,6 +16,9 @@ use crate::{
     TrainingAuthorizationManifest, TrainingRunManifest,
 };
 
+mod successor;
+pub use successor::*;
+
 /// Parse and validate a pristine baseline manifest.
 pub fn parse_baseline_manifest_json(payload: &str) -> Result<BaselineManifest, SubstrateError> {
     parse_validated(payload, validate_baseline_manifest)
@@ -303,124 +306,6 @@ pub fn validate_training_run_against_authorization(
     Ok(())
 }
 
-/// Validate a candidate merge against its explicit parent and training run.
-pub fn validate_candidate_against_training(
-    candidate: &SuccessorCandidateManifest,
-    training: &TrainingRunManifest,
-) -> Result<(), SubstrateError> {
-    validate_successor_candidate_manifest(candidate)?;
-    if candidate.parent_lineage_id != training.base_lineage_id
-        || candidate.training_run_id != training.training_run_id
-        || candidate.adapter_artifact_id != training.adapter.artifact_id
-    {
-        return Err(SubstrateError::InvalidLifecycleManifest(
-            "candidate parent, training run, or adapter identity mismatch".to_string(),
-        ));
-    }
-    if parse_timestamp(&candidate.created_at)? < parse_timestamp(&training.created_at)? {
-        return Err(SubstrateError::InvalidLifecycleManifest(
-            "successor candidate predates its training run".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-/// Require a normal LoRA merge to preserve architecture and tensor shapes.
-pub fn validate_successor_structure(
-    parent: &SubstrateManifest,
-    candidate: &SubstrateManifest,
-) -> Result<(), SubstrateError> {
-    if candidate.model.parent.as_deref() != Some(parent.model.lineage_id.as_str()) {
-        return Err(SubstrateError::BaseLineageMismatch {
-            expected: parent.model.lineage_id.clone(),
-            actual: candidate.model.parent.clone().unwrap_or_default(),
-        });
-    }
-    if candidate.architecture.model_type != parent.architecture.model_type
-        || candidate.architecture.architectures != parent.architecture.architectures
-        || candidate.config_hash != parent.config_hash
-        || candidate.tokenizer_hash != parent.tokenizer_hash
-        || candidate.tensor_count != parent.tensor_count
-        || candidate.parameter_count != parent.parameter_count
-    {
-        return Err(SubstrateError::InvalidLifecycleManifest(
-            "successor architecture differs from its parent".to_string(),
-        ));
-    }
-    let parent_tensors = parent
-        .tensors
-        .iter()
-        .map(|tensor| (&tensor.name, &tensor.dtype, &tensor.shape));
-    let candidate_tensors = candidate
-        .tensors
-        .iter()
-        .map(|tensor| (&tensor.name, &tensor.dtype, &tensor.shape));
-    if !parent_tensors.eq(candidate_tensors) {
-        return Err(SubstrateError::InvalidLifecycleManifest(
-            "successor tensor names, dtypes, or shapes differ from its parent".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-/// Validate successor admission against its candidate and regression gates.
-pub fn validate_successor_admission(
-    successor: &SuccessorManifest,
-    candidate: &SuccessorCandidateManifest,
-) -> Result<(), SubstrateError> {
-    validate_successor_manifest(successor)?;
-    if successor.parent_lineage_id != candidate.parent_lineage_id
-        || successor.successor_lineage_id != candidate.candidate_manifest.model.lineage_id
-        || successor.candidate_id != candidate.candidate_id
-        || successor.training_run_id != candidate.training_run_id
-        || successor.successor_hash != candidate.candidate_manifest.model.canonical_manifest_hash
-    {
-        return Err(SubstrateError::InvalidLifecycleManifest(
-            "successor admission does not match its candidate".to_string(),
-        ));
-    }
-    if parse_timestamp(&successor.admitted_at)? < parse_timestamp(&candidate.created_at)? {
-        return Err(SubstrateError::InvalidLifecycleManifest(
-            "successor admission predates its merge candidate".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-/// Bind successor regression evidence to one exact frozen parent baseline.
-pub fn validate_successor_baseline(
-    successor: &SuccessorManifest,
-    baseline: &BaselineManifest,
-    baseline_hash: &crate::Hash256,
-) -> Result<(), SubstrateError> {
-    validate_successor_manifest(successor)?;
-    validate_baseline_manifest(baseline)?;
-    if successor.parent_lineage_id != baseline.model_lineage_id
-        || successor.parent_baseline_id != baseline.baseline_id
-        || &successor.parent_baseline_hash != baseline_hash
-    {
-        return Err(SubstrateError::InvalidLifecycleManifest(
-            "successor regression is not bound to the exact frozen parent baseline".to_string(),
-        ));
-    }
-    let baseline_cases = baseline
-        .cases
-        .iter()
-        .map(|case| case.case_id.as_str())
-        .collect::<BTreeSet<_>>();
-    let regression_cases = successor
-        .regression
-        .iter()
-        .map(|case| case.case_id.as_str())
-        .collect::<BTreeSet<_>>();
-    if baseline_cases != regression_cases {
-        return Err(SubstrateError::InvalidLifecycleManifest(
-            "regression cases must exactly match the frozen parent baseline".to_string(),
-        ));
-    }
-    Ok(())
-}
-
 fn validate_baseline_manifest(manifest: &BaselineManifest) -> Result<(), SubstrateError> {
     validate_schema_version(manifest.schema_version)?;
     validate_identifier(&manifest.baseline_id)?;
@@ -555,6 +440,11 @@ fn validate_successor_candidate_manifest(
     validate_identifier(&candidate.training_run_id)?;
     validate_identifier(&candidate.adapter_artifact_id)?;
     validate_timestamp(&candidate.created_at)?;
+    if !candidate.training_manifest_path.is_absolute() {
+        return Err(SubstrateError::InvalidLifecycleManifest(
+            "candidate training manifest path must be absolute".to_string(),
+        ));
+    }
     crate::storage::validate_substrate_manifest(&candidate.candidate_manifest)?;
     if candidate.candidate_manifest.model.parent.as_deref()
         != Some(candidate.parent_lineage_id.as_str())
@@ -595,9 +485,11 @@ fn validate_successor_candidate_manifest(
         || candidate.effective_load_dtype.is_empty()
         || candidate.merge_dtype.is_empty()
         || candidate.output_dtype.is_empty()
+        || candidate.merge_tool.trim().is_empty()
+        || candidate.merge_tool_version.trim().is_empty()
     {
         return Err(SubstrateError::InvalidLifecycleManifest(
-            "candidate merge requires explicit dtype provenance".to_string(),
+            "candidate merge requires explicit dtype and tool provenance".to_string(),
         ));
     }
     Ok(())
@@ -609,6 +501,7 @@ fn validate_successor_manifest(manifest: &SuccessorManifest) -> Result<(), Subst
     validate_identifier(&manifest.parent_lineage_id)?;
     validate_identifier(&manifest.candidate_id)?;
     validate_identifier(&manifest.training_run_id)?;
+    validate_identifier(&manifest.adapter_artifact_id)?;
     validate_identifier(&manifest.parent_baseline_id)?;
     validate_timestamp(&manifest.admitted_at)?;
     if manifest.successor_lineage_id == manifest.parent_lineage_id {
@@ -620,6 +513,46 @@ fn validate_successor_manifest(manifest: &SuccessorManifest) -> Result<(), Subst
         return Err(SubstrateError::InvalidLifecycleManifest(
             "successor admission requires regression evidence".to_string(),
         ));
+    }
+    validate_trainable_inventory(&manifest.approved_allowlist, &manifest.trainable_parameters)?;
+    if manifest.requested_dtype.trim().is_empty()
+        || manifest.effective_load_dtype.trim().is_empty()
+        || manifest.merge_dtype.trim().is_empty()
+        || manifest.output_dtype.trim().is_empty()
+        || manifest.merge_tool.trim().is_empty()
+        || manifest.merge_tool_version.trim().is_empty()
+    {
+        return Err(SubstrateError::InvalidLifecycleManifest(
+            "successor admission requires dtype and merge-tool provenance".to_string(),
+        ));
+    }
+    if manifest.merge_delta.changed_tensor_count == 0
+        || manifest.merge_delta.max_absolute_delta <= 0.0
+        || manifest.merge_delta.aggregate_norm_delta <= 0.0
+    {
+        return Err(SubstrateError::NoOpMerge);
+    }
+    let finite = [
+        manifest.merge_delta.max_absolute_delta,
+        manifest.merge_delta.aggregate_norm_delta,
+        manifest.equivalence_max_absolute_delta,
+        manifest.equivalence_tolerance,
+    ]
+    .iter()
+    .all(|value| value.is_finite());
+    if !finite {
+        return Err(SubstrateError::NonFiniteTrainingState(
+            "successor merge or equivalence metric".to_string(),
+        ));
+    }
+    if manifest.equivalence_max_absolute_delta < 0.0
+        || manifest.equivalence_tolerance < 0.0
+        || manifest.equivalence_max_absolute_delta > manifest.equivalence_tolerance
+    {
+        return Err(SubstrateError::EquivalenceFailure {
+            delta: manifest.equivalence_max_absolute_delta,
+            tolerance: manifest.equivalence_tolerance,
+        });
     }
     let mut case_ids = BTreeSet::new();
     for result in &manifest.regression {

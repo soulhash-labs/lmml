@@ -256,6 +256,9 @@ tensor name, dtype, and shape against the parent. It rejects zero deltas or
 logit differences above the report tolerance. The merger and registrar also
 reject overlapping base, adapter, candidate, and report paths, so successor
 work cannot modify an input or add evidence files to the published checkpoint.
+The candidate record stores the canonical training-manifest path and SHA-256,
+plus the merge script path, script digest, Torch version, Transformers version,
+PEFT version, and effective dtype evidence emitted by `merge_lora.py`.
 
 Admission requires regression results for exactly the cases in the frozen parent
 baseline. The report must name `parent_baseline_id` and include
@@ -272,11 +275,66 @@ lmml model admit-successor \
   --report successor-admission.json
 ```
 
+`successor-admission.json` carries the regression decision and copies the
+identity fields that LMML checks against the immutable source records:
+
+```json
+{
+  "schema_version": 2,
+  "successor_lineage_id": "qwen38-successor-1",
+  "parent_lineage_id": "qwen38-27b",
+  "candidate_id": "qwen38-successor-1-merge-1",
+  "training_run_id": "train-1",
+  "training_manifest_hash": "<sha256>",
+  "candidate_manifest_hash": "<sha256>",
+  "adapter_artifact_id": "adapter-1",
+  "dataset_hash": "<sha256>",
+  "seed": 42,
+  "training_config": {},
+  "approved_allowlist": ["model.layers.*"],
+  "trainable_parameters": ["model.layers.0.self_attn.q_proj.lora_A"],
+  "requested_dtype": "bfloat16",
+  "effective_load_dtype": "bfloat16",
+  "merge_dtype": "bfloat16",
+  "output_dtype": "bfloat16",
+  "merge_tool": "/absolute/path/to/scripts/merge_lora.py",
+  "merge_tool_version": "script_sha256=<sha256>;torch=<version>;transformers=<version>;peft=<version>",
+  "tensor_manifest_hash": "<canonical-successor-hash>",
+  "merge_delta": {
+    "changed_tensor_count": 1,
+    "unchanged_tensor_count": 0,
+    "max_absolute_delta": 0.1,
+    "aggregate_norm_delta": 1.0
+  },
+  "equivalence_max_absolute_delta": 0.000001,
+  "equivalence_tolerance": 0.0001,
+  "parent_baseline_id": "pristine-v1",
+  "parent_baseline_hash": "<sha256>",
+  "successor_hash": "<canonical-successor-hash>",
+  "regression": [
+    {
+      "case_id": "anchor-1",
+      "parent_metric": 1.0,
+      "candidate_metric": 1.0,
+      "delta": 0.0,
+      "maximum_degradation": 0.1,
+      "passed": true
+    }
+  ],
+  "admitted_at": "2026-09-23T00:00:00Z"
+}
+```
+
 Only this final command stores `successor_manifest.json` and the managed
 successor substrate. LMML rejects a report bound to another baseline even when
-its case names match. `model derive` refuses a successor lineage without that
-admission record. Failed training, merge, equivalence, or regression leaves the
-parent untouched.
+its case names match. Admission re-reads and hashes the immutable training and
+candidate manifests, then requires the final report to reproduce the dataset,
+seed, training configuration, parameter allowlist and inventory, adapter ID,
+dtype chain, merge-tool provenance, tensor-manifest hash, merge delta, and
+logit-equivalence evidence. The final record therefore binds each copied field
+to the exact source records instead of trusting a standalone admission report.
+`model derive` refuses a successor lineage without that admission record.
+Failed training, merge, equivalence, or regression leaves the parent untouched.
 
 ## Current gates
 

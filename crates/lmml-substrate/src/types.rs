@@ -508,10 +508,18 @@ pub struct SuccessorCandidateManifest {
     pub parent_lineage_id: String,
     /// Training run that produced the adapter.
     pub training_run_id: String,
+    /// Canonical path to the immutable training-run manifest used for the merge.
+    pub training_manifest_path: PathBuf,
+    /// SHA-256 of the exact immutable training-run manifest file.
+    pub training_manifest_hash: Hash256,
     /// Adapter artifact used by the merge.
     pub adapter_artifact_id: String,
     /// New candidate Safetensors directory.
     pub candidate_path: PathBuf,
+    /// Merge program or script that produced the candidate.
+    pub merge_tool: String,
+    /// Immutable merge-tool version, revision, or content digest.
+    pub merge_tool_version: String,
     /// Requested model loading dtype.
     pub requested_dtype: String,
     /// Effective model loading dtype.
@@ -562,6 +570,42 @@ pub struct SuccessorManifest {
     pub candidate_id: String,
     /// Training run that produced the candidate.
     pub training_run_id: String,
+    /// SHA-256 of the immutable training-run manifest.
+    pub training_manifest_hash: Hash256,
+    /// SHA-256 of the immutable successor-candidate manifest.
+    pub candidate_manifest_hash: Hash256,
+    /// Adapter artifact merged into the canonical parent.
+    pub adapter_artifact_id: String,
+    /// SHA-256 identity of the training dataset.
+    pub dataset_hash: Hash256,
+    /// Reproducible training seed.
+    pub seed: u64,
+    /// Training configuration copied from the validated training run.
+    pub training_config: BTreeMap<String, Value>,
+    /// Approved trainable parameter names or prefixes.
+    pub approved_allowlist: Vec<String>,
+    /// Exact parameters reported trainable before optimization.
+    pub trainable_parameters: Vec<String>,
+    /// Requested model loading dtype used by the merge.
+    pub requested_dtype: String,
+    /// Effective model loading dtype observed by the merge tool.
+    pub effective_load_dtype: String,
+    /// Dtype used while merging adapter weights.
+    pub merge_dtype: String,
+    /// Dtype written to the successor checkpoint.
+    pub output_dtype: String,
+    /// Merge program or script that produced the candidate.
+    pub merge_tool: String,
+    /// Immutable merge-tool version, revision, or content digest.
+    pub merge_tool_version: String,
+    /// Canonical hash of the successor tensor manifest.
+    pub tensor_manifest_hash: Hash256,
+    /// Numerical proof that intended tensors changed.
+    pub merge_delta: MergeDelta,
+    /// Maximum absolute logit difference between live-adapter and merged runs.
+    pub equivalence_max_absolute_delta: f64,
+    /// Configured adapter/merged equivalence tolerance.
+    pub equivalence_tolerance: f64,
     /// Frozen parent baseline used for regression admission.
     pub parent_baseline_id: String,
     /// SHA-256 of the exact frozen parent baseline manifest file.

@@ -154,6 +154,55 @@ fn admitted_artifact(path: &Path) -> ArtifactManifest {
     }
 }
 
+fn successor_manifest(
+    successor_lineage_id: &str,
+    parent_lineage_id: &str,
+    successor_hash: Hash256,
+) -> SuccessorManifest {
+    SuccessorManifest {
+        schema_version: SCHEMA_VERSION,
+        successor_lineage_id: successor_lineage_id.into(),
+        parent_lineage_id: parent_lineage_id.into(),
+        candidate_id: "candidate-1".into(),
+        training_run_id: "train-1".into(),
+        training_manifest_hash: hash('e'),
+        candidate_manifest_hash: hash('f'),
+        adapter_artifact_id: "adapter-1".into(),
+        dataset_hash: hash('d'),
+        seed: 42,
+        training_config: BTreeMap::new(),
+        approved_allowlist: vec!["model.layers.*".into()],
+        trainable_parameters: vec!["model.layers.0.self_attn.q_proj.lora_A".into()],
+        requested_dtype: "bfloat16".into(),
+        effective_load_dtype: "bfloat16".into(),
+        merge_dtype: "bfloat16".into(),
+        output_dtype: "bfloat16".into(),
+        merge_tool: "scripts/merge_lora.py".into(),
+        merge_tool_version: "sha256:test".into(),
+        tensor_manifest_hash: successor_hash.clone(),
+        merge_delta: MergeDelta {
+            changed_tensor_count: 1,
+            unchanged_tensor_count: 0,
+            max_absolute_delta: 1.0,
+            aggregate_norm_delta: 1.0,
+        },
+        equivalence_max_absolute_delta: 0.0,
+        equivalence_tolerance: 1e-4,
+        parent_baseline_id: "baseline-1".into(),
+        parent_baseline_hash: hash('b'),
+        successor_hash,
+        regression: vec![RegressionResult {
+            case_id: "anchor-1".into(),
+            parent_metric: 1.0,
+            candidate_metric: 1.0,
+            delta: 0.0,
+            maximum_degradation: 0.1,
+            passed: true,
+        }],
+        admitted_at: TIMESTAMP.into(),
+    }
+}
+
 #[test]
 fn unexpected_trainable_parameter_is_rejected() {
     let (_directory, base) = checkpoint("qwen38-27b", None);
@@ -289,13 +338,18 @@ fn no_op_merge_is_rejected() {
     let (_parent_directory, _parent) = checkpoint("qwen38-27b", None);
     let (candidate_directory, candidate_manifest) =
         checkpoint("qwen38-successor-1", Some("qwen38-27b"));
+    let candidate_path = candidate_directory.path().to_path_buf();
     let candidate = SuccessorCandidateManifest {
         schema_version: SCHEMA_VERSION,
         candidate_id: "candidate-1".into(),
         parent_lineage_id: "qwen38-27b".into(),
         training_run_id: "train-1".into(),
+        training_manifest_path: candidate_directory.path().join("training_manifest.json"),
+        training_manifest_hash: hash('e'),
         adapter_artifact_id: "adapter-1".into(),
-        candidate_path: candidate_directory.path().to_path_buf(),
+        candidate_path,
+        merge_tool: "scripts/merge_lora.py".into(),
+        merge_tool_version: "sha256:test".into(),
         requested_dtype: "bfloat16".into(),
         effective_load_dtype: "bfloat16".into(),
         merge_dtype: "bfloat16".into(),
@@ -311,7 +365,6 @@ fn no_op_merge_is_rejected() {
         equivalence_tolerance: 1e-4,
         created_at: TIMESTAMP.into(),
     };
-
     assert!(matches!(
         parse_successor_candidate_manifest_json(
             &serde_json::to_string(&candidate).expect("serialize")
@@ -321,26 +374,79 @@ fn no_op_merge_is_rejected() {
 }
 
 #[test]
-fn successor_requires_distinct_explicit_parent() {
-    let successor = SuccessorManifest {
+fn successor_provenance_is_bound_to_exact_training_and_candidate_records() {
+    let (_parent_directory, parent) = checkpoint("qwen38-27b", None);
+    let (candidate_directory, candidate_checkpoint) =
+        checkpoint("qwen38-successor-1", Some("qwen38-27b"));
+    let records = tempfile::tempdir().expect("records");
+    let (adapter_path, adapter_hash) = adapter(records.path(), 1.0);
+    let training = training_run(&parent, &adapter_path, adapter_hash);
+    let training_path = records.path().join("training_manifest.json");
+    store_training_run_manifest(&training_path, &training).expect("training record");
+    let training_hash = sha256_file(&training_path).expect("training hash");
+    let candidate = SuccessorCandidateManifest {
         schema_version: SCHEMA_VERSION,
-        successor_lineage_id: "qwen38-27b".into(),
-        parent_lineage_id: "qwen38-27b".into(),
         candidate_id: "candidate-1".into(),
-        training_run_id: "train-1".into(),
-        parent_baseline_id: "baseline-1".into(),
-        parent_baseline_hash: hash('b'),
-        successor_hash: hash('a'),
-        regression: vec![RegressionResult {
-            case_id: "anchor-1".into(),
-            parent_metric: 1.0,
-            candidate_metric: 1.0,
-            delta: 0.0,
-            maximum_degradation: 0.1,
-            passed: true,
-        }],
-        admitted_at: TIMESTAMP.into(),
+        parent_lineage_id: parent.model.lineage_id.clone(),
+        training_run_id: training.training_run_id.clone(),
+        training_manifest_path: training_path,
+        training_manifest_hash: training_hash.clone(),
+        adapter_artifact_id: training.adapter.artifact_id.clone(),
+        candidate_path: candidate_directory.path().to_path_buf(),
+        merge_tool: "scripts/merge_lora.py".into(),
+        merge_tool_version: "sha256:test".into(),
+        requested_dtype: "bfloat16".into(),
+        effective_load_dtype: "bfloat16".into(),
+        merge_dtype: "bfloat16".into(),
+        output_dtype: "bfloat16".into(),
+        candidate_manifest: candidate_checkpoint,
+        delta: MergeDelta {
+            changed_tensor_count: 1,
+            unchanged_tensor_count: 0,
+            max_absolute_delta: 1.0,
+            aggregate_norm_delta: 1.0,
+        },
+        equivalence_max_absolute_delta: 0.0,
+        equivalence_tolerance: 1e-4,
+        created_at: TIMESTAMP.into(),
     };
+    let candidate_path = records.path().join("candidate_manifest.json");
+    store_successor_candidate_manifest(&candidate_path, &candidate).expect("candidate record");
+    let candidate_hash = sha256_file(&candidate_path).expect("candidate hash");
+    let successor_hash = candidate
+        .candidate_manifest
+        .model
+        .canonical_manifest_hash
+        .clone();
+    let mut successor = successor_manifest("qwen38-successor-1", "qwen38-27b", successor_hash);
+    successor.training_manifest_hash = training_hash.clone();
+    successor.candidate_manifest_hash = candidate_hash.clone();
+
+    validate_successor_provenance(
+        &successor,
+        &candidate,
+        &candidate_hash,
+        &training,
+        &training_hash,
+    )
+    .expect("bound provenance");
+
+    successor.dataset_hash = hash('9');
+    assert!(matches!(
+        validate_successor_provenance(
+            &successor,
+            &candidate,
+            &candidate_hash,
+            &training,
+            &training_hash,
+        ),
+        Err(SubstrateError::InvalidLifecycleManifest(_))
+    ));
+}
+
+#[test]
+fn successor_requires_distinct_explicit_parent() {
+    let successor = successor_manifest("qwen38-27b", "qwen38-27b", hash('a'));
 
     assert!(matches!(
         parse_successor_manifest_json(&serde_json::to_string(&successor).expect("serialize")),
@@ -423,25 +529,8 @@ fn runtime_lease_rejects_runtime_artifact_metadata_mismatch() {
 
 #[test]
 fn successor_regression_delta_must_match_metrics() {
-    let successor = SuccessorManifest {
-        schema_version: SCHEMA_VERSION,
-        successor_lineage_id: "qwen38-successor-1".into(),
-        parent_lineage_id: "qwen38-27b".into(),
-        candidate_id: "candidate-1".into(),
-        training_run_id: "train-1".into(),
-        parent_baseline_id: "baseline-1".into(),
-        parent_baseline_hash: hash('b'),
-        successor_hash: hash('a'),
-        regression: vec![RegressionResult {
-            case_id: "anchor-1".into(),
-            parent_metric: 1.0,
-            candidate_metric: 3.0,
-            delta: 0.0,
-            maximum_degradation: 0.1,
-            passed: true,
-        }],
-        admitted_at: TIMESTAMP.into(),
-    };
+    let mut successor = successor_manifest("qwen38-successor-1", "qwen38-27b", hash('a'));
+    successor.regression[0].candidate_metric = 3.0;
 
     assert!(matches!(
         parse_successor_manifest_json(&serde_json::to_string(&successor).expect("serialize")),
@@ -470,25 +559,9 @@ fn successor_regression_is_bound_to_exact_parent_baseline() {
         }],
         created_at: TIMESTAMP.into(),
     };
-    let successor = SuccessorManifest {
-        schema_version: SCHEMA_VERSION,
-        successor_lineage_id: "qwen38-successor-1".into(),
-        parent_lineage_id: "qwen38-27b".into(),
-        candidate_id: "candidate-1".into(),
-        training_run_id: "train-1".into(),
-        parent_baseline_id: baseline.baseline_id.clone(),
-        parent_baseline_hash: baseline_hash.clone(),
-        successor_hash: hash('c'),
-        regression: vec![RegressionResult {
-            case_id: "anchor-1".into(),
-            parent_metric: 1.0,
-            candidate_metric: 1.0,
-            delta: 0.0,
-            maximum_degradation: 0.1,
-            passed: true,
-        }],
-        admitted_at: TIMESTAMP.into(),
-    };
+    let mut successor = successor_manifest("qwen38-successor-1", "qwen38-27b", hash('c'));
+    successor.parent_baseline_id = baseline.baseline_id.clone();
+    successor.parent_baseline_hash = baseline_hash.clone();
 
     validate_successor_baseline(&successor, &baseline, &baseline_hash).expect("bound baseline");
     assert!(matches!(
