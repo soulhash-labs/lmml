@@ -8,6 +8,8 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 #[derive(Debug, Deserialize)]
 struct MergeEvidence {
     schema_version: u32,
+    base: PathBuf,
+    adapter: PathBuf,
     candidate_path: PathBuf,
     requested_dtype: String,
     effective_load_dtype: String,
@@ -22,6 +24,7 @@ pub(super) struct CandidateOptions<'a> {
     pub base_manifest: &'a Path,
     pub base_source: &'a Path,
     pub training_manifest: &'a Path,
+    pub authorization_manifest: Option<&'a Path>,
     pub candidate_path: &'a Path,
     pub successor_lineage_id: &'a str,
     pub candidate_id: &'a str,
@@ -155,6 +158,22 @@ pub(super) fn register_candidate(options: CandidateOptions<'_>, data_root: &Path
         Ok(training) => training,
         Err(error) => return fail("successor merge", error),
     };
+    let authorization_path = options
+        .authorization_manifest
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            data_root
+                .join("lmml/models/artifacts/adapters/authorizations")
+                .join(&training.authorization_id)
+                .join("authorization_manifest.json")
+        });
+    let authorization = match read_and_parse(
+        &authorization_path,
+        lmml_substrate::parse_training_authorization_manifest_json,
+    ) {
+        Ok(authorization) => authorization,
+        Err(error) => return fail("successor merge authorization", error),
+    };
     if let Err(error) = lmml_substrate::verify_safetensors(options.base_source, &base) {
         return fail("successor merge base identity", error.to_string());
     }
@@ -185,15 +204,14 @@ pub(super) fn register_candidate(options: CandidateOptions<'_>, data_root: &Path
             ),
         );
     }
-    let evidence_candidate = match evidence.candidate_path.canonicalize() {
+    let training_adapter = match training.adapter_path.canonicalize() {
         Ok(path) => path,
         Err(error) => return fail("successor merge", error.to_string()),
     };
-    if evidence_candidate != candidate_path {
-        return fail(
-            "successor merge",
-            "merge evidence names a different candidate directory".to_string(),
-        );
+    if let Err(error) =
+        validate_merge_evidence_paths(&evidence, &base_source, &training_adapter, &candidate_path)
+    {
+        return fail("successor merge", error);
     }
     let canonical_candidate = match lmml_substrate::import_successor_safetensors(
         &candidate_path,
@@ -224,17 +242,33 @@ pub(super) fn register_candidate(options: CandidateOptions<'_>, data_root: &Path
         equivalence_tolerance: evidence.equivalence_tolerance,
         created_at,
     };
-    if let Err(error) = lmml_substrate::validate_training_run_against_base(&training, &base)
-        .and_then(|()| lmml_substrate::validate_candidate_against_training(&candidate, &training))
-        .and_then(|()| {
-            lmml_substrate::validate_successor_structure(&base, &candidate.candidate_manifest)
-        })
-        .and_then(|()| {
-            lmml_substrate::verify_safetensors(
-                &candidate.candidate_path,
-                &candidate.candidate_manifest,
-            )
-        })
+    if let Err(error) =
+        lmml_substrate::validate_training_authorization_against_base(&authorization, &base)
+            .and_then(|()| {
+                lmml_substrate::validate_training_run_against_authorization(
+                    &training,
+                    &authorization,
+                )
+            })
+            .and_then(|()| lmml_substrate::validate_training_run_against_base(&training, &base))
+            .and_then(|()| {
+                lmml_substrate::validate_candidate_against_training(&candidate, &training)
+            })
+            .and_then(|()| {
+                lmml_substrate::validate_successor_structure(&base, &candidate.candidate_manifest)
+            })
+            .and_then(|()| {
+                lmml_substrate::verify_safetensors(
+                    &candidate.candidate_path,
+                    &candidate.candidate_manifest,
+                )
+            })
+            .and_then(|()| {
+                lmml_substrate::validate_finite_checkpoint(
+                    &candidate.candidate_path,
+                    &candidate.candidate_manifest,
+                )
+            })
     {
         return fail("successor merge gate", error.to_string());
     }
@@ -276,29 +310,14 @@ pub(super) fn admit(
         Ok(successor) => successor,
         Err(error) => return fail("successor admission", error),
     };
-    if baseline.model_lineage_id != candidate.parent_lineage_id {
-        return fail(
-            "successor admission",
-            "baseline does not belong to the candidate parent".to_string(),
-        );
-    }
-    let baseline_cases: std::collections::BTreeSet<&str> = baseline
-        .cases
-        .iter()
-        .map(|case| case.case_id.as_str())
-        .collect();
-    let regression_cases: std::collections::BTreeSet<&str> = successor
-        .regression
-        .iter()
-        .map(|case| case.case_id.as_str())
-        .collect();
-    if baseline_cases != regression_cases {
-        return fail(
-            "successor admission",
-            "regression cases must exactly match the frozen parent baseline".to_string(),
-        );
-    }
-    if let Err(error) = lmml_substrate::validate_successor_admission(&successor, &candidate) {
+    let baseline_hash = match lmml_substrate::sha256_file(baseline_manifest) {
+        Ok(hash) => hash,
+        Err(error) => return fail("successor admission", error.to_string()),
+    };
+    if let Err(error) =
+        lmml_substrate::validate_successor_baseline(&successor, &baseline, &baseline_hash)
+            .and_then(|()| lmml_substrate::validate_successor_admission(&successor, &candidate))
+    {
         return fail("successor admission gate", error.to_string());
     }
     let output = output.map(PathBuf::from).unwrap_or_else(|| {
@@ -330,6 +349,38 @@ fn read_and_parse<T>(
     parse(&payload).map_err(|error| format!("{}: {error}", path.display()))
 }
 
+fn validate_merge_evidence_paths(
+    evidence: &MergeEvidence,
+    base_source: &Path,
+    training_adapter: &Path,
+    candidate_path: &Path,
+) -> Result<(), String> {
+    let evidence_candidate = evidence
+        .candidate_path
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    if evidence_candidate != candidate_path {
+        return Err("merge evidence names a different candidate directory".to_string());
+    }
+    let evidence_base = evidence
+        .base
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    if evidence_base != base_source {
+        return Err("merge evidence names a different canonical base".to_string());
+    }
+    let evidence_adapter = evidence
+        .adapter
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    if evidence_adapter != training_adapter
+        && training_adapter.parent() != Some(evidence_adapter.as_path())
+    {
+        return Err("merge evidence names a different adapter".to_string());
+    }
+    Ok(())
+}
+
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
     let payload =
         std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
@@ -351,4 +402,58 @@ fn emit(value: &impl serde::Serialize, output: &Path, json: bool, label: &str) -
 fn fail(operation: &str, error: String) -> i32 {
     eprintln!("{operation} failed: {error}");
     1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merge_evidence_is_bound_to_base_adapter_and_candidate_paths() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let base = directory.path().join("base");
+        let adapter = directory.path().join("adapter");
+        let candidate = directory.path().join("candidate");
+        std::fs::create_dir_all(&base).expect("base");
+        std::fs::create_dir_all(&adapter).expect("adapter");
+        std::fs::create_dir_all(&candidate).expect("candidate");
+        let adapter_file = adapter.join("adapter_model.safetensors");
+        std::fs::write(&adapter_file, b"adapter").expect("adapter payload");
+        let evidence = MergeEvidence {
+            schema_version: 1,
+            base: base.canonicalize().expect("canonical base"),
+            adapter: adapter.canonicalize().expect("canonical adapter"),
+            candidate_path: candidate.canonicalize().expect("canonical candidate"),
+            requested_dtype: "bfloat16".into(),
+            effective_load_dtype: "bfloat16".into(),
+            merge_dtype: "bfloat16".into(),
+            output_dtype: "bfloat16".into(),
+            delta: lmml_substrate::MergeDelta {
+                changed_tensor_count: 1,
+                unchanged_tensor_count: 0,
+                max_absolute_delta: 1.0,
+                aggregate_norm_delta: 1.0,
+            },
+            equivalence_max_absolute_delta: 0.0,
+            equivalence_tolerance: 1e-4,
+        };
+
+        assert!(validate_merge_evidence_paths(
+            &evidence,
+            &base.canonicalize().expect("canonical base"),
+            &adapter_file.canonicalize().expect("canonical adapter"),
+            &candidate.canonicalize().expect("canonical candidate"),
+        )
+        .is_ok());
+
+        let other = directory.path().join("other");
+        std::fs::create_dir(&other).expect("other");
+        assert!(validate_merge_evidence_paths(
+            &evidence,
+            &other.canonicalize().expect("canonical other"),
+            &adapter_file.canonicalize().expect("canonical adapter"),
+            &candidate.canonicalize().expect("canonical candidate"),
+        )
+        .is_err());
+    }
 }

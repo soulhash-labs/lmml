@@ -20,6 +20,10 @@ pub(super) struct BaselineOptions<'a> {
 }
 
 pub(super) async fn run(options: BaselineOptions<'_>, data_root: &Path) -> i32 {
+    if let Err(error) = validate_extra_args(options.extra_args) {
+        eprintln!("model baseline refused: {error}");
+        return 1;
+    }
     let artifacts =
         match lmml_substrate::load_artifact_manifests(data_root.join("lmml/models/artifacts")) {
             Ok(artifacts) => artifacts,
@@ -159,6 +163,7 @@ fn read_prompts(path: &Path) -> Result<Vec<(String, String)>, String> {
     let values: Vec<serde_json::Value> = serde_json::from_str(&payload)
         .map_err(|error| format!("invalid prompt JSON {}: {error}", path.display()))?;
     let mut prompts = Vec::with_capacity(values.len());
+    let mut case_ids = std::collections::BTreeSet::new();
     for value in values {
         let case_id = value
             .get("case_id")
@@ -168,12 +173,62 @@ fn read_prompts(path: &Path) -> Result<Vec<(String, String)>, String> {
             .get("prompt")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| "each prompt requires a string prompt".to_string())?;
+        lmml_substrate::validate_identifier(case_id)
+            .map_err(|error| format!("invalid baseline case_id {case_id}: {error}"))?;
+        if prompt.is_empty() || !case_ids.insert(case_id.to_string()) {
+            return Err("baseline case IDs must be unique and prompts non-empty".to_string());
+        }
         prompts.push((case_id.to_string(), prompt.to_string()));
     }
     if prompts.is_empty() {
         return Err("baseline prompt set is empty".to_string());
     }
     Ok(prompts)
+}
+
+fn validate_extra_args(extra_args: &[String]) -> Result<(), String> {
+    const RESERVED: &[&str] = &[
+        "-m",
+        "--model",
+        "-p",
+        "--prompt",
+        "-f",
+        "--file",
+        "--prompt-file",
+        "--random-prompt",
+        "--temp",
+        "--temperature",
+        "--seed",
+        "-n",
+        "--predict",
+        "--n-predict",
+        "-ngl",
+        "--gpu-layers",
+        "--display-prompt",
+        "--no-display-prompt",
+        "--conversation",
+        "--no-conversation",
+        "--show-timings",
+        "--no-show-timings",
+        "--simple-io",
+        "--no-warmup",
+        "--log-disable",
+    ];
+    for argument in extra_args {
+        let flag = argument
+            .split_once('=')
+            .map_or(argument.as_str(), |(flag, _)| flag);
+        let reserved = RESERVED.contains(&flag)
+            || ["-m", "-p", "-f", "-n"]
+                .iter()
+                .any(|short| flag.starts_with(short) && flag.len() > short.len());
+        if reserved {
+            return Err(format!(
+                "extra argument {argument} overrides a fixed baseline parameter"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn baseline_args(
@@ -249,11 +304,61 @@ async fn execute_case(program: &Path, args: &[String], case_id: &str) -> Result<
 
 async fn command_version(program: &Path) -> String {
     match Command::new(program).arg("--version").output().await {
-        Ok(output) => String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let version = if stdout.trim().is_empty() {
+                stderr.trim()
+            } else {
+                stdout.trim()
+            };
+            if version.is_empty() {
+                "unknown".to_string()
+            } else {
+                version.to_string()
+            }
+        }
         Err(error) => format!("unknown ({error})"),
     }
 }
 
 fn default_cli_path() -> PathBuf {
     super::managed_data_root().join("lmml/llama.cpp/build/bin/llama-cli")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn baseline_extra_args_cannot_override_identity_or_sampling() {
+        for arguments in [
+            vec!["--model=/tmp/other.gguf".to_string()],
+            vec!["--temp".to_string(), "1".to_string()],
+            vec!["-n64".to_string()],
+            vec!["--display-prompt".to_string()],
+        ] {
+            assert!(validate_extra_args(&arguments).is_err(), "{arguments:?}");
+        }
+        assert!(validate_extra_args(&[
+            "--ctx-size".to_string(),
+            "16384".to_string(),
+            "--threads".to_string(),
+            "8".to_string(),
+        ])
+        .is_ok());
+    }
+
+    #[test]
+    fn baseline_prompt_set_rejects_duplicate_case_ids_before_execution() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("prompts.json");
+        std::fs::write(
+            &path,
+            r#"[{"case_id":"same","prompt":"one"},{"case_id":"same","prompt":"two"}]"#,
+        )
+        .expect("prompts");
+
+        assert!(read_prompts(&path).is_err());
+    }
 }

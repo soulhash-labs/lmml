@@ -130,10 +130,13 @@ pub(crate) async fn request(
         else {
             continue;
         };
-        if process_executes_artifact(runtime.pid, &artifact.artifact_path).is_ok()
-            && endpoint_health(&runtime.endpoint).await.is_ok()
-        {
-            runtimes.push(runtime);
+        if process_executes_artifact(runtime.pid, &artifact.artifact_path).is_ok() {
+            if let Err(error) = verify_artifact_hash(artifact).await {
+                return fail("runtime lease artifact verification", error);
+            }
+            if endpoint_health(&runtime.endpoint).await.is_ok() {
+                runtimes.push(runtime);
+            }
         }
     }
     let request = lmml_substrate::ModelRequest {
@@ -153,6 +156,24 @@ pub(crate) async fn request(
         return fail("runtime lease", error.to_string());
     }
     emit(&lease, &path, json, "lease")
+}
+
+async fn verify_artifact_hash(artifact: &lmml_substrate::ArtifactManifest) -> Result<(), String> {
+    let path = artifact.artifact_path.clone();
+    let expected = artifact.artifact.artifact_hash.clone();
+    tokio::task::spawn_blocking(move || {
+        let actual = lmml_substrate::sha256_file(&path).map_err(|error| error.to_string())?;
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(format!(
+                "artifact bytes changed after runtime registration: {}",
+                path.display()
+            ))
+        }
+    })
+    .await
+    .map_err(|error| format!("artifact hash task failed: {error}"))?
 }
 
 pub(crate) fn inspect(path: &Path, json: bool) -> i32 {
@@ -235,4 +256,47 @@ async fn endpoint_health(endpoint: &str) -> Result<(), String> {
         "runtime endpoint is not ready at {endpoint}: {}",
         errors.join("; ")
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn runtime_lease_rechecks_artifact_bytes() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("model.gguf");
+        std::fs::write(&path, b"admitted").expect("artifact");
+        let admitted_hash = lmml_substrate::sha256_file(&path).expect("hash");
+        let artifact = lmml_substrate::ArtifactManifest {
+            schema_version: lmml_substrate::SCHEMA_VERSION,
+            artifact: lmml_substrate::ArtifactIdentity {
+                artifact_id: "artifact-1".into(),
+                model_lineage_id: "lineage-1".into(),
+                representation: lmml_substrate::ModelRepresentation::Gguf,
+                quantization: Some(lmml_substrate::QuantizationKind::Q8_0),
+                artifact_hash: admitted_hash.clone(),
+            },
+            parent_artifact: Some("lineage-1-safetensors".into()),
+            canonical_model: "lineage-1".into(),
+            tool: "llama.cpp".into(),
+            tool_version: "test".into(),
+            command_or_parameters: vec!["Q8_0".into()],
+            source_hashes: vec![lmml_substrate::Hash256::parse("a".repeat(64)).expect("hash")],
+            output_hash: admitted_hash,
+            artifact_path: path.clone(),
+            admission: Some(lmml_substrate::ArtifactAdmission {
+                backend: "llama.cpp".into(),
+                backend_version: "test".into(),
+                checked_at: "2026-08-25T00:00:00Z".into(),
+            }),
+            created_at: "2026-08-25T00:00:00Z".into(),
+        };
+
+        verify_artifact_hash(&artifact)
+            .await
+            .expect("matching artifact");
+        std::fs::write(path, b"replaced").expect("replace artifact");
+        assert!(verify_artifact_hash(&artifact).await.is_err());
+    }
 }

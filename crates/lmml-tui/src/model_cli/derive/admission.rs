@@ -57,19 +57,9 @@ async fn admit_with_server(artifact: &Path, server: &Path) -> Result<(), String>
         .map_err(|error| error.to_string())?
         .port();
     drop(listener);
+    let arguments = admission_args(artifact, port);
     let mut child = Command::new(server)
-        .args([
-            "-m",
-            artifact.to_string_lossy().as_ref(),
-            "--host",
-            "127.0.0.1",
-            "--port",
-            &port.to_string(),
-            "--check-tensors",
-            "-c",
-            "1",
-            "--no-warmup",
-        ])
+        .args(&arguments)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -123,4 +113,38 @@ async fn admit_with_server(artifact: &Path, server: &Path) -> Result<(), String>
         let _ = task.await;
     }
     result
+}
+
+fn admission_args(artifact: &Path, port: u16) -> Vec<String> {
+    vec![
+        "-m".to_string(),
+        artifact.to_string_lossy().into_owned(),
+        "--host".to_string(),
+        "127.0.0.1".to_string(),
+        "--port".to_string(),
+        port.to_string(),
+        "--check-tensors".to_string(),
+        "-c".to_string(),
+        "1".to_string(),
+        "-ngl".to_string(),
+        "0".to_string(),
+        "--no-warmup".to_string(),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn artifact_admission_is_cpu_only_and_checks_tensors() {
+        let arguments = admission_args(Path::new("/models/qwen.gguf"), 1234);
+        assert!(arguments.windows(2).any(|pair| pair == ["-ngl", "0"]));
+        assert!(arguments
+            .iter()
+            .any(|argument| argument == "--check-tensors"));
+        assert!(arguments
+            .windows(2)
+            .any(|pair| pair == ["-m", "/models/qwen.gguf"]));
+    }
 }

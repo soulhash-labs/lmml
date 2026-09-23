@@ -122,8 +122,11 @@ the canonical source read-only and can write only inside a private temporary
 derivation directory.
 An immediately admitted GGUF is published only after metadata inspection,
 `llama-server --check-tensors` admission, and the 600-second large-model startup
-window. A deferred candidate is published under the candidate boundary and
-cannot enter runtime selection before `model admit-artifact` completes.
+window. Admission forces `-ngl 0`, so this integrity check cannot claim or
+contend with an accelerator that is running another workload. It still loads
+the model and must only run when the operator permits that load. A deferred
+candidate is published under the candidate boundary and cannot enter runtime
+selection before `model admit-artifact` completes.
 
 List the append-only artifact catalog with:
 
@@ -233,18 +236,27 @@ lmml model merge-successor \
   --base-manifest ~/.local/share/lmml/models/manifests/qwen38-27b.json \
   --base-source /home/angelo/repos/qwen38-safetensors \
   --training-manifest training-run.json \
+  --authorization authorization_manifest.json \
   --candidate /models/successors/qwen38-successor-1 \
   --successor-lineage-id qwen38-successor-1 \
   --candidate-id qwen38-successor-1-merge-1 \
   --report merge-evidence.json
 ```
 
-LMML imports the candidate, requires the explicit parent, verifies all files,
-and checks architecture plus every tensor name, dtype, and shape against the
-parent. It rejects zero deltas or logit differences above the report tolerance.
+LMML binds the merge report to the exact canonical base, adapter directory, and
+candidate directory. It reproduces the pre-optimization authorization checks,
+imports the candidate, requires the explicit parent, verifies all files, scans
+every merged tensor for NaN or infinity, and checks architecture plus every
+tensor name, dtype, and shape against the parent. It rejects zero deltas or
+logit differences above the report tolerance.
 
 Admission requires regression results for exactly the cases in the frozen parent
-baseline:
+baseline. The report must name `parent_baseline_id` and include
+`parent_baseline_hash`, the SHA-256 of the exact baseline manifest file:
+
+```sh
+sha256sum pristine-v1/manifest.json
+```
 
 ```sh
 lmml model admit-successor \
@@ -254,7 +266,8 @@ lmml model admit-successor \
 ```
 
 Only this final command stores `successor_manifest.json` and the managed
-successor substrate. `model derive` refuses a successor lineage without that
+successor substrate. LMML rejects a report bound to another baseline even when
+its case names match. `model derive` refuses a successor lineage without that
 admission record. Failed training, merge, equivalence, or regression leaves the
 parent untouched.
 
@@ -285,10 +298,11 @@ The first real CPU-side candidate set completed on 2026-08-26:
 Each manifest binds the candidate to canonical source hash
 `fe6a79f82e8c830c801ac5b82b0e18c19c0d6c1e5626534431b4424a8161e1d0`
 and llama.cpp revision `e79e4bf660e19f2ad851e06c6913f7a8c5852621`. Backend
-admission and baseline execution remain paused while the R9700 is in use. No
-candidate is marked usable until metadata, tensor, backend, hash, and lineage
-gates pass. No partial download is eligible for conversion, and no Qwen3.5 asset
-is used as a fallback.
+admission and baseline execution remain paused under the operator's
+no-model-start instruction. Admission now forces CPU-only loading, but no model
+process has been started. No candidate is marked usable until metadata, tensor,
+backend, hash, and lineage gates pass. No partial download is eligible for
+conversion, and no Qwen3.5 asset is used as a fallback.
 
 ## Record examples
 

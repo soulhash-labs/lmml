@@ -6,7 +6,7 @@ use std::path::Path;
 
 use crate::{dtype_size_bytes, read_safetensors_headers, SubstrateError, TensorDescriptor};
 
-/// Validate a Safetensors payload and reject NaN or infinity in adapter tensors.
+/// Validate a Safetensors payload and reject NaN or infinity in its tensors.
 ///
 /// Integer tensors are structurally checked and treated as finite. Floating
 /// formats supported by successor adapters are scanned without loading the
@@ -51,11 +51,26 @@ pub fn validate_finite_safetensors(path: impl AsRef<Path>) -> Result<(), Substra
                 })?;
             if count % element_size != 0 || contains_non_finite(&tensor.dtype, &buffer[..count])? {
                 return Err(SubstrateError::NonFiniteTrainingState(format!(
-                    "adapter tensor {name}"
+                    "tensor {name}"
                 )));
             }
             remaining -= count as u64;
         }
+    }
+    Ok(())
+}
+
+/// Validate every weight shard in a canonical manifest for finite values.
+///
+/// Successor admission uses this after structural verification so a merged
+/// checkpoint containing NaN or infinity cannot become a canonical lineage.
+pub fn validate_finite_checkpoint(
+    root: impl AsRef<Path>,
+    manifest: &crate::SubstrateManifest,
+) -> Result<(), SubstrateError> {
+    let root = root.as_ref();
+    for shard in &manifest.shards {
+        validate_finite_safetensors(root.join(&shard.path))?;
     }
     Ok(())
 }

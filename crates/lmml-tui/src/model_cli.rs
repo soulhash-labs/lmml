@@ -212,6 +212,10 @@ pub(crate) enum ModelCommand {
         /// Validated training-run manifest.
         #[arg(long)]
         training_manifest: PathBuf,
+        /// Pre-optimization authorization consumed by the training run.
+        /// Defaults to the managed authorization named by the training manifest.
+        #[arg(long)]
+        authorization: Option<PathBuf>,
         /// New merged candidate Safetensors directory.
         #[arg(long)]
         candidate: PathBuf,
@@ -378,6 +382,7 @@ pub(crate) async fn run(command: ModelCommand) -> i32 {
             base_manifest,
             base_source,
             training_manifest,
+            authorization,
             candidate,
             successor_lineage_id,
             candidate_id,
@@ -389,6 +394,7 @@ pub(crate) async fn run(command: ModelCommand) -> i32 {
                 base_manifest: &base_manifest,
                 base_source: &base_source,
                 training_manifest: &training_manifest,
+                authorization_manifest: authorization.as_deref(),
                 candidate_path: &candidate,
                 successor_lineage_id: &successor_lineage_id,
                 candidate_id: &candidate_id,

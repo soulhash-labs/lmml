@@ -562,6 +562,10 @@ pub struct SuccessorManifest {
     pub candidate_id: String,
     /// Training run that produced the candidate.
     pub training_run_id: String,
+    /// Frozen parent baseline used for regression admission.
+    pub parent_baseline_id: String,
+    /// SHA-256 of the exact frozen parent baseline manifest file.
+    pub parent_baseline_hash: Hash256,
     /// Canonical successor manifest hash.
     pub successor_hash: Hash256,
     /// Regression evidence against the pristine parent baseline.

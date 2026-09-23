@@ -195,6 +195,8 @@ fn successor_derivation_requires_immutable_admission() {
         parent_lineage_id: "qwen38-27b".into(),
         candidate_id: "candidate-1".into(),
         training_run_id: "train-1".into(),
+        parent_baseline_id: "baseline-1".into(),
+        parent_baseline_hash: lmml_substrate::Hash256::parse("b".repeat(64)).expect("hash"),
         successor_hash: successor.model.canonical_manifest_hash.clone(),
         regression: vec![lmml_substrate::RegressionResult {
             case_id: "anchor-1".into(),

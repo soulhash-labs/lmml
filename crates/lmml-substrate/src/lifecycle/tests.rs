@@ -169,6 +169,27 @@ fn unexpected_trainable_parameter_is_rejected() {
 }
 
 #[test]
+fn broad_or_duplicate_trainable_inventory_is_rejected() {
+    let (_directory, base) = checkpoint("qwen38-27b", None);
+    let scratch = tempfile::tempdir().expect("scratch");
+    let (adapter_path, adapter_hash) = adapter(scratch.path(), 1.0);
+    let mut run = training_run(&base, &adapter_path, adapter_hash);
+    run.approved_allowlist = vec!["*".into()];
+    assert!(matches!(
+        validate_training_run_against_base(&run, &base),
+        Err(SubstrateError::InvalidLifecycleManifest(_))
+    ));
+
+    run.approved_allowlist = vec!["model.layers.*".into()];
+    run.trainable_parameters
+        .push(run.trainable_parameters[0].clone());
+    assert!(matches!(
+        validate_training_run_against_base(&run, &base),
+        Err(SubstrateError::InvalidLifecycleManifest(_))
+    ));
+}
+
+#[test]
 fn completed_training_must_match_preoptimization_authorization() {
     let (_directory, base) = checkpoint("qwen38-27b", None);
     let scratch = tempfile::tempdir().expect("scratch");
@@ -176,6 +197,23 @@ fn completed_training_must_match_preoptimization_authorization() {
     let mut run = training_run(&base, &adapter_path, adapter_hash);
     let authorization = training_authorization(&base);
     run.seed += 1;
+
+    assert!(matches!(
+        validate_training_run_against_authorization(&run, &authorization),
+        Err(SubstrateError::InvalidLifecycleManifest(_))
+    ));
+}
+
+#[test]
+fn completed_training_cannot_predate_authorization() {
+    let (_directory, base) = checkpoint("qwen38-27b", None);
+    let scratch = tempfile::tempdir().expect("scratch");
+    let (adapter_path, adapter_hash) = adapter(scratch.path(), 1.0);
+    let mut run = training_run(&base, &adapter_path, adapter_hash);
+    let mut authorization = training_authorization(&base);
+    authorization.created_at = "2026-08-25T00:00:01Z".into();
+    run.authorization_hash =
+        training_authorization_hash(&authorization).expect("authorization hash");
 
     assert!(matches!(
         validate_training_run_against_authorization(&run, &authorization),
@@ -192,6 +230,37 @@ fn non_finite_adapter_is_rejected() {
 
     assert!(matches!(
         validate_training_run_against_base(&run, &base),
+        Err(SubstrateError::NonFiniteTrainingState(_))
+    ));
+}
+
+#[test]
+fn non_finite_merged_checkpoint_is_rejected() {
+    let directory = tempfile::tempdir().expect("checkpoint");
+    fs::write(
+        directory.path().join("config.json"),
+        r#"{"model_type":"qwen3_5","architectures":["Qwen3_5ForConditionalGeneration"]}"#,
+    )
+    .expect("config");
+    fs::write(directory.path().join("tokenizer.json"), "tokenizer").expect("tokenizer");
+    fs::write(
+        directory.path().join("model.safetensors.index.json"),
+        r#"{"weight_map":{"layer.weight":"model-00001-of-00001.safetensors"}}"#,
+    )
+    .expect("index");
+    write_tensor(
+        &directory.path().join("model-00001-of-00001.safetensors"),
+        "layer.weight",
+        "F32",
+        &[1],
+        &f32::NAN.to_le_bytes(),
+    );
+    let manifest =
+        import_successor_safetensors(directory.path(), "qwen38-successor-1", "qwen38-27b")
+            .expect("import checkpoint");
+
+    assert!(matches!(
+        crate::validate_finite_checkpoint(directory.path(), &manifest),
         Err(SubstrateError::NonFiniteTrainingState(_))
     ));
 }
@@ -259,6 +328,8 @@ fn successor_requires_distinct_explicit_parent() {
         parent_lineage_id: "qwen38-27b".into(),
         candidate_id: "candidate-1".into(),
         training_run_id: "train-1".into(),
+        parent_baseline_id: "baseline-1".into(),
+        parent_baseline_hash: hash('b'),
         successor_hash: hash('a'),
         regression: vec![RegressionResult {
             case_id: "anchor-1".into(),
@@ -314,6 +385,116 @@ fn runtime_lease_uses_exact_admitted_artifact_hash() {
     .expect("lease");
     assert_eq!(lease.artifact_hash, artifact.artifact.artifact_hash);
     assert_eq!(lease.artifact_id, artifact.artifact.artifact_id);
+}
+
+#[test]
+fn runtime_lease_rejects_runtime_artifact_metadata_mismatch() {
+    let directory = tempfile::tempdir().expect("artifact");
+    let artifact_path = directory.path().join("model.gguf");
+    fs::write(&artifact_path, b"GGUF-runtime-test").expect("GGUF");
+    let artifact = admitted_artifact(&artifact_path);
+    let runtime = RuntimeManifest {
+        runtime_id: "runtime-1".into(),
+        pid: 1234,
+        model_lineage_id: artifact.artifact.model_lineage_id.clone(),
+        artifact_id: artifact.artifact.artifact_id.clone(),
+        artifact_hash: artifact.artifact.artifact_hash.clone(),
+        representation: ModelRepresentation::Gguf,
+        quantization: Some(QuantizationKind::Q4_K_M),
+        backend: "llama.cpp".into(),
+        backend_version: "test".into(),
+        endpoint: "http://127.0.0.1:1200".into(),
+        context_size: 16_384,
+        capabilities: vec![RuntimeCapability::TextGeneration],
+        created_at: TIMESTAMP.into(),
+    };
+    let request = ModelRequest {
+        model_lineage_id: "qwen38-27b".into(),
+        purpose: "agent".into(),
+        representation_preference: vec![ModelRepresentation::Gguf],
+        required_capabilities: vec![RuntimeCapability::TextGeneration],
+    };
+
+    assert!(matches!(
+        issue_model_lease(&request, &[artifact], &[runtime], "lease-1"),
+        Err(SubstrateError::RuntimeCapabilityUnsupported(_))
+    ));
+}
+
+#[test]
+fn successor_regression_delta_must_match_metrics() {
+    let successor = SuccessorManifest {
+        schema_version: SCHEMA_VERSION,
+        successor_lineage_id: "qwen38-successor-1".into(),
+        parent_lineage_id: "qwen38-27b".into(),
+        candidate_id: "candidate-1".into(),
+        training_run_id: "train-1".into(),
+        parent_baseline_id: "baseline-1".into(),
+        parent_baseline_hash: hash('b'),
+        successor_hash: hash('a'),
+        regression: vec![RegressionResult {
+            case_id: "anchor-1".into(),
+            parent_metric: 1.0,
+            candidate_metric: 3.0,
+            delta: 0.0,
+            maximum_degradation: 0.1,
+            passed: true,
+        }],
+        admitted_at: TIMESTAMP.into(),
+    };
+
+    assert!(matches!(
+        parse_successor_manifest_json(&serde_json::to_string(&successor).expect("serialize")),
+        Err(SubstrateError::InvalidLifecycleManifest(_))
+    ));
+}
+
+#[test]
+fn successor_regression_is_bound_to_exact_parent_baseline() {
+    let output = "anchor output".to_string();
+    let baseline_hash = hash('b');
+    let baseline = BaselineManifest {
+        schema_version: SCHEMA_VERSION,
+        baseline_id: "pristine-1".into(),
+        model_lineage_id: "qwen38-27b".into(),
+        artifact_id: "qwen38-q8".into(),
+        artifact_hash: hash('a'),
+        backend: "llama.cpp".into(),
+        backend_version: "test".into(),
+        parameters: vec!["--temp".into(), "0".into()],
+        cases: vec![BaselineCase {
+            case_id: "anchor-1".into(),
+            prompt: "anchor prompt".into(),
+            output_hash: sha256_data(output.as_bytes()),
+            output,
+        }],
+        created_at: TIMESTAMP.into(),
+    };
+    let successor = SuccessorManifest {
+        schema_version: SCHEMA_VERSION,
+        successor_lineage_id: "qwen38-successor-1".into(),
+        parent_lineage_id: "qwen38-27b".into(),
+        candidate_id: "candidate-1".into(),
+        training_run_id: "train-1".into(),
+        parent_baseline_id: baseline.baseline_id.clone(),
+        parent_baseline_hash: baseline_hash.clone(),
+        successor_hash: hash('c'),
+        regression: vec![RegressionResult {
+            case_id: "anchor-1".into(),
+            parent_metric: 1.0,
+            candidate_metric: 1.0,
+            delta: 0.0,
+            maximum_degradation: 0.1,
+            passed: true,
+        }],
+        admitted_at: TIMESTAMP.into(),
+    };
+
+    validate_successor_baseline(&successor, &baseline, &baseline_hash).expect("bound baseline");
+    assert!(matches!(
+        validate_successor_baseline(&successor, &baseline, &hash('d')),
+        Err(SubstrateError::InvalidLifecycleManifest(_))
+    ));
 }
 
 #[test]

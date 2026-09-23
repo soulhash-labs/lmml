@@ -156,6 +156,11 @@ pub fn issue_model_lease(
 ) -> Result<ModelLease, SubstrateError> {
     validate_identifier(&request.model_lineage_id)?;
     validate_identifier(lease_id)?;
+    if request.purpose.trim().is_empty() {
+        return Err(SubstrateError::InvalidLifecycleManifest(
+            "runtime request requires a purpose".to_string(),
+        ));
+    }
     if request.required_capabilities.is_empty() {
         return Err(SubstrateError::InvalidLifecycleManifest(
             "runtime request requires at least one capability".to_string(),
@@ -182,7 +187,10 @@ pub fn issue_model_lease(
         })
         .filter(|(runtime, artifact)| {
             runtime.model_lineage_id == request.model_lineage_id
+                && runtime.model_lineage_id == artifact.artifact.model_lineage_id
                 && runtime.artifact_hash == artifact.artifact.artifact_hash
+                && runtime.representation == artifact.artifact.representation
+                && runtime.quantization == artifact.artifact.quantization
                 && artifact.admission.is_some()
                 && request
                     .representation_preference
@@ -285,6 +293,13 @@ pub fn validate_training_run_against_authorization(
             "training run does not match its pre-optimization authorization".to_string(),
         ));
     }
+    let authorization_time = parse_timestamp(&authorization.created_at)?;
+    let run_time = parse_timestamp(&run.created_at)?;
+    if run_time < authorization_time {
+        return Err(SubstrateError::InvalidLifecycleManifest(
+            "training run predates its pre-optimization authorization".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -300,6 +315,11 @@ pub fn validate_candidate_against_training(
     {
         return Err(SubstrateError::InvalidLifecycleManifest(
             "candidate parent, training run, or adapter identity mismatch".to_string(),
+        ));
+    }
+    if parse_timestamp(&candidate.created_at)? < parse_timestamp(&training.created_at)? {
+        return Err(SubstrateError::InvalidLifecycleManifest(
+            "successor candidate predates its training run".to_string(),
         ));
     }
     Ok(())
@@ -357,6 +377,45 @@ pub fn validate_successor_admission(
     {
         return Err(SubstrateError::InvalidLifecycleManifest(
             "successor admission does not match its candidate".to_string(),
+        ));
+    }
+    if parse_timestamp(&successor.admitted_at)? < parse_timestamp(&candidate.created_at)? {
+        return Err(SubstrateError::InvalidLifecycleManifest(
+            "successor admission predates its merge candidate".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Bind successor regression evidence to one exact frozen parent baseline.
+pub fn validate_successor_baseline(
+    successor: &SuccessorManifest,
+    baseline: &BaselineManifest,
+    baseline_hash: &crate::Hash256,
+) -> Result<(), SubstrateError> {
+    validate_successor_manifest(successor)?;
+    validate_baseline_manifest(baseline)?;
+    if successor.parent_lineage_id != baseline.model_lineage_id
+        || successor.parent_baseline_id != baseline.baseline_id
+        || &successor.parent_baseline_hash != baseline_hash
+    {
+        return Err(SubstrateError::InvalidLifecycleManifest(
+            "successor regression is not bound to the exact frozen parent baseline".to_string(),
+        ));
+    }
+    let baseline_cases = baseline
+        .cases
+        .iter()
+        .map(|case| case.case_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let regression_cases = successor
+        .regression
+        .iter()
+        .map(|case| case.case_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if baseline_cases != regression_cases {
+        return Err(SubstrateError::InvalidLifecycleManifest(
+            "regression cases must exactly match the frozen parent baseline".to_string(),
         ));
     }
     Ok(())
@@ -418,6 +477,11 @@ fn validate_training_run_manifest(run: &TrainingRunManifest) -> Result<(), Subst
     if !run.final_loss.is_finite() {
         return Err(SubstrateError::NonFiniteTrainingState("loss".to_string()));
     }
+    if run.gradient_norms.is_empty() {
+        return Err(SubstrateError::InvalidLifecycleManifest(
+            "training run requires gradient-norm evidence".to_string(),
+        ));
+    }
     if run.gradient_norms.iter().any(|norm| !norm.is_finite()) {
         return Err(SubstrateError::NonFiniteTrainingState(
             "gradient norm".to_string(),
@@ -448,7 +512,28 @@ fn validate_trainable_inventory(
             "training run requires allowlist and trainable inventory".to_string(),
         ));
     }
+    let mut allowlist_entries = BTreeSet::new();
+    for allowed in approved_allowlist {
+        let prefix = allowed.strip_suffix('*').unwrap_or(allowed);
+        if prefix.is_empty() || prefix.contains('*') || !allowlist_entries.insert(allowed) {
+            return Err(SubstrateError::InvalidLifecycleManifest(
+                "training allowlist entries must be non-empty, unique, and use only a trailing wildcard"
+                    .to_string(),
+            ));
+        }
+    }
+    let mut parameters = BTreeSet::new();
     for parameter in trainable_parameters {
+        if parameter.is_empty() || !parameters.insert(parameter) {
+            return Err(SubstrateError::InvalidLifecycleManifest(
+                "trainable parameter names must be non-empty and unique".to_string(),
+            ));
+        }
+        if !is_lora_parameter_name(parameter) {
+            return Err(SubstrateError::UnexpectedTrainableParameter(
+                parameter.clone(),
+            ));
+        }
         if !approved_allowlist
             .iter()
             .any(|allowed| matches_allowlist(parameter, allowed))
@@ -497,7 +582,10 @@ fn validate_successor_candidate_manifest(
             "merge or equivalence metric".to_string(),
         ));
     }
-    if candidate.equivalence_max_absolute_delta > candidate.equivalence_tolerance {
+    if candidate.equivalence_max_absolute_delta < 0.0
+        || candidate.equivalence_tolerance < 0.0
+        || candidate.equivalence_max_absolute_delta > candidate.equivalence_tolerance
+    {
         return Err(SubstrateError::EquivalenceFailure {
             delta: candidate.equivalence_max_absolute_delta,
             tolerance: candidate.equivalence_tolerance,
@@ -521,6 +609,7 @@ fn validate_successor_manifest(manifest: &SuccessorManifest) -> Result<(), Subst
     validate_identifier(&manifest.parent_lineage_id)?;
     validate_identifier(&manifest.candidate_id)?;
     validate_identifier(&manifest.training_run_id)?;
+    validate_identifier(&manifest.parent_baseline_id)?;
     validate_timestamp(&manifest.admitted_at)?;
     if manifest.successor_lineage_id == manifest.parent_lineage_id {
         return Err(SubstrateError::InvalidLifecycleManifest(
@@ -532,7 +621,14 @@ fn validate_successor_manifest(manifest: &SuccessorManifest) -> Result<(), Subst
             "successor admission requires regression evidence".to_string(),
         ));
     }
+    let mut case_ids = BTreeSet::new();
     for result in &manifest.regression {
+        validate_identifier(&result.case_id)?;
+        if !case_ids.insert(&result.case_id) {
+            return Err(SubstrateError::InvalidLifecycleManifest(
+                "successor regression case IDs must be unique".to_string(),
+            ));
+        }
         if !result.parent_metric.is_finite()
             || !result.candidate_metric.is_finite()
             || !result.delta.is_finite()
@@ -543,7 +639,19 @@ fn validate_successor_manifest(manifest: &SuccessorManifest) -> Result<(), Subst
                 result.case_id
             )));
         }
-        if !result.passed || result.delta > result.maximum_degradation {
+        let expected_delta = result.candidate_metric - result.parent_metric;
+        let delta_tolerance =
+            f64::EPSILON * expected_delta.abs().max(result.delta.abs()).max(1.0) * 8.0;
+        if result.maximum_degradation < 0.0
+            || (result.delta - expected_delta).abs() > delta_tolerance
+        {
+            return Err(SubstrateError::InvalidLifecycleManifest(format!(
+                "regression delta is inconsistent for case {}",
+                result.case_id
+            )));
+        }
+        let expected_pass = result.delta <= result.maximum_degradation;
+        if result.passed != expected_pass || !expected_pass {
             return Err(SubstrateError::RegressionGateFailure(
                 result.case_id.clone(),
             ));
@@ -602,12 +710,25 @@ fn matches_allowlist(parameter: &str, allowed: &str) -> bool {
         .map_or(parameter == allowed, |prefix| parameter.starts_with(prefix))
 }
 
+fn is_lora_parameter_name(parameter: &str) -> bool {
+    [
+        ".lora_A",
+        ".lora_B",
+        ".lora_embedding_A",
+        ".lora_embedding_B",
+    ]
+    .iter()
+    .any(|marker| parameter.contains(marker))
+}
+
+fn parse_timestamp(timestamp: &str) -> Result<OffsetDateTime, SubstrateError> {
+    OffsetDateTime::parse(timestamp, &Rfc3339).map_err(|_| {
+        SubstrateError::InvalidLifecycleManifest("timestamp must be RFC3339".to_string())
+    })
+}
+
 fn validate_timestamp(timestamp: &str) -> Result<(), SubstrateError> {
-    OffsetDateTime::parse(timestamp, &Rfc3339)
-        .map(|_| ())
-        .map_err(|_| {
-            SubstrateError::InvalidLifecycleManifest("timestamp must be RFC3339".to_string())
-        })
+    parse_timestamp(timestamp).map(|_| ())
 }
 
 fn parse_validated<T: DeserializeOwned>(
