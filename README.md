@@ -103,6 +103,10 @@ Implemented and tested today:
 - Model-family guidance for Qwen3.5, Qwen3.6, Gemma 4, and Hermes 4.
 - Runtime profile support for validated Qwen, Gemma MTP, and BC-250 Vulkan
   scenarios.
+- Side-by-side upstream and Prism runtimes with model-aware selection for
+  Prism `PQ2_0`/`PTQ1_0` GGUF tensor formats.
+- 262,144-token default server context with OpenCode model-limit publication
+  and long-context compaction guidance.
 - OCR profile support for Unlimited-OCR Q8 through `llama-mtmd-cli`.
 - Opt-in LAN node discovery and authenticated router-to-worker probing.
 
@@ -248,24 +252,36 @@ curl -fsSL http://192.168.1.100:8000/preflight.sh | \
 ### OpenCode
 
 OpenCode is the first-class local coding harness target. Keep the TUI-managed
-server on port `1200` and point OpenCode at the OpenAI-compatible base URL:
+server on port `8080` by default and point OpenCode at the OpenAI-compatible
+base URL:
 
 ```text
-baseURL: http://127.0.0.1:1200/v1
+baseURL: http://127.0.0.1:8080/v1
 model: llamacpp/<your-gguf-model-name>
 ```
 
-Let `lmml` write the provider block:
+After the LMML server reports `Status: Ready`, let LMML synchronize the active
+model, endpoint, and OpenCode/Oh My OpenAgent routes:
 
 ```sh
-lmml runtime configure opencode --base-url http://127.0.0.1:1200/v1
+lmml runtime configure opencode --dry-run --force
+lmml runtime configure opencode --yes --force
 ```
+
+The command verifies the live model before writing, preserves unrelated
+settings, removes the fake `llamacpp_fast` route in single-server mode, and
+creates timestamped backups. Restart OpenCode after synchronization.
+
+LMML publishes the model limit to OpenCode as `context: 262144` and
+`output: 16384`. A request cannot exceed 262,144 tokens. If an existing
+OpenCode session has already grown beyond that limit, compact it or start a
+new session; restarting the server does not shrink the old session history.
 
 Quick verification:
 
 ```sh
-curl -fsS http://127.0.0.1:1200/health
-curl -fsS http://127.0.0.1:1200/v1/models
+curl -fsS http://127.0.0.1:8080/health
+curl -fsS http://127.0.0.1:8080/v1/models
 opencode models llamacpp
 ```
 
@@ -320,10 +336,10 @@ env_key = "LMML_ROUTER_API_KEY"
 ### Claude Code
 
 Claude Code can use `lmml-node` through the Anthropic Messages compatibility
-endpoint. Keep `llama-server` on port `1200`, then start the adapter:
+endpoint. Keep `llama-server` on port `8080`, then start the adapter:
 
 ```sh
-LMML_NODE_API_KEY=local-dev-key lmml-node --llama-url http://127.0.0.1:1200
+LMML_NODE_API_KEY=local-dev-key lmml-node --llama-url http://127.0.0.1:8080
 ```
 
 In the Claude Code shell:
@@ -348,7 +364,7 @@ Hermes-style OpenAI-compatible clients can target any `lmml` OpenAI-compatible
 base URL:
 
 ```text
-base URL: http://127.0.0.1:1200/v1
+base URL: http://127.0.0.1:8080/v1
 model: <your Hermes or other GGUF filename>
 ```
 
@@ -379,12 +395,12 @@ flowchart LR
 Static example:
 
 ```sh
-# Worker beside a TUI-managed llama-server on port 1200.
+# Worker beside a TUI-managed llama-server on port 8080.
 LMML_NODE_API_KEY=worker-key lmml-node \
   --host 0.0.0.0 \
   --port 8101 \
   --node-name workstation \
-  --llama-url http://127.0.0.1:1200
+  --llama-url http://127.0.0.1:8080
 
 # Coordinator router.
 LMML_ROUTER_API_KEY=router-key lmml-router \
