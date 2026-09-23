@@ -960,7 +960,11 @@ fn desired_provider(profile: &RuntimeProfile, model: &str, label: &str) -> Value
         },
         "models": {
             (model): {
-                "name": format!("{model} ({label})")
+                "name": format!("{model} ({label})"),
+                "limit": {
+                    "context": profile.ctx_size,
+                    "output": 16_384
+                }
             }
         }
     })
@@ -1993,6 +1997,14 @@ mod tests {
         assert!(updated["provider"].get("llamacpp_fast").is_none());
         assert_eq!(updated["model"], "llamacpp/current.gguf");
         assert_eq!(updated["small_model"], "llamacpp/current.gguf");
+        assert_eq!(
+            updated["provider"]["llamacpp"]["models"]["current.gguf"]["limit"]["context"],
+            65_536
+        );
+        assert_eq!(
+            updated["provider"]["llamacpp"]["models"]["current.gguf"]["limit"]["output"],
+            16_384
+        );
     }
 
     #[test]
