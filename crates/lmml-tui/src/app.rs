@@ -1742,7 +1742,6 @@ fn apply_prism_initial_safeguards(
         return;
     }
 
-    config.ctx_size = config.ctx_size.min(32_768);
     config.flash_attn = true;
     config.jinja = true;
     set_arg_pair(
@@ -3020,7 +3019,7 @@ mod tests {
     }
 
     #[test]
-    fn prism_model_without_profile_uses_safe_first_launch_defaults() {
+    fn prism_model_without_profile_preserves_configured_context() {
         let mut app = App::default();
         app.state.server.ctx_size = 196_608;
         app.state.server.flash_attn = false;
@@ -3034,7 +3033,7 @@ mod tests {
 
         let config = app.server_config(&model);
 
-        assert_eq!(config.ctx_size, 32_768);
+        assert_eq!(config.ctx_size, 196_608);
         assert!(config.flash_attn);
         assert!(config.jinja);
         assert!(config
