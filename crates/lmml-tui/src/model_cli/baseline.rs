@@ -1,5 +1,6 @@
 //! Deterministic pristine baseline execution and persistence.
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -20,6 +21,36 @@ pub(super) struct BaselineOptions<'a> {
 }
 
 pub(super) async fn run(options: BaselineOptions<'_>, data_root: &Path) -> i32 {
+    run_with(options, data_root, &LlamaCliExecutor).await
+}
+
+trait BaselineCaseExecutor {
+    fn execute<'a>(
+        &'a self,
+        program: &'a Path,
+        args: &'a [String],
+        case_id: &'a str,
+    ) -> impl Future<Output = Result<String, String>> + Send + 'a;
+}
+
+struct LlamaCliExecutor;
+
+impl BaselineCaseExecutor for LlamaCliExecutor {
+    async fn execute(
+        &self,
+        program: &Path,
+        args: &[String],
+        case_id: &str,
+    ) -> Result<String, String> {
+        execute_case(program, args, case_id).await
+    }
+}
+
+async fn run_with<E: BaselineCaseExecutor>(
+    options: BaselineOptions<'_>,
+    data_root: &Path,
+    executor: &E,
+) -> i32 {
     if let Err(error) = validate_extra_args(options.extra_args) {
         eprintln!("model baseline refused: {error}");
         return 1;
@@ -48,15 +79,8 @@ pub(super) async fn run(options: BaselineOptions<'_>, data_root: &Path) -> i32 {
         eprintln!("model baseline refused: artifact is not an admitted GGUF");
         return 1;
     }
-    let actual_hash = match lmml_substrate::sha256_file(&artifact.artifact_path) {
-        Ok(hash) => hash,
-        Err(error) => {
-            eprintln!("model baseline failed to hash artifact: {error}");
-            return 1;
-        }
-    };
-    if actual_hash != artifact.artifact.artifact_hash {
-        eprintln!("model baseline refused: artifact hash does not match registration");
+    if let Err(error) = verify_artifact_hash(artifact).await {
+        eprintln!("model baseline refused: {error}");
         return 1;
     }
     let prompts = match read_prompts(options.prompts) {
@@ -87,7 +111,7 @@ pub(super) async fn run(options: BaselineOptions<'_>, data_root: &Path) -> i32 {
             options.gpu_layers,
             options.extra_args,
         );
-        let output = match execute_case(&cli, &args, &case_id).await {
+        let output = match executor.execute(&cli, &args, &case_id).await {
             Ok(output) => output,
             Err(error) => {
                 eprintln!("model baseline case {case_id} failed: {error}");
@@ -100,6 +124,10 @@ pub(super) async fn run(options: BaselineOptions<'_>, data_root: &Path) -> i32 {
             output_hash: lmml_substrate::sha256_data(output.as_bytes()),
             output,
         });
+    }
+    if let Err(error) = verify_artifact_hash(artifact).await {
+        eprintln!("model baseline refused: artifact changed during execution: {error}");
+        return 1;
     }
     let created_at = match OffsetDateTime::now_utc().format(&Rfc3339) {
         Ok(created_at) => created_at,
@@ -155,6 +183,24 @@ pub(super) async fn run(options: BaselineOptions<'_>, data_root: &Path) -> i32 {
         );
     }
     0
+}
+
+async fn verify_artifact_hash(artifact: &lmml_substrate::ArtifactManifest) -> Result<(), String> {
+    let path = artifact.artifact_path.clone();
+    let expected = artifact.artifact.artifact_hash.clone();
+    tokio::task::spawn_blocking(move || {
+        let actual = lmml_substrate::sha256_file(&path).map_err(|error| error.to_string())?;
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(format!(
+                "artifact bytes do not match registration: {}",
+                path.display()
+            ))
+        }
+    })
+    .await
+    .map_err(|error| format!("artifact hash task failed: {error}"))?
 }
 
 fn read_prompts(path: &Path) -> Result<Vec<(String, String)>, String> {
@@ -330,6 +376,33 @@ fn default_cli_path() -> PathBuf {
 mod tests {
     use super::*;
 
+    struct MutatingExecutor;
+
+    impl BaselineCaseExecutor for MutatingExecutor {
+        async fn execute(
+            &self,
+            _program: &Path,
+            args: &[String],
+            _case_id: &str,
+        ) -> Result<String, String> {
+            use std::io::Write;
+
+            let model_index = args
+                .iter()
+                .position(|argument| argument == "-m")
+                .ok_or_else(|| "model argument missing".to_string())?;
+            let model = args
+                .get(model_index + 1)
+                .ok_or_else(|| "model path missing".to_string())?;
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(model)
+                .and_then(|mut file| file.write_all(b"changed-during-baseline"))
+                .map_err(|error| error.to_string())?;
+            Ok("baseline output".to_string())
+        }
+    }
+
     #[test]
     fn baseline_extra_args_cannot_override_identity_or_sampling() {
         for arguments in [
@@ -360,5 +433,75 @@ mod tests {
         .expect("prompts");
 
         assert!(read_prompts(&path).is_err());
+    }
+
+    #[tokio::test]
+    async fn baseline_rejects_artifact_changed_during_execution() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let data_root = directory.path().join("data");
+        let artifact_path = directory.path().join("model.gguf");
+        std::fs::write(&artifact_path, b"admitted-model").expect("artifact");
+        let artifact_hash = lmml_substrate::sha256_file(&artifact_path).expect("hash");
+        let artifact = lmml_substrate::ArtifactManifest {
+            schema_version: lmml_substrate::SCHEMA_VERSION,
+            artifact: lmml_substrate::ArtifactIdentity {
+                artifact_id: "qwen38-q8".into(),
+                model_lineage_id: "qwen38-27b".into(),
+                representation: lmml_substrate::ModelRepresentation::Gguf,
+                quantization: Some(lmml_substrate::QuantizationKind::Q8_0),
+                artifact_hash: artifact_hash.clone(),
+            },
+            parent_artifact: Some("qwen38-27b-safetensors".into()),
+            canonical_model: "qwen38-27b".into(),
+            tool: "llama.cpp".into(),
+            tool_version: "test".into(),
+            command_or_parameters: vec!["Q8_0".into()],
+            source_hashes: vec![
+                lmml_substrate::Hash256::parse("a".repeat(64)).expect("source hash")
+            ],
+            output_hash: artifact_hash,
+            artifact_path,
+            admission: Some(lmml_substrate::ArtifactAdmission {
+                backend: "llama.cpp".into(),
+                backend_version: "test".into(),
+                checked_at: "2026-09-23T00:00:00Z".into(),
+            }),
+            created_at: "2026-09-23T00:00:00Z".into(),
+        };
+        lmml_substrate::append_artifact_manifest(
+            data_root.join("lmml/models/artifacts"),
+            &artifact,
+        )
+        .expect("artifact manifest");
+        let prompts = directory.path().join("prompts.json");
+        std::fs::write(
+            &prompts,
+            r#"[{"case_id":"identity","prompt":"Identify the model."}]"#,
+        )
+        .expect("prompts");
+        let cli = directory.path().join("llama-cli");
+        std::fs::write(&cli, b"test executable placeholder").expect("cli");
+        let baseline_path = directory.path().join("baseline.json");
+        let extra_args = Vec::new();
+
+        let status = run_with(
+            BaselineOptions {
+                artifact_id: "qwen38-q8",
+                baseline_id: "pristine-v1",
+                prompts: &prompts,
+                cli: Some(&cli),
+                output: Some(&baseline_path),
+                predict: 32,
+                gpu_layers: 0,
+                extra_args: &extra_args,
+                json: false,
+            },
+            &data_root,
+            &MutatingExecutor,
+        )
+        .await;
+
+        assert_eq!(status, 1);
+        assert!(!baseline_path.exists());
     }
 }

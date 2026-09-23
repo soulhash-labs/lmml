@@ -60,14 +60,10 @@ pub(crate) async fn register(options: RegisterOptions<'_>) -> i32 {
             "artifact is not an admitted GGUF".to_string(),
         );
     }
-    let actual_hash = match lmml_substrate::sha256_file(&artifact.artifact_path) {
-        Ok(hash) => hash,
-        Err(error) => return fail("runtime registration", error.to_string()),
-    };
-    if actual_hash != artifact.artifact.artifact_hash {
+    if let Err(error) = verify_artifact_hash(artifact).await {
         return fail(
             "runtime registration",
-            "artifact bytes do not match the registered hash".to_string(),
+            format!("artifact verification failed: {error}"),
         );
     }
     if let Err(error) = process_executes_artifact(options.pid, &artifact.artifact_path) {
@@ -81,6 +77,12 @@ pub(crate) async fn register(options: RegisterOptions<'_>) -> i32 {
             .await
     {
         return fail("runtime registration model identity", error.to_string());
+    }
+    if let Err(error) = verify_artifact_hash(artifact).await {
+        return fail(
+            "runtime registration",
+            format!("artifact changed during registration: {error}"),
+        );
     }
     let created_at = match OffsetDateTime::now_utc().format(&Rfc3339) {
         Ok(timestamp) => timestamp,
@@ -182,7 +184,7 @@ async fn verify_artifact_hash(artifact: &lmml_substrate::ArtifactManifest) -> Re
             Ok(())
         } else {
             Err(format!(
-                "artifact bytes changed after runtime registration: {}",
+                "artifact bytes do not match the admitted hash: {}",
                 path.display()
             ))
         }
