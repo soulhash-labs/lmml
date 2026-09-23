@@ -87,7 +87,12 @@ async fn admit_with_server(artifact: &Path, server: &Path) -> Result<(), String>
                     if stream.read_to_end(&mut response).await.is_ok()
                         && response.starts_with(b"HTTP/1.1 200")
                     {
-                        return Ok(());
+                        return lmml_server::verify_served_model("127.0.0.1", port, artifact, None)
+                            .await
+                            .map(|_| ())
+                            .map_err(|error| {
+                                format!("llama-server opened a different GGUF: {error}")
+                            });
                     }
                 }
             }

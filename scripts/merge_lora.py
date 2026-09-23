@@ -157,24 +157,53 @@ def copy_substrate_assets(base: Path, candidate: Path) -> None:
         shutil.copy2(source, candidate / name)
 
 
+def is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
 def main() -> int:
     args = parse_args()
-    if args.output.exists():
-        raise FileExistsError(f"candidate output already exists: {args.output}")
-    if args.report.exists():
-        raise FileExistsError(f"merge report already exists: {args.report}")
+    base_path = args.base.resolve(strict=True)
+    adapter_path = args.adapter.resolve(strict=True)
+    output_path = args.output.resolve(strict=False)
+    report_path = args.report.resolve(strict=False)
+    if not base_path.is_dir() or not adapter_path.is_dir():
+        raise ValueError("base and adapter must be existing directories")
+    if is_relative_to(output_path, base_path) or is_relative_to(
+        report_path, base_path
+    ):
+        raise ValueError("successor output and report must remain outside the canonical base")
+    if is_relative_to(base_path, output_path):
+        raise ValueError("successor output must not contain the canonical base")
+    if (
+        is_relative_to(output_path, adapter_path)
+        or is_relative_to(adapter_path, output_path)
+        or is_relative_to(report_path, adapter_path)
+    ):
+        raise ValueError("successor output and report must remain outside the adapter")
+    if is_relative_to(report_path, output_path):
+        raise ValueError("merge report must remain outside the successor output")
+    if output_path.exists():
+        raise FileExistsError(f"candidate output already exists: {output_path}")
+    if report_path.exists():
+        raise FileExistsError(f"merge report already exists: {report_path}")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     dtype = DTYPES[args.dtype]
-    config = AutoConfig.from_pretrained(args.base, trust_remote_code=False)
+    config = AutoConfig.from_pretrained(base_path, trust_remote_code=False)
     loader = model_loader(config)
     base = loader.from_pretrained(
-        args.base,
+        base_path,
         config=config,
         dtype=dtype,
         device_map=args.device,
         low_cpu_mem_usage=True,
         trust_remote_code=False,
     )
-    model = PeftModel.from_pretrained(base, args.adapter, is_trainable=False)
+    model = PeftModel.from_pretrained(base, adapter_path, is_trainable=False)
     effective_dtype = str(next(model.parameters()).dtype).removeprefix("torch.")
     delta = adapter_delta(model)
     inputs = read_inputs(args.equivalence_inputs)
@@ -188,21 +217,21 @@ def main() -> int:
         )
 
     temporary_root = Path(
-        tempfile.mkdtemp(prefix=f".{args.output.name}.tmp-", dir=args.output.parent)
+        tempfile.mkdtemp(prefix=f".{output_path.name}.tmp-", dir=output_path.parent)
     )
     try:
         merged.save_pretrained(temporary_root, safe_serialization=True)
-        copy_substrate_assets(args.base, temporary_root)
-        publish_directory_noclobber(temporary_root, args.output)
+        copy_substrate_assets(base_path, temporary_root)
+        publish_directory_noclobber(temporary_root, output_path)
     except BaseException:
         shutil.rmtree(temporary_root, ignore_errors=True)
         raise
 
     report = {
         "schema_version": 1,
-        "base": str(args.base.resolve()),
-        "adapter": str(args.adapter.resolve()),
-        "candidate_path": str(args.output.resolve()),
+        "base": str(base_path),
+        "adapter": str(adapter_path),
+        "candidate_path": str(output_path),
         "requested_dtype": args.dtype,
         "effective_load_dtype": effective_dtype,
         "merge_dtype": effective_dtype,
@@ -213,13 +242,13 @@ def main() -> int:
         "torch_version": torch.__version__,
     }
     try:
-        args.report.parent.mkdir(parents=True, exist_ok=True)
-        descriptor = os.open(args.report, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(report_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             json.dump(report, handle, indent=2, sort_keys=True)
             handle.write("\n")
     except BaseException:
-        shutil.rmtree(args.output, ignore_errors=True)
+        shutil.rmtree(output_path, ignore_errors=True)
         raise
     return 0
 

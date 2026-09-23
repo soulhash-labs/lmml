@@ -288,7 +288,19 @@ pub async fn verify_served_model(
     expected_model: &Path,
     api_key: Option<&str>,
 ) -> Result<String, ServerError> {
-    let url = format!("{}/v1/models", base_url(host, port));
+    verify_served_model_endpoint(&base_url(host, port), expected_model, api_key).await
+}
+
+/// Verify that an existing llama-server endpoint reports the expected GGUF.
+///
+/// Runtime registration uses this form when the endpoint was supplied by an
+/// operator rather than started by [`ServerManager`].
+pub async fn verify_served_model_endpoint(
+    endpoint: &str,
+    expected_model: &Path,
+    api_key: Option<&str>,
+) -> Result<String, ServerError> {
+    let url = format!("{}/v1/models", endpoint.trim_end_matches('/'));
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(HEALTH_CHECK_TIMEOUT_SECS))
         .build()

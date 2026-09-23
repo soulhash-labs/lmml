@@ -185,12 +185,10 @@ pub(super) fn register_candidate(options: CandidateOptions<'_>, data_root: &Path
         Ok(path) => path,
         Err(error) => return fail("successor merge", error.to_string()),
     };
-    if base_source == candidate_path {
-        return fail(
-            "successor merge",
-            "candidate directory must not overwrite the canonical parent".to_string(),
-        );
-    }
+    let report_path = match options.report.canonicalize() {
+        Ok(path) => path,
+        Err(error) => return fail("successor merge", error.to_string()),
+    };
     let evidence: MergeEvidence = match read_json(options.report) {
         Ok(evidence) => evidence,
         Err(error) => return fail("successor merge", error),
@@ -208,6 +206,14 @@ pub(super) fn register_candidate(options: CandidateOptions<'_>, data_root: &Path
         Ok(path) => path,
         Err(error) => return fail("successor merge", error.to_string()),
     };
+    if let Err(error) = validate_successor_paths(
+        &base_source,
+        &training_adapter,
+        &candidate_path,
+        &report_path,
+    ) {
+        return fail("successor merge", error);
+    }
     if let Err(error) =
         validate_merge_evidence_paths(&evidence, &base_source, &training_adapter, &candidate_path)
     {
@@ -381,6 +387,30 @@ fn validate_merge_evidence_paths(
     Ok(())
 }
 
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
+}
+
+fn validate_successor_paths(
+    base: &Path,
+    adapter: &Path,
+    candidate: &Path,
+    report: &Path,
+) -> Result<(), String> {
+    if paths_overlap(base, candidate) {
+        return Err("candidate directory must remain outside the canonical parent".to_string());
+    }
+    if paths_overlap(adapter, candidate) {
+        return Err("candidate directory must remain outside the adapter".to_string());
+    }
+    if report.starts_with(base) || report.starts_with(adapter) || report.starts_with(candidate) {
+        return Err(
+            "merge report must remain outside the base, adapter, and candidate".to_string(),
+        );
+    }
+    Ok(())
+}
+
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
     let payload =
         std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
@@ -455,5 +485,37 @@ mod tests {
             &candidate.canonicalize().expect("canonical candidate"),
         )
         .is_err());
+    }
+
+    #[test]
+    fn successor_candidate_must_not_nest_with_canonical_base() {
+        let base = Path::new("/models/qwen38-base");
+        assert!(paths_overlap(base, base));
+        assert!(paths_overlap(
+            base,
+            Path::new("/models/qwen38-base/candidate")
+        ));
+        assert!(paths_overlap(Path::new("/models"), base));
+        assert!(!paths_overlap(base, Path::new("/models/qwen38-successor")));
+    }
+
+    #[test]
+    fn successor_report_and_candidate_remain_outside_inputs() {
+        let base = Path::new("/models/qwen38-base");
+        let adapter = Path::new("/models/adapters/a1");
+        let candidate = Path::new("/models/successors/m1");
+        let report = Path::new("/models/reports/m1.json");
+        validate_successor_paths(base, adapter, candidate, report).expect("separate paths");
+
+        for invalid_report in [
+            base.join("report.json"),
+            adapter.join("report.json"),
+            candidate.join("report.json"),
+        ] {
+            assert!(validate_successor_paths(base, adapter, candidate, &invalid_report).is_err());
+        }
+        assert!(
+            validate_successor_paths(base, adapter, &adapter.join("candidate"), report).is_err()
+        );
     }
 }

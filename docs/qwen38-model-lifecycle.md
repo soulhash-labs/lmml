@@ -122,11 +122,13 @@ the canonical source read-only and can write only inside a private temporary
 derivation directory.
 An immediately admitted GGUF is published only after metadata inspection,
 `llama-server --check-tensors` admission, and the 600-second large-model startup
-window. Admission forces `-ngl 0`, so this integrity check cannot claim or
-contend with an accelerator that is running another workload. It still loads
-the model and must only run when the operator permits that load. A deferred
-candidate is published under the candidate boundary and cannot enter runtime
-selection before `model admit-artifact` completes.
+window. The probe also requires `/v1/models` to identify the exact candidate,
+so an unrelated service cannot satisfy admission through a temporary-port race.
+Admission forces `-ngl 0`, so this integrity check cannot claim or contend with
+an accelerator that is running another workload. It still loads the model and
+must only run when the operator permits that load. A deferred candidate is
+published under the candidate boundary and cannot enter runtime selection
+before `model admit-artifact` completes.
 
 List the append-only artifact catalog with:
 
@@ -189,10 +191,13 @@ lmml runtime request \
 ```
 
 Registration re-hashes the artifact and verifies that `/proc/<pid>/cmdline`
-contains its exact path. A lease returns IDs, hashes, capabilities, and endpoint,
-not a filesystem path. Standard llama.cpp advertises text generation only and
-returns an explicit unsupported error for hidden-state or CROWN11 tap requests.
-An instrumented provider must advertise and return real observations.
+contains its exact path. Registration and lease issuance also require the
+endpoint's `/v1/models` response to identify that same GGUF, preventing a valid
+process from being paired with an unrelated healthy endpoint. A lease returns
+IDs, hashes, capabilities, and endpoint, not a filesystem path. Standard
+llama.cpp advertises text generation only and returns an explicit unsupported
+error for hidden-state or CROWN11 tap requests. An instrumented provider must
+advertise and return real observations.
 
 ## Successor checkpoints
 
@@ -248,7 +253,9 @@ candidate directory. It reproduces the pre-optimization authorization checks,
 imports the candidate, requires the explicit parent, verifies all files, scans
 every merged tensor for NaN or infinity, and checks architecture plus every
 tensor name, dtype, and shape against the parent. It rejects zero deltas or
-logit differences above the report tolerance.
+logit differences above the report tolerance. The merger and registrar also
+reject overlapping base, adapter, candidate, and report paths, so successor
+work cannot modify an input or add evidence files to the published checkpoint.
 
 Admission requires regression results for exactly the cases in the frozen parent
 baseline. The report must name `parent_baseline_id` and include

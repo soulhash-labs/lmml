@@ -627,5 +627,8 @@ mod tests {
         assert!(script.contains("dtype=dtype"));
         assert!(!script.contains("torch_dtype="));
         assert!(script.contains("merge_and_unload(safe_merge=True)"));
+        assert!(script.contains("successor output and report must remain outside"));
+        assert!(script.contains("output_path.parent.mkdir(parents=True, exist_ok=True)"));
+        assert!(script.contains("merge report must remain outside the successor output"));
     }
 }

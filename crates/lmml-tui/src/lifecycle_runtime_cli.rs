@@ -76,6 +76,12 @@ pub(crate) async fn register(options: RegisterOptions<'_>) -> i32 {
     if let Err(error) = endpoint_health(options.endpoint).await {
         return fail("runtime registration", error);
     }
+    if let Err(error) =
+        lmml_server::verify_served_model_endpoint(options.endpoint, &artifact.artifact_path, None)
+            .await
+    {
+        return fail("runtime registration model identity", error.to_string());
+    }
     let created_at = match OffsetDateTime::now_utc().format(&Rfc3339) {
         Ok(timestamp) => timestamp,
         Err(error) => return fail("runtime registration", error.to_string()),
@@ -135,6 +141,15 @@ pub(crate) async fn request(
                 return fail("runtime lease artifact verification", error);
             }
             if endpoint_health(&runtime.endpoint).await.is_ok() {
+                if let Err(error) = lmml_server::verify_served_model_endpoint(
+                    &runtime.endpoint,
+                    &artifact.artifact_path,
+                    None,
+                )
+                .await
+                {
+                    return fail("runtime lease model identity", error.to_string());
+                }
                 runtimes.push(runtime);
             }
         }
