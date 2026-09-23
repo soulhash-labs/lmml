@@ -8,6 +8,7 @@ __pycache__/
 /.agents/
 /.codex/
 /.ignore/
+/.omo/
 session-ses_*.md
 *.zip
 *.docx
