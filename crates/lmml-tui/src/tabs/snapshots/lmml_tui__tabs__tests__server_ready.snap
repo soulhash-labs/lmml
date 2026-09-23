@@ -1,5 +1,6 @@
 ---
 source: crates/lmml-tui/src/tabs/mod.rs
+assertion_line: 404
 expression: render_app(&app)
 ---
 "┌lmml | runtime: auto | build: upstream──────────────────────────────────────────────────────────────────────┐"
@@ -7,7 +8,8 @@ expression: render_app(&app)
 "└────────────────────────────────────────────────────────────────────────────────────────────────────────────┘"
 "┌Server──────────────────────────────────────────┐┌Server Log────────────────────────────────────────────────┐"
 "│Press s to stop server.                         ││server listening                                          │"
-"│Press p to switch runtime profile.              ││                                                          │"
+"│Press v: engine auto/upstream/prism (now auto). ││                                                          │"
+"│Press p to switch the selected model's runtime p││                                                          │"
 "│Status: Ready { url: "http://127.0.0.1:8080" }  ││                                                          │"
 "│Profile: custom/global                          ││                                                          │"
 "│Selected model: llama.gguf                      ││                                                          │"
@@ -16,11 +18,10 @@ expression: render_app(&app)
 "│Binary: $HOME/.local/share/lmml/llama.cpp││                                                          │"
 "│Host: 127.0.0.1                                 ││                                                          │"
 "│Port: 8080                                      ││                                                          │"
-"│Context: 4096                                   ││                                                          │"
+"│Context: 262144                                 ││                                                          │"
 "│GPU layers: auto -> -1                          ││                                                          │"
 "│Batch: 512                                      ││                                                          │"
 "│Threads: 8                                      ││                                                          │"
-"│                                                ││                                                          │"
 "│                                                ││                                                          │"
 "│                                                ││                                                          │"
 "│                                                ││                                                          │"

@@ -1,5 +1,6 @@
 ---
 source: crates/lmml-tui/src/tabs/mod.rs
+assertion_line: 445
 expression: render_app(&app)
 ---
 "┌lmml | runtime: auto | build: upstream──────────────────────────────────────────────────────────────────────┐"
@@ -13,7 +14,7 @@ expression: render_app(&app)
 "│  runtime       auto│Shift+Tab  previous tab                                           │                    │"
 "│  host          127.│d          run detect                                             │lama-server build   │"
 "│> port          8080│b          start build                                            │                    │"
-"│  ctx_size      4096│B          clean build                                            │                    │"
+"│  ctx_size      2621│B          clean build                                            │                    │"
 "│  n_gpu_layers  -1  │u          check for update                                       │                    │"
 "│  batch_size    512 │s          start server / save settings                           │                    │"
 "│  ubatch_size   512 │e          edit selected setting                                  │                    │"

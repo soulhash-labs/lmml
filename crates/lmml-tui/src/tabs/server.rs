@@ -12,6 +12,10 @@ pub fn render(area: Rect, app: &App, frame: &mut Frame) {
         ServerStatus::Stopped | ServerStatus::Failed { .. } => "Press s to start server.",
         ServerStatus::Starting { .. } | ServerStatus::Ready { .. } => "Press s to stop server.",
     };
+    let runtime_policy = format!(
+        "Press v: engine auto/upstream/prism (now {}).",
+        app.state.build.runtime_selection
+    );
     let selected_model = app.selected_server_model();
     let displayed_model = app
         .active_server_model
@@ -48,7 +52,8 @@ pub fn render(area: Rect, app: &App, frame: &mut Frame) {
         .unwrap_or("unknown");
     let left = vec![
         Line::from(action),
-        Line::from("Press p to switch runtime profile."),
+        Line::from(runtime_policy),
+        Line::from("Press p to switch the selected model's runtime profile."),
         Line::from(format!("Status: {:?}", app.server_status)),
         Line::from(format!("Profile: {profile}")),
         Line::from(format!(

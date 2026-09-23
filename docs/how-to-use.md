@@ -87,8 +87,11 @@ Recommended first-run order:
 On the Models tab, select a GGUF model. lmml applies the first matching runtime
 profile automatically.
 
-Press `p` on the Models or Server tab to cycle runtime profiles for the selected
-model. Restart the server after changing profiles.
+Press `v` on the Server tab to switch the inference engine policy:
+`auto -> upstream -> prism`. `auto` selects Prism for PQ2/PTQ1 models and
+upstream llama.cpp for ordinary GGUF models. Press `p` to cycle runtime
+profiles for the selected model. Restart the server after changing either
+setting.
 
 ### 5. Start serving
 

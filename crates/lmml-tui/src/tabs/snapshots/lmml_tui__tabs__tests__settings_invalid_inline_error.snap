@@ -1,5 +1,6 @@
 ---
 source: crates/lmml-tui/src/tabs/mod.rs
+assertion_line: 441
 expression: render_app(&app)
 ---
 "┌lmml | runtime: auto | build: upstream──────────────────────────────────────────────────────────────────────┐"
@@ -13,7 +14,7 @@ expression: render_app(&app)
 "│  runtime       auto  [e]                       ││Unsupported settings:                                     │"
 "│  host          127.0.0.1  [e]                  ││! --flash-attn not available in this llama-server build   │"
 "│> port          8080  [e]                       ││                                                          │"
-"│  ctx_size      4096  [e]                       ││                                                          │"
+"│  ctx_size      262144  [e]                     ││                                                          │"
 "│  n_gpu_layers  -1  [e]                         ││                                                          │"
 "│  batch_size    512  [e]                        ││                                                          │"
 "│  ubatch_size   512  [e]                        ││                                                          │"

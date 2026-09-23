@@ -105,6 +105,9 @@ Implemented and tested today:
   scenarios.
 - Side-by-side upstream and Prism runtimes with model-aware selection for
   Prism `PQ2_0`/`PTQ1_0` GGUF tensor formats.
+- Simple TUI engine switching: press `v` on the Server tab to cycle
+  `auto -> upstream -> prism`; press `p` to change the selected model's
+  runtime profile.
 - 262,144-token default server context with OpenCode model-limit publication
   and long-context compaction guidance.
 - OCR profile support for Unlimited-OCR Q8 through `llama-mtmd-cli`.
@@ -160,7 +163,9 @@ binary advertises them.
 
 1. **Start:** Install `lmml`, or build it from source.
 2. **Activate:** Run the TUI, build/probe `llama.cpp`, scan GGUF models, and
-   start a local server.
+   start a local server. On the Server tab, press `v` to choose the inference
+   engine policy: `auto` selects Prism for PQ2/PTQ1 models and upstream
+   llama.cpp for ordinary GGUF models.
 3. **Advance:** Wire coding agents or LAN workers to the local endpoint, then
    route requests through `lmml-node` or `lmml-router` as your setup grows.
 

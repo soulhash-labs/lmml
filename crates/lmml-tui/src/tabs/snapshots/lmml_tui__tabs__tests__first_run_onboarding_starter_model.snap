@@ -13,7 +13,7 @@ expression: render_app(&app)
 "│  runtime       auto  [e]                       ││Unsupported settings:                                     │"
 "│  host          127.0.┌First run─────────────────────────────────────────────────────┐ llama-server build   │"
 "│> port          8080  │                        Welcome to lmml                       │                      │"
-"│  ctx_size      4096  │                                                              │                      │"
+"│  ctx_size      262144│                                                              │                      │"
 "│  n_gpu_layers  -1  [e│                  Step 5 of 7: starter model.                 │                      │"
 "│  batch_size    512  [│                                                              │                      │"
 "│  ubatch_size   512  [│             Press / or d to search Hugging Face.             │                      │"

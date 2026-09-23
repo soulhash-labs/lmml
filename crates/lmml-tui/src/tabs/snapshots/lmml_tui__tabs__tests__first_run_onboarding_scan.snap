@@ -1,5 +1,6 @@
 ---
 source: crates/lmml-tui/src/tabs/mod.rs
+assertion_line: 450
 expression: render_app(&app)
 ---
 "┌lmml | runtime: auto | build: upstream──────────────────────────────────────────────────────────────────────┐"
@@ -13,7 +14,7 @@ expression: render_app(&app)
 "│  runtime       auto  [e]                       ││Unsupported settings:                                     │"
 "│  host          127.0.┌First run─────────────────────────────────────────────────────┐ llama-server build   │"
 "│> port          8080  │                        Welcome to lmml                       │                      │"
-"│  ctx_size      4096  │                                                              │                      │"
+"│  ctx_size      262144│                                                              │                      │"
 "│  n_gpu_layers  -1  [e│                Step 1 of 7: scan this system.                │                      │"
 "│  batch_size    512  [│                                                              │                      │"
 "│  ubatch_size   512  [│            Press Enter or d to scan prerequisites.           │                      │"
