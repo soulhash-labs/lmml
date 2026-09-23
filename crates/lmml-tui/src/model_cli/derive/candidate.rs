@@ -136,7 +136,7 @@ pub(super) async fn admit_with<A: GgufAdmissionProvider>(
             return 1;
         }
     };
-    if let Err(error) = validate_candidate_inputs(&candidate, &substrate, source, data_root) {
+    if let Err(error) = validate_candidate_inputs(&candidate, &substrate, source, data_root).await {
         eprintln!("artifact admission refused: {error}");
         return 1;
     }
@@ -147,6 +147,10 @@ pub(super) async fn admit_with<A: GgufAdmissionProvider>(
         .admit(&candidate.artifact_path, &server_path)
         .await
     {
+        eprintln!("artifact admission failed: {error}");
+        return 1;
+    }
+    if let Err(error) = verify_candidate_payload(&candidate).await {
         eprintln!("artifact admission failed: {error}");
         return 1;
     }
@@ -226,7 +230,24 @@ fn read_candidate(path: &Path) -> Result<lmml_substrate::GgufCandidateManifest, 
         .map_err(|error| format!("{}: {error}", path.display()))
 }
 
-fn validate_candidate_inputs(
+async fn validate_candidate_inputs(
+    candidate: &lmml_substrate::GgufCandidateManifest,
+    substrate: &lmml_substrate::SubstrateManifest,
+    source: &Path,
+    data_root: &Path,
+) -> Result<(), String> {
+    let candidate = candidate.clone();
+    let substrate = substrate.clone();
+    let source = source.to_path_buf();
+    let data_root = data_root.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        validate_candidate_inputs_blocking(&candidate, &substrate, &source, &data_root)
+    })
+    .await
+    .map_err(|error| format!("candidate verification task failed: {error}"))?
+}
+
+fn validate_candidate_inputs_blocking(
     candidate: &lmml_substrate::GgufCandidateManifest,
     substrate: &lmml_substrate::SubstrateManifest,
     source: &Path,
@@ -247,4 +268,24 @@ fn validate_candidate_inputs(
         return Err("candidate payload hash does not match its immutable record".to_string());
     }
     Ok(())
+}
+
+async fn verify_candidate_payload(
+    candidate: &lmml_substrate::GgufCandidateManifest,
+) -> Result<(), String> {
+    let path = candidate.artifact_path.clone();
+    let expected = candidate.output_hash.clone();
+    tokio::task::spawn_blocking(move || {
+        let actual = lmml_substrate::sha256_file(&path).map_err(|error| error.to_string())?;
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(format!(
+                "candidate payload changed during backend admission: {}",
+                path.display()
+            ))
+        }
+    })
+    .await
+    .map_err(|error| format!("candidate verification task failed: {error}"))?
 }

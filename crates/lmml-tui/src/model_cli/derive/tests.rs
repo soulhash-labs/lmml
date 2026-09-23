@@ -24,6 +24,21 @@ impl GgufAdmissionProvider for RecordingAdmission {
     }
 }
 
+struct MutatingAdmission;
+
+impl GgufAdmissionProvider for MutatingAdmission {
+    async fn admit(&self, artifact: &Path, _server: &Path) -> Result<(), String> {
+        use std::io::Write;
+
+        lmml_substrate::validate_gguf(artifact).map_err(|error| error.to_string())?;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(artifact)
+            .and_then(|mut file| file.write_all(b"replaced-after-open"))
+            .map_err(|error| error.to_string())
+    }
+}
+
 #[test]
 fn publication_refuses_existing_destination() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -171,6 +186,63 @@ async fn quantized_output_is_validated_published_and_registered_from_temp_path()
     let registered =
         lmml_substrate::append_artifact_manifest(&artifact_root, &manifest).expect("register");
     assert!(registered.is_file());
+}
+
+#[tokio::test]
+async fn admission_rejects_candidate_changed_during_backend_check() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = dir.path().join("source");
+    let data_root = dir.path().join("data");
+    std::fs::create_dir_all(&source).expect("source");
+    write_safetensors_fixture(&source);
+    let substrate = lmml_substrate::import_safetensors(&source, "qwen38-27b").expect("substrate");
+    let substrate_path = dir.path().join("substrate.json");
+    std::fs::write(
+        &substrate_path,
+        lmml_substrate::manifest_json(&substrate).expect("manifest JSON"),
+    )
+    .expect("manifest");
+
+    let output_temp = dir.path().join("candidate.tmp");
+    let output = dir.path().join("candidate.gguf");
+    std::fs::write(&output_temp, fixture_gguf()).expect("candidate");
+    let hash = lmml_substrate::sha256_file(&output_temp).expect("hash");
+    assert_eq!(
+        super::candidate::record(
+            super::candidate::RecordOptions {
+                output_temp: &output_temp,
+                output: &output,
+                artifact_id: "qwen38-candidate",
+                lineage_id: "qwen38-27b",
+                parent_artifact: "qwen38-27b-safetensors",
+                quantization: lmml_substrate::QuantizationKind::Q8_0,
+                artifact_hash: hash,
+                source_hash: substrate.model.canonical_manifest_hash.clone(),
+                tool_version: "test",
+                command_or_parameters: vec!["test".into()],
+                json: false,
+            },
+            &data_root,
+        ),
+        0
+    );
+
+    let candidate_path = data_root.join("lmml/models/candidates/qwen38-candidate.json");
+    let result = super::candidate::admit_with(
+        &candidate_path,
+        &substrate_path,
+        &source,
+        None,
+        false,
+        &data_root,
+        &MutatingAdmission,
+    )
+    .await;
+
+    assert_eq!(result, 1);
+    assert!(!data_root
+        .join("lmml/models/artifacts/qwen38-candidate.json")
+        .exists());
 }
 
 #[test]
