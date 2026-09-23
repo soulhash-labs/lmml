@@ -71,6 +71,12 @@ mkdir -p "$SOURCE_STAGE_DIR"
   tar --exclude='./.git' \
     --exclude='./target' \
     --exclude='./dist' \
+    --exclude='./outputs' \
+    --exclude='./release' \
+    --exclude='./.agents' \
+    --exclude='./.codex' \
+    --exclude='./.omo' \
+    --exclude='./scripts/__pycache__' \
     --exclude='./.planning' \
     --exclude='./*.zip' \
     --exclude='./*.docx' \
@@ -82,6 +88,7 @@ mkdir -p "$SOURCE_STAGE_DIR"
     --exclude='.*.swp' \
     --exclude='*.kate-swp' \
     --exclude='.*.kate-swp' \
+    --exclude='*.log' \
     -cf - .
 ) | (
   cd "$SOURCE_STAGE_DIR"

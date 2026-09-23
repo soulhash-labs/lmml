@@ -418,6 +418,12 @@ case "$smoke_output" in
     fail "installed lmml is missing model-aware runtime selection" "The downloaded binary is stale. Use INSTALL_MODE=source or publish a release built from the current source."
     ;;
 esac
+case "$smoke_output" in
+  *"runtime policy switching: supported"*) ;;
+  *)
+    fail "installed lmml is missing runtime engine switching" "The downloaded binary is stale. Restart the LAN distribution server and reinstall from the current release."
+    ;;
+esac
 
 echo "✓ lmml $VERSION installed to $install_dir/lmml"
 echo

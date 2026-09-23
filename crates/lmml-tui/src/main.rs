@@ -1047,6 +1047,7 @@ async fn run_smoke() -> i32 {
         return 1;
     }
     println!("model-aware runtime selection: supported");
+    println!("runtime policy switching: supported");
     println!("ok");
     0
 }
