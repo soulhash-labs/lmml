@@ -201,28 +201,66 @@ advertise and return real observations.
 
 ## Successor checkpoints
 
-Before optimization, the trainer enumerates its trainable parameters and asks
-LMML to persist an authorization containing canonical base hashes, dataset hash,
-seed, configuration, allowlist, and exact trainable inventory:
+Before optimization, run the trainer in authorization-draft mode. This pass
+re-hashes the canonical Qwen3.8 source, configures the real PEFT model,
+enumerates every live trainable parameter, writes the proposed authorization,
+and exits before constructing a `Trainer` or taking an optimizer step:
 
 ```sh
+AUTH_ID=qwen38-successor-001-auth
+RUN_ID=qwen38-successor-001-train
+EVIDENCE=/workspace/lmml/outputs/lifecycle/$RUN_ID
+
+MODEL_SOURCE_ROOT=/home/angelo/repos/qwen38-safetensors \
+BASE_MANIFEST=/host-lmml/models/manifests/qwen38-27b.json \
+AUTHORIZATION_DRAFT=$EVIDENCE/authorization-draft.json \
+AUTHORIZATION_ID=$AUTH_ID \
+SAVE_STRATEGY=no \
+scripts/qlora-rocm-docker.sh train
+
 lmml model authorize-successor-training \
   --base-manifest ~/.local/share/lmml/models/manifests/qwen38-27b.json \
-  --authorization training-authorization.json
+  --authorization outputs/lifecycle/$RUN_ID/authorization-draft.json \
+  --json
 ```
 
-The completed `TrainingRunManifest` must reproduce that authorization and its
-SHA-256, then add finite loss/gradient evidence and the adapter path/hash. LMML
-requires an exact LoRA tensor inventory and scans payloads for NaN and infinity.
-Generate the inventory with `lmml model inspect-adapter ADAPTER --json`, then
-register the completed run:
+The controlled training pass requires that immutable authorization. It rejects
+intermediate checkpoint strategies and reused output directories, then compares
+the canonical source, dataset, seed, package versions, full training config,
+trainer/helper hashes, container image ID, ROCm device target, effective BLAS
+backend, allowlist, and actual trainable inventory before `trainer.train()`.
+After training, it requires finite loss and gradient norms, scans live LoRA
+tensors, saves once, scans the serialized Safetensors payload, and writes the
+schema-v2 `TrainingRunManifest` without replacement:
+
+```sh
+MODEL_SOURCE_ROOT=/home/angelo/repos/qwen38-safetensors \
+BASE_MANIFEST=/host-lmml/models/manifests/qwen38-27b.json \
+AUTHORIZATION_MANIFEST=/host-lmml/models/artifacts/adapters/authorizations/$AUTH_ID/authorization_manifest.json \
+TRAINING_RUN_ID=$RUN_ID \
+ADAPTER_ARTIFACT_ID=qwen38-successor-001-adapter \
+TRAINING_REPORT=$EVIDENCE/training-run.json \
+OUT_DIR=/workspace/lmml/outputs/qlora/$RUN_ID \
+SAVE_STRATEGY=no \
+scripts/qlora-rocm-docker.sh train
+```
+
+The wrapper records a host-visible adapter path in the report. Registering the
+run makes LMML re-hash and finite-check that exact file against the immutable
+authorization:
 
 ```sh
 lmml model train-successor \
   --base-manifest ~/.local/share/lmml/models/manifests/qwen38-27b.json \
-  --authorization authorization_manifest.json \
-  --report training-run.json
+  --authorization ~/.local/share/lmml/models/artifacts/adapters/authorizations/$AUTH_ID/authorization_manifest.json \
+  --report outputs/lifecycle/$RUN_ID/training-run.json \
+  --json
 ```
+
+The draft and training commands load the model. Do not run them while the GPU is
+reserved for another workload. `PYTHONPATH=scripts python3 -m unittest
+scripts/test_qlora_lifecycle.py` exercises the identity and evidence helpers
+without importing Torch or touching the GPU.
 
 Merge only from the canonical unquantized parent. The training-side utility uses
 the current Transformers `dtype=` API, writes a new candidate directory, measures

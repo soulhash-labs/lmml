@@ -49,6 +49,10 @@ backend admission succeeds.
   Q4_K_M GGUF candidates without marking them admitted.
 - [x] Added artifact-bound runtime registration, capability leases, baseline
   execution, and successor train/merge/admission gates.
+- [x] Added the controlled Qwen3.8 trainer boundary: canonical source re-hash,
+  pre-optimization authorization drafts, exact live trainable inventory checks,
+  finite loss/gradient/live-adapter/saved-adapter gates, and schema-v2 training
+  reports compatible with LMML registration.
 - [x] Bound artifact admission, runtime registration, and lease issuance to
   exact artifact bytes and `/v1/models` identity.
 - [x] Added Prism runtime support for PQ2_0 and PTQ1_0 models.

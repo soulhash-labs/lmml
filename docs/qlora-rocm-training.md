@@ -1,7 +1,7 @@
 # ROCm QLoRA Adapter Training
 
-This guide covers an LMML-adjacent QLoRA workflow for external chat JSONL
-adapters on AMD ROCm systems such as the Radeon AI PRO R9700.
+This guide covers the controlled Qwen3.8-27B QLoRA workflow for external chat
+JSONL adapters on AMD ROCm systems such as the Radeon AI PRO R9700.
 
 ## Boundary
 
@@ -13,23 +13,34 @@ adapters on AMD ROCm systems such as the Radeon AI PRO R9700.
 - The current stock `llama-finetune` path remains full-model GGUF fine-tuning;
   do not use it for this adapter run unless it advertises `--lora-out`.
 
+The `prepare` and `smoke` commands remain diagnostic paths. A successor intended
+for LMML admission must use the authorization-draft and controlled training
+sequence in [qwen38-model-lifecycle.md](qwen38-model-lifecycle.md); that path
+requires `SAVE_STRATEGY=no` and emits the schema-v2 training report.
+
 ## Host Paths
 
-The wrapper expects a separate training-source directory. Set
-`TRAINING_SOURCE_ROOT` when your files live elsewhere:
+The wrapper keeps the canonical model and training data in separate read-only
+mounts. Set either root when the files live elsewhere:
 
 ```text
-$TRAINING_SOURCE_ROOT/safe_tensors
+$MODEL_SOURCE_ROOT/config.json
+$MODEL_SOURCE_ROOT/model.safetensors.index.json
+$MODEL_SOURCE_ROOT/model-*.safetensors
 $TRAINING_SOURCE_ROOT/data/train.jsonl
 $HOME/.local/share/lmml/llama.cpp
 ./outputs/qlora
 ```
 
+`MODEL_SOURCE_ROOT` defaults to `../qwen38-safetensors` relative to this
+repository. The wrapper mounts it as `/workspace/model-source:ro`; it never
+writes checkpoints into the canonical source.
+
 The matching GGUF files are used after adapter training:
 
 ```text
-$HOME/.local/share/lmml/models/Qwen3.5-27B-BF16.gguf
-$HOME/.local/share/lmml/models/Qwen3.5-27B-Q6_K.gguf
+$HOME/.local/share/lmml/models/Qwen3.8-27B-BF16.gguf
+$HOME/.local/share/lmml/models/Qwen3.8-27B-Q6_K.gguf
 ```
 
 ## Docker Image
@@ -110,7 +121,7 @@ scripts/qlora-rocm-docker.sh smoke
 The smoke defaults are:
 
 ```text
-OUT_DIR=/workspace/lmml/outputs/qlora/qwen35-27b-r9700-qlora-smoke
+OUT_DIR=/workspace/lmml/outputs/qlora/qwen38-27b-r9700-qlora-smoke
 MAX_STEPS=20
 MAX_SAMPLES=256
 SEQ_LEN=512
@@ -659,8 +670,8 @@ OPTIM=paged_adamw_8bit scripts/qlora-rocm-docker.sh smoke
 
 If PyTorch reports an AOTriton efficient-attention GPU memory access fault, keep
 `ATTN_IMPLEMENTATION=eager` and `FORCE_MATH_SDP=1`. Those are the wrapper
-defaults because they trade speed for a more conservative ROCm path. Qwen3.5's
-Gated DeltaNet linear-attention layers still use their own fast/fallback path;
+defaults because they trade speed for a more conservative ROCm path. Qwen3.8's
+`qwen3_5` Gated DeltaNet layers still use their own fast/fallback path;
 eager SDPA does not disable that subsystem.
 
 ## Convert Adapter To GGUF
@@ -672,19 +683,19 @@ scripts/qlora-rocm-docker.sh convert
 The converter writes:
 
 ```text
-outputs/qlora/qwen35-27b-r9700-qlora.gguf
+outputs/qlora/qwen38-27b-r9700-qlora.gguf
 ```
 
 ### Local llama.cpp converter patch
 
-Qwen3.5 LoRA conversion may require local llama.cpp edits in:
+Qwen3.8 LoRA conversion may require local llama.cpp edits in:
 
 ```text
 ${HOME}/.local/share/lmml/llama.cpp/conversion/qwen.py
 ${HOME}/.local/share/lmml/llama.cpp/convert_lora_to_gguf.py
 ```
 
-Those edits fix the Qwen3.5 linear-attention LoRA reorder path and add missing
+Those edits fix the `qwen3_5` linear-attention LoRA reorder path and add missing
 `LoraTorchTensor` shape helpers used by the converter. They are local conversion
 fixes, not disposable changes.
 
@@ -699,18 +710,18 @@ preserve and stash the converter patch before retrying the update:
 ```sh
 cd "${HOME}/.local/share/lmml/llama.cpp"
 
-git diff --output="${HOME}/lmml-qwen35-lora-conversion-fixes.patch" -- \
+git diff --output="${HOME}/lmml-qwen38-lora-conversion-fixes.patch" -- \
   conversion/qwen.py \
   convert_lora_to_gguf.py
 
-git stash push -m "lmml qwen35 lora gguf conversion fixes" -- \
+git stash push -m "lmml qwen38 lora gguf conversion fixes" -- \
   conversion/qwen.py \
   convert_lora_to_gguf.py
 ```
 
 Then return to LMML and run the update/build again.
 
-Only restore the stash when you need to convert or merge Qwen3.5 LoRA again:
+Only restore the stash when you need to convert or merge Qwen3.8 LoRA again:
 
 ```sh
 cd "${HOME}/.local/share/lmml/llama.cpp"
@@ -726,8 +737,8 @@ Use the Q6_K deployment model plus the adapter:
 
 ```sh
 ${HOME}/.local/share/lmml/llama.cpp/build/bin/llama-server \
-  --model ${HOME}/.local/share/lmml/models/Qwen3.5-27B-Q6_K.gguf \
-  --lora ./outputs/qlora/qwen35-27b-r9700-qlora.gguf \
+  --model ${HOME}/.local/share/lmml/models/Qwen3.8-27B-Q6_K.gguf \
+  --lora ./outputs/qlora/qwen38-27b-r9700-qlora.gguf \
   --ctx-size 4096 \
   -ngl auto \
   -fa on

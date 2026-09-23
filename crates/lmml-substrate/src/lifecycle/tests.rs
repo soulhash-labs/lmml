@@ -126,6 +126,45 @@ fn training_authorization(base: &SubstrateManifest) -> TrainingAuthorizationMani
     }
 }
 
+#[test]
+fn training_authorization_hash_matches_python_fixture() {
+    let mut authorization = TrainingAuthorizationManifest {
+        schema_version: SCHEMA_VERSION,
+        authorization_id: "authorize-1".into(),
+        base_lineage_id: "qwen38-27b".into(),
+        base_manifest_hash: hash('a'),
+        config_hash: hash('b'),
+        tokenizer_hash: hash('c'),
+        dataset_hash: hash('d'),
+        seed: 42,
+        training_config: BTreeMap::new(),
+        approved_allowlist: vec!["model.layers.*".into()],
+        trainable_parameters: vec!["model.layers.0.self_attn.q_proj.lora_A".into()],
+        created_at: TIMESTAMP.into(),
+    };
+
+    assert_eq!(
+        training_authorization_hash(&authorization)
+            .expect("authorization hash")
+            .as_str(),
+        "48d793c13ce4a99dc684ff255e94b3acc5c61a9cb128add80d8528876550a41d"
+    );
+
+    authorization.training_config.insert(
+        "z".into(),
+        serde_json::json!({"number": 1.0, "enabled": true}),
+    );
+    authorization
+        .training_config
+        .insert("a".into(), serde_json::json!(["x", 3]));
+    assert_eq!(
+        training_authorization_hash(&authorization)
+            .expect("authorization hash")
+            .as_str(),
+        "1c78c4525696456a90c9332af4cb3ff545ffe95687949c1835bcbb84a8130ea1"
+    );
+}
+
 fn admitted_artifact(path: &Path) -> ArtifactManifest {
     let artifact_hash = sha256_file(path).expect("artifact hash");
     ArtifactManifest {

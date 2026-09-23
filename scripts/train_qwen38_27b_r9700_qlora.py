@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train a Qwen3.5 27B adapter with ROCm QLoRA.
+"""Train a controlled Qwen3.8 27B successor adapter with ROCm QLoRA.
 
 This script is intentionally container-friendly. It expects the model shards and
 dataset to be mounted into the runtime and writes only PEFT adapter artifacts.
@@ -15,10 +15,27 @@ import os
 from pathlib import Path
 from typing import Any
 
+from qlora_lifecycle import (
+    build_authorization,
+    build_training_report,
+    collect_training_metrics,
+    ensure_controlled_paths,
+    lifecycle_mode,
+    load_json_object,
+    package_versions,
+    sha256_file,
+    training_config,
+    validate_authorization,
+    validate_live_adapter_tensors,
+    validate_serialized_adapter,
+    verify_canonical_source,
+    write_json_exclusive,
+)
 
-DEFAULT_MODEL_ID = "/workspace/training-source/safe_tensors"
+
+DEFAULT_MODEL_ID = "/workspace/model-source"
 DEFAULT_DATA_PATH = "/workspace/training-source/data/train.jsonl"
-DEFAULT_OUT_DIR = "/workspace/lmml/outputs/qlora/qwen35-27b-r9700-qlora"
+DEFAULT_OUT_DIR = "/workspace/lmml/outputs/qlora/qwen38-27b-r9700-qlora"
 DEFAULT_TARGET_MODULES = (
     "q_proj,k_proj,v_proj,o_proj,"
     "in_proj_a,in_proj_b,in_proj_qkv,in_proj_z,out_proj"
@@ -46,11 +63,12 @@ def env_float(name: str, default: float) -> float:
 def parse_args() -> argparse.Namespace:
     """Parse CLI arguments, with environment-variable defaults."""
     parser = argparse.ArgumentParser(
-        description="Train a Qwen3.5 27B LoRA adapter with ROCm QLoRA.",
+        description="Train a Qwen3.8 27B LoRA adapter with ROCm QLoRA.",
     )
     parser.add_argument("--model-id", default=env("MODEL_ID", DEFAULT_MODEL_ID))
     parser.add_argument("--data-path", default=env("DATA_PATH", DEFAULT_DATA_PATH))
     parser.add_argument("--out-dir", default=env("OUT_DIR", DEFAULT_OUT_DIR))
+    parser.add_argument("--seed", type=int, default=env_int("SEED", 42))
     parser.add_argument("--seq-len", type=int, default=env_int("SEQ_LEN", 512))
     parser.add_argument("--lora-r", type=int, default=env_int("LORA_R", 8))
     parser.add_argument("--lora-alpha", type=int, default=env_int("LORA_ALPHA", 16))
@@ -185,6 +203,46 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         default=env("PREPARE_ONLY", "0") == "1",
         help="Load tokenizer and dataset, then exit before loading the model.",
+    )
+    parser.add_argument(
+        "--base-manifest",
+        default=env("BASE_MANIFEST", ""),
+        help="Canonical LMML substrate manifest for a controlled successor run.",
+    )
+    parser.add_argument(
+        "--authorization-manifest",
+        default=env("AUTHORIZATION_MANIFEST", ""),
+        help="Immutable LMML pre-optimization authorization.",
+    )
+    parser.add_argument(
+        "--authorization-draft",
+        default=env("AUTHORIZATION_DRAFT", ""),
+        help="Write a proposed authorization and exit before optimization.",
+    )
+    parser.add_argument(
+        "--authorization-id",
+        default=env("AUTHORIZATION_ID", ""),
+        help="Stable ID used only when creating an authorization draft.",
+    )
+    parser.add_argument(
+        "--training-run-id",
+        default=env("TRAINING_RUN_ID", ""),
+        help="Stable completed training-run identity.",
+    )
+    parser.add_argument(
+        "--adapter-artifact-id",
+        default=env("ADAPTER_ARTIFACT_ID", ""),
+        help="Stable identity for the resulting adapter Safetensors artifact.",
+    )
+    parser.add_argument(
+        "--training-report",
+        default=env("TRAINING_REPORT", ""),
+        help="Exclusive destination for the LMML TrainingRunManifest JSON.",
+    )
+    parser.add_argument(
+        "--adapter-manifest-path",
+        default=env("ADAPTER_MANIFEST_PATH", ""),
+        help="Host-visible adapter path recorded when training in a container.",
     )
     return parser.parse_args()
 
@@ -539,11 +597,11 @@ def shape_summary(values: Any) -> list[Any]:
     return shapes
 
 
-def configure_rocm_blas_backend(torch_module: Any, backend: str) -> None:
+def configure_rocm_blas_backend(torch_module: Any, backend: str) -> str:
     """Select rocBLAS or hipBLASLt through PyTorch's CUDA-compatible API."""
     backend = backend.strip().lower()
     if not backend:
-        return
+        return "default"
     if not hasattr(torch_module.backends, "cuda") or not hasattr(
         torch_module.backends.cuda,
         "preferred_blas_library",
@@ -573,6 +631,7 @@ def configure_rocm_blas_backend(torch_module: Any, backend: str) -> None:
             "R9700 QLoRA safety configuration requires "
             "ROCBLAS_USE_HIPBLASLT=0 when ROCM_BLAS_BACKEND=rocblas."
         )
+    return str(selected)
 
 
 def print_lora_dtype_probe(model: Any, module_name: str) -> None:
@@ -744,10 +803,19 @@ def write_manifest(
 def main() -> int:
     """Run the QLoRA adapter training flow."""
     args = parse_args()
+    mode = lifecycle_mode(args)
     model_id = Path(args.model_id)
     data_path = Path(args.data_path)
     out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    base_manifest: dict[str, Any] | None = None
+    authorization: dict[str, Any] | None = None
+    dataset_hash = sha256_file(data_path)
+    if mode != "legacy":
+        base_manifest = load_json_object(Path(args.base_manifest))
+        verify_canonical_source(model_id, base_manifest)
+        if mode == "train":
+            authorization = load_json_object(Path(args.authorization_manifest))
+    ensure_controlled_paths(mode, args, model_id, out_dir)
 
     import peft
     import torch
@@ -763,11 +831,16 @@ def main() -> int:
         set_seed,
     )
 
-    configure_rocm_blas_backend(torch, args.rocm_blas_backend)
-    set_seed(42)
+    effective_blas_backend = configure_rocm_blas_backend(
+        torch,
+        args.rocm_blas_backend,
+    )
+    set_seed(args.seed)
     print(f"[config] MODEL_ID={model_id}")
     print(f"[config] DATA_PATH={data_path}")
     print(f"[config] OUT_DIR={out_dir}")
+    print(f"[config] SEED={args.seed}")
+    print(f"[config] LIFECYCLE_MODE={mode}")
     print(f"[config] SEQ_LEN={args.seq_len}")
     print(f"[config] LORA_R={args.lora_r}")
     print(f"[config] GRAD_ACCUM={args.grad_accum}")
@@ -842,6 +915,21 @@ def main() -> int:
         compute_dtype = torch.bfloat16
     else:
         compute_dtype = torch.float16
+    effective_compute_dtype = (
+        "bfloat16" if compute_dtype == torch.bfloat16 else "float16"
+    )
+    lifecycle_config = training_config(
+        args,
+        dataset_rows=len(dataset),
+        effective_blas_backend=effective_blas_backend,
+        effective_compute_dtype=effective_compute_dtype,
+        package_versions=package_versions(
+            torch,
+            transformers,
+            peft,
+            Path(__file__),
+        ),
+    )
 
     quantization = BitsAndBytesConfig(
         load_in_4bit=True,
@@ -932,6 +1020,43 @@ def main() -> int:
             )
         print(
             f"[lora-exclusion-check] prefix={prefix} adapter_present=False",
+            flush=True,
+        )
+
+    trainable_parameters = sorted(
+        name for name, parameter in model.named_parameters() if parameter.requires_grad
+    )
+    if mode == "draft":
+        assert base_manifest is not None
+        draft = build_authorization(
+            base_manifest,
+            authorization_id=args.authorization_id,
+            dataset_hash=dataset_hash,
+            seed=args.seed,
+            config=lifecycle_config,
+            trainable_parameters=trainable_parameters,
+        )
+        write_json_exclusive(Path(args.authorization_draft), draft)
+        print(
+            "[status] authorization draft written before optimization: "
+            f"{args.authorization_draft}",
+            flush=True,
+        )
+        return 0
+    if mode == "train":
+        assert base_manifest is not None
+        assert authorization is not None
+        validate_authorization(
+            base_manifest,
+            authorization,
+            dataset_hash,
+            args.seed,
+            lifecycle_config,
+            trainable_parameters,
+        )
+        print(
+            "[lifecycle] immutable authorization matches base, data, config, and "
+            f"{len(trainable_parameters)} trainable parameters",
             flush=True,
         )
 
@@ -1082,8 +1207,16 @@ def main() -> int:
         "dataloader_pin_memory": args.dataloader_pin_memory,
         "dataloader_num_workers": args.dataloader_num_workers,
         "dataloader_persistent_workers": args.dataloader_persistent_workers,
+        "seed": args.seed,
+        "data_seed": args.seed,
     }
     accepted_training_args = set(inspect.signature(TrainingArguments).parameters)
+    unsupported_training_args = set(training_kwargs) - accepted_training_args
+    if mode != "legacy" and unsupported_training_args:
+        raise RuntimeError(
+            "controlled trainer does not support required TrainingArguments: "
+            + ", ".join(sorted(unsupported_training_args))
+        )
     training_args = TrainingArguments(
         **{
             key: value
@@ -1274,18 +1407,64 @@ def main() -> int:
 
     model.print_trainable_parameters()
     print("[status] starting QLoRA adapter training")
-    trainer.train()
+    train_result = trainer.train()
+    final_loss: float | None = None
+    gradient_norms: list[float] = []
+    if mode == "train":
+        final_loss, gradient_norms = collect_training_metrics(
+            train_result,
+            trainer.state.log_history,
+        )
+        validate_live_adapter_tensors(model, torch)
     print("[status] saving adapter")
     trainer.save_model(str(out_dir))
-    tokenizer.save_pretrained(str(out_dir))
-    write_manifest(
-        out_dir,
-        args,
-        len(dataset),
-        torch.__version__,
-        transformers.__version__,
-        peft.__version__,
-    )
+    if mode == "train":
+        assert base_manifest is not None
+        assert authorization is not None
+        assert final_loss is not None
+        adapter_file = out_dir / "adapter_model.safetensors"
+        if not adapter_file.is_file():
+            raise FileNotFoundError(
+                f"controlled trainer did not produce {adapter_file.name}: {out_dir}"
+            )
+        try:
+            adapter_tensors = validate_serialized_adapter(adapter_file)
+        except (OSError, ValueError):
+            quarantine = adapter_file.with_name("adapter_model.invalid.safetensors")
+            adapter_file.rename(quarantine)
+            raise
+        manifest_adapter_path = (
+            Path(args.adapter_manifest_path)
+            if args.adapter_manifest_path
+            else adapter_file.resolve()
+        )
+        report = build_training_report(
+            base_manifest,
+            authorization,
+            training_run_id=args.training_run_id,
+            adapter_artifact_id=args.adapter_artifact_id,
+            adapter_path=manifest_adapter_path,
+            adapter_hash=sha256_file(adapter_file),
+            adapter_tensors=adapter_tensors,
+            final_loss=final_loss,
+            gradient_norms=gradient_norms,
+        )
+        write_json_exclusive(Path(args.training_report), report)
+        print(
+            f"[lifecycle] training report written: {args.training_report}",
+            flush=True,
+        )
+    else:
+        tokenizer.save_pretrained(str(out_dir))
+    if mode == "legacy":
+        write_manifest(
+            out_dir,
+            args,
+            len(dataset),
+            torch.__version__,
+            transformers.__version__,
+            peft.__version__,
+        )
     print("[status] complete")
     return 0
 

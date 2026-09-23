@@ -11,6 +11,7 @@ if [[ -n "${SUDO_USER:-}" ]]; then
   fi
 fi
 TRAINING_SOURCE_ROOT=${TRAINING_SOURCE_ROOT:-$ROOT_DIR/../training-source}
+MODEL_SOURCE_ROOT=${MODEL_SOURCE_ROOT:-$ROOT_DIR/../qwen38-safetensors}
 LMML_DATA_ROOT=${LMML_DATA_ROOT:-$USER_HOME/.local/share/lmml}
 HF_CACHE=${HF_CACHE:-$USER_HOME/.cache/huggingface}
 PIP_CACHE=${PIP_CACHE:-$USER_HOME/.cache/pip}
@@ -24,7 +25,8 @@ Usage: scripts/qlora-rocm-docker.sh [shell|doctor|matrix|prepare|smoke|train|con
 
 Environment overrides:
   LMML_QLORA_IMAGE          ROCm PyTorch image tag
-  TRAINING_SOURCE_ROOT      Host path containing safe_tensors/ and data/train.jsonl
+  MODEL_SOURCE_ROOT         Host path containing canonical Qwen3.8 Safetensors
+  TRAINING_SOURCE_ROOT      Host path containing data/train.jsonl
   LMML_DATA_ROOT            Host ~/.local/share/lmml path
   LMML_QLORA_DEPS_ROOT      Host path for persistent Python adapter deps
   LMML_QLORA_INSTALL_DEPS   Set 0 to skip pip dependency installation
@@ -32,15 +34,18 @@ Environment overrides:
   DATA_PATH                 Container training JSONL path
   OUT_DIR                   Container adapter output dir
   ADAPTER_GGUF_OUT          Container GGUF adapter output path
-  SEQ_LEN LORA_R GRAD_ACCUM NUM_EPOCHS MAX_STEPS MAX_SAMPLES LR COMPUTE_DTYPE
+  SEED SEQ_LEN LORA_R GRAD_ACCUM NUM_EPOCHS MAX_STEPS MAX_SAMPLES LR COMPUTE_DTYPE
   OPTIM EMPTY_CACHE_STEPS LOG_MEMORY_STEPS SAVE_STRATEGY SAVE_STEPS SAVE_TOTAL_LIMIT
   TRACE_BATCH_ROWS SUSPECT_ROWS ONLY_SOURCE_LINES PAD_TO_MULTIPLE_OF SHUFFLE_DATA
   TRACE_BACKWARD_MODULES BACKWARD_TRACE_MARKERS TRACE_BACKWARD_PREFIX LORA_EXCLUDE_MODULES
   LORA_AUTOCAST_ADAPTER_DTYPE ROCM_BLAS_BACKEND ROCBLAS_USE_HIPBLASLT
   DATALOADER_NUM_WORKERS DATALOADER_PIN_MEMORY DATALOADER_PERSISTENT_WORKERS
   ATTN_IMPLEMENTATION FORCE_MATH_SDP
+  BASE_MANIFEST AUTHORIZATION_DRAFT AUTHORIZATION_ID AUTHORIZATION_MANIFEST
+  TRAINING_RUN_ID ADAPTER_ARTIFACT_ID TRAINING_REPORT ADAPTER_MANIFEST_PATH
   HIP_LAUNCH_BLOCKING AMD_SERIALIZE_KERNEL AMD_SERIALIZE_COPY TORCH_SHOW_CPP_STACKTRACES
   PYTHONFAULTHANDLER PYTORCH_NO_HIP_MEMORY_CACHING TORCH_DISABLE_ADDR2LINE
+  TORCH_BLAS_PREFER_HIPBLASLT
 USAGE
 }
 
@@ -71,8 +76,12 @@ EOF
   exit 1
 fi
 
-if [[ ! -d "$TRAINING_SOURCE_ROOT/safe_tensors" ]]; then
-  echo "missing external safetensors directory: $TRAINING_SOURCE_ROOT/safe_tensors" >&2
+if [[ ! -f "$MODEL_SOURCE_ROOT/config.json" ]]; then
+  echo "missing canonical Qwen3.8 config: $MODEL_SOURCE_ROOT/config.json" >&2
+  exit 1
+fi
+if ! find "$MODEL_SOURCE_ROOT" -maxdepth 1 -type f -name '*.safetensors' -print -quit | grep -q .; then
+  echo "missing canonical Qwen3.8 Safetensors shards: $MODEL_SOURCE_ROOT" >&2
   exit 1
 fi
 if [[ ! -f "$TRAINING_SOURCE_ROOT/data/train.jsonl" ]]; then
@@ -180,6 +189,12 @@ container_path_to_host() {
     /workspace/training-source/*)
       printf '%s/%s\n' "$TRAINING_SOURCE_ROOT" "${path#/workspace/training-source/}"
       ;;
+    /workspace/model-source)
+      printf '%s\n' "$MODEL_SOURCE_ROOT"
+      ;;
+    /workspace/model-source/*)
+      printf '%s/%s\n' "$MODEL_SOURCE_ROOT" "${path#/workspace/model-source/}"
+      ;;
     /host-lmml)
       printf '%s\n' "$LMML_DATA_ROOT"
       ;;
@@ -196,7 +211,7 @@ repair_qwen35_lora_gguf() {
   local host_out_dir host_lora_gguf host_base_config
   host_out_dir=$(container_path_to_host "$OUT_DIR")
   host_lora_gguf=$(container_path_to_host "$ADAPTER_GGUF_OUT")
-  host_base_config="$TRAINING_SOURCE_ROOT/safe_tensors/config.json"
+  host_base_config="$MODEL_SOURCE_ROOT/config.json"
   PYTHONPATH="$LMML_DATA_ROOT/llama.cpp/gguf-py:${PYTHONPATH:-}" \
     python3 "$ROOT_DIR/scripts/repair_qwen35_lora_gguf.py" \
       --adapter-dir "$host_out_dir" \
@@ -225,25 +240,25 @@ if [[ "$MODE" == "reset-deps" ]]; then
   exit 0
 fi
 
-MODEL_ID=${MODEL_ID:-/workspace/training-source/safe_tensors}
+MODEL_ID=${MODEL_ID:-/workspace/model-source}
 DATA_PATH=${DATA_PATH:-/workspace/training-source/data/train.jsonl}
 if [[ -z "${OUT_DIR:-}" ]]; then
   case "$MODE" in
     smoke|smoke-convert)
-      OUT_DIR=/workspace/lmml/outputs/qlora/qwen35-27b-r9700-qlora-smoke
+      OUT_DIR=/workspace/lmml/outputs/qlora/qwen38-27b-r9700-qlora-smoke
       ;;
     *)
-      OUT_DIR=/workspace/lmml/outputs/qlora/qwen35-27b-r9700-qlora
+      OUT_DIR=/workspace/lmml/outputs/qlora/qwen38-27b-r9700-qlora
       ;;
   esac
 fi
 if [[ -z "${ADAPTER_GGUF_OUT:-}" ]]; then
   case "$MODE" in
     smoke|smoke-convert)
-      ADAPTER_GGUF_OUT=/workspace/lmml/outputs/qlora/qwen35-27b-r9700-qlora-smoke.gguf
+      ADAPTER_GGUF_OUT=/workspace/lmml/outputs/qlora/qwen38-27b-r9700-qlora-smoke.gguf
       ;;
     *)
-      ADAPTER_GGUF_OUT=/workspace/lmml/outputs/qlora/qwen35-27b-r9700-qlora.gguf
+      ADAPTER_GGUF_OUT=/workspace/lmml/outputs/qlora/qwen38-27b-r9700-qlora.gguf
       ;;
   esac
 fi
@@ -251,6 +266,43 @@ LMML_QLORA_INSTALL_DEPS=${LMML_QLORA_INSTALL_DEPS:-1}
 LORA_AUTOCAST_ADAPTER_DTYPE=${LORA_AUTOCAST_ADAPTER_DTYPE:-1}
 ROCM_BLAS_BACKEND=${ROCM_BLAS_BACKEND:-rocblas}
 ROCBLAS_USE_HIPBLASLT=${ROCBLAS_USE_HIPBLASLT:-0}
+ADAPTER_MANIFEST_PATH=${ADAPTER_MANIFEST_PATH:-}
+if [[ -n "${TRAINING_REPORT:-}" && -z "$ADAPTER_MANIFEST_PATH" ]]; then
+  case "$OUT_DIR" in
+    /workspace/lmml/*|/host-lmml/*) ;;
+    *)
+      echo "controlled OUT_DIR must use a host-visible writable mount: $OUT_DIR" >&2
+      exit 1
+      ;;
+  esac
+  host_out_dir=$(container_path_to_host "$OUT_DIR")
+  ADAPTER_MANIFEST_PATH="$host_out_dir/adapter_model.safetensors"
+fi
+for evidence_path in "${AUTHORIZATION_DRAFT:-}" "${TRAINING_REPORT:-}"; do
+  if [[ -z "$evidence_path" ]]; then
+    continue
+  fi
+  case "$evidence_path" in
+    /workspace/lmml/*|/host-lmml/*) ;;
+    *)
+      echo "lifecycle evidence must use a host-visible writable mount: $evidence_path" >&2
+      exit 1
+      ;;
+  esac
+done
+LMML_QLORA_IMAGE_ID=""
+LMML_CONTAINER_RUNTIME_VERSION=""
+if [[ -n "${BASE_MANIFEST:-}${AUTHORIZATION_DRAFT:-}${AUTHORIZATION_MANIFEST:-}${TRAINING_REPORT:-}" ]]; then
+  LMML_QLORA_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null || true)
+  if [[ -z "$LMML_QLORA_IMAGE_ID" ]]; then
+    echo "controlled lifecycle requires a locally resolved container image: $IMAGE" >&2
+    echo "pull the image first, then rerun so its immutable image ID can be authorized" >&2
+    exit 1
+  fi
+  LMML_CONTAINER_RUNTIME_VERSION=$(
+    docker version --format '{{.Client.Version}}/{{.Server.Version}}'
+  )
+fi
 
 GROUP_IDS=()
 GROUP_ARGS=()
@@ -302,6 +354,7 @@ DEBUG_ENV_ARGS=(
   -e "PYTORCH_NO_HIP_MEMORY_CACHING=${PYTORCH_NO_HIP_MEMORY_CACHING:-0}"
   -e "TORCH_DISABLE_ADDR2LINE=${TORCH_DISABLE_ADDR2LINE:-0}"
   -e "ROCBLAS_USE_HIPBLASLT=${ROCBLAS_USE_HIPBLASLT:-}"
+  -e "TORCH_BLAS_PREFER_HIPBLASLT=${TORCH_BLAS_PREFER_HIPBLASLT:-}"
 )
 
 container_cmd='set -euo pipefail
@@ -415,20 +468,20 @@ PY
     python3 -m bitsandbytes || true
     ;;
   prepare)
-    PREPARE_ONLY=1 python3 /workspace/lmml/scripts/train_qwen35_27b_r9700_qlora.py
+    PREPARE_ONLY=1 python3 /workspace/lmml/scripts/train_qwen38_27b_r9700_qlora.py
     ;;
   smoke)
-    MAX_STEPS="${MAX_STEPS:-20}" MAX_SAMPLES="${MAX_SAMPLES:-256}" SEQ_LEN="${SEQ_LEN:-512}" LORA_R="${LORA_R:-8}" GRAD_ACCUM="${GRAD_ACCUM:-8}" OPTIM="${OPTIM:-adamw_torch}" EMPTY_CACHE_STEPS="${EMPTY_CACHE_STEPS:-0}" LOG_MEMORY_STEPS="${LOG_MEMORY_STEPS:-1}" SAVE_STRATEGY="${SAVE_STRATEGY:-steps}" SAVE_STEPS="${SAVE_STEPS:-5}" SAVE_TOTAL_LIMIT="${SAVE_TOTAL_LIMIT:-2}" TRACE_BATCH_ROWS="${TRACE_BATCH_ROWS:-1}" SUSPECT_ROWS="${SUSPECT_ROWS:-42,178}" PAD_TO_MULTIPLE_OF="${PAD_TO_MULTIPLE_OF:-0}" SHUFFLE_DATA="${SHUFFLE_DATA:-1}" TRACE_BACKWARD_MODULES="${TRACE_BACKWARD_MODULES:-0}" BACKWARD_TRACE_MARKERS="${BACKWARD_TRACE_MARKERS:-Linear4bit,GatedDeltaNet,DeltaNet}" TRACE_BACKWARD_PREFIX="${TRACE_BACKWARD_PREFIX:-}" LORA_EXCLUDE_MODULES="${LORA_EXCLUDE_MODULES:-}" LORA_AUTOCAST_ADAPTER_DTYPE="${LORA_AUTOCAST_ADAPTER_DTYPE:-1}" ROCM_BLAS_BACKEND="${ROCM_BLAS_BACKEND:-}" DATALOADER_NUM_WORKERS="${DATALOADER_NUM_WORKERS:-0}" DATALOADER_PIN_MEMORY="${DATALOADER_PIN_MEMORY:-0}" DATALOADER_PERSISTENT_WORKERS="${DATALOADER_PERSISTENT_WORKERS:-0}" ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-eager}" FORCE_MATH_SDP="${FORCE_MATH_SDP:-1}" python3 /workspace/lmml/scripts/train_qwen35_27b_r9700_qlora.py
+    MAX_STEPS="${MAX_STEPS:-20}" MAX_SAMPLES="${MAX_SAMPLES:-256}" SEQ_LEN="${SEQ_LEN:-512}" LORA_R="${LORA_R:-8}" GRAD_ACCUM="${GRAD_ACCUM:-8}" OPTIM="${OPTIM:-adamw_torch}" EMPTY_CACHE_STEPS="${EMPTY_CACHE_STEPS:-0}" LOG_MEMORY_STEPS="${LOG_MEMORY_STEPS:-1}" SAVE_STRATEGY="${SAVE_STRATEGY:-steps}" SAVE_STEPS="${SAVE_STEPS:-5}" SAVE_TOTAL_LIMIT="${SAVE_TOTAL_LIMIT:-2}" TRACE_BATCH_ROWS="${TRACE_BATCH_ROWS:-1}" SUSPECT_ROWS="${SUSPECT_ROWS:-42,178}" PAD_TO_MULTIPLE_OF="${PAD_TO_MULTIPLE_OF:-0}" SHUFFLE_DATA="${SHUFFLE_DATA:-1}" TRACE_BACKWARD_MODULES="${TRACE_BACKWARD_MODULES:-0}" BACKWARD_TRACE_MARKERS="${BACKWARD_TRACE_MARKERS:-Linear4bit,GatedDeltaNet,DeltaNet}" TRACE_BACKWARD_PREFIX="${TRACE_BACKWARD_PREFIX:-}" LORA_EXCLUDE_MODULES="${LORA_EXCLUDE_MODULES:-}" LORA_AUTOCAST_ADAPTER_DTYPE="${LORA_AUTOCAST_ADAPTER_DTYPE:-1}" ROCM_BLAS_BACKEND="${ROCM_BLAS_BACKEND:-}" DATALOADER_NUM_WORKERS="${DATALOADER_NUM_WORKERS:-0}" DATALOADER_PIN_MEMORY="${DATALOADER_PIN_MEMORY:-0}" DATALOADER_PERSISTENT_WORKERS="${DATALOADER_PERSISTENT_WORKERS:-0}" ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-eager}" FORCE_MATH_SDP="${FORCE_MATH_SDP:-1}" python3 /workspace/lmml/scripts/train_qwen38_27b_r9700_qlora.py
     ;;
   train)
-    python3 /workspace/lmml/scripts/train_qwen35_27b_r9700_qlora.py
+    python3 /workspace/lmml/scripts/train_qwen38_27b_r9700_qlora.py
     ;;
   convert)
     cd /workspace/llama.cpp
     PYTHONPATH="/workspace/llama.cpp:/workspace/llama.cpp/gguf-py:${PYTHONPATH:-}" python3 /workspace/llama.cpp/convert_lora_to_gguf.py --trust-remote-code --base "${MODEL_ID}" --outtype auto --outfile "${ADAPTER_GGUF_OUT}" "${OUT_DIR}"
     ;;
   smoke-convert)
-    MAX_STEPS="${MAX_STEPS:-20}" MAX_SAMPLES="${MAX_SAMPLES:-256}" SEQ_LEN="${SEQ_LEN:-512}" LORA_R="${LORA_R:-8}" GRAD_ACCUM="${GRAD_ACCUM:-8}" OPTIM="${OPTIM:-adamw_torch}" EMPTY_CACHE_STEPS="${EMPTY_CACHE_STEPS:-0}" LOG_MEMORY_STEPS="${LOG_MEMORY_STEPS:-1}" SAVE_STRATEGY="${SAVE_STRATEGY:-steps}" SAVE_STEPS="${SAVE_STEPS:-5}" SAVE_TOTAL_LIMIT="${SAVE_TOTAL_LIMIT:-2}" TRACE_BATCH_ROWS="${TRACE_BATCH_ROWS:-1}" SUSPECT_ROWS="${SUSPECT_ROWS:-42,178}" PAD_TO_MULTIPLE_OF="${PAD_TO_MULTIPLE_OF:-0}" SHUFFLE_DATA="${SHUFFLE_DATA:-1}" TRACE_BACKWARD_MODULES="${TRACE_BACKWARD_MODULES:-0}" BACKWARD_TRACE_MARKERS="${BACKWARD_TRACE_MARKERS:-Linear4bit,GatedDeltaNet,DeltaNet}" TRACE_BACKWARD_PREFIX="${TRACE_BACKWARD_PREFIX:-}" LORA_EXCLUDE_MODULES="${LORA_EXCLUDE_MODULES:-}" LORA_AUTOCAST_ADAPTER_DTYPE="${LORA_AUTOCAST_ADAPTER_DTYPE:-1}" ROCM_BLAS_BACKEND="${ROCM_BLAS_BACKEND:-}" DATALOADER_NUM_WORKERS="${DATALOADER_NUM_WORKERS:-0}" DATALOADER_PIN_MEMORY="${DATALOADER_PIN_MEMORY:-0}" DATALOADER_PERSISTENT_WORKERS="${DATALOADER_PERSISTENT_WORKERS:-0}" ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-eager}" FORCE_MATH_SDP="${FORCE_MATH_SDP:-1}" python3 /workspace/lmml/scripts/train_qwen35_27b_r9700_qlora.py
+    MAX_STEPS="${MAX_STEPS:-20}" MAX_SAMPLES="${MAX_SAMPLES:-256}" SEQ_LEN="${SEQ_LEN:-512}" LORA_R="${LORA_R:-8}" GRAD_ACCUM="${GRAD_ACCUM:-8}" OPTIM="${OPTIM:-adamw_torch}" EMPTY_CACHE_STEPS="${EMPTY_CACHE_STEPS:-0}" LOG_MEMORY_STEPS="${LOG_MEMORY_STEPS:-1}" SAVE_STRATEGY="${SAVE_STRATEGY:-steps}" SAVE_STEPS="${SAVE_STEPS:-5}" SAVE_TOTAL_LIMIT="${SAVE_TOTAL_LIMIT:-2}" TRACE_BATCH_ROWS="${TRACE_BATCH_ROWS:-1}" SUSPECT_ROWS="${SUSPECT_ROWS:-42,178}" PAD_TO_MULTIPLE_OF="${PAD_TO_MULTIPLE_OF:-0}" SHUFFLE_DATA="${SHUFFLE_DATA:-1}" TRACE_BACKWARD_MODULES="${TRACE_BACKWARD_MODULES:-0}" BACKWARD_TRACE_MARKERS="${BACKWARD_TRACE_MARKERS:-Linear4bit,GatedDeltaNet,DeltaNet}" TRACE_BACKWARD_PREFIX="${TRACE_BACKWARD_PREFIX:-}" LORA_EXCLUDE_MODULES="${LORA_EXCLUDE_MODULES:-}" LORA_AUTOCAST_ADAPTER_DTYPE="${LORA_AUTOCAST_ADAPTER_DTYPE:-1}" ROCM_BLAS_BACKEND="${ROCM_BLAS_BACKEND:-}" DATALOADER_NUM_WORKERS="${DATALOADER_NUM_WORKERS:-0}" DATALOADER_PIN_MEMORY="${DATALOADER_PIN_MEMORY:-0}" DATALOADER_PERSISTENT_WORKERS="${DATALOADER_PERSISTENT_WORKERS:-0}" ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-eager}" FORCE_MATH_SDP="${FORCE_MATH_SDP:-1}" python3 /workspace/lmml/scripts/train_qwen38_27b_r9700_qlora.py
     cd /workspace/llama.cpp
     PYTHONPATH="/workspace/llama.cpp:/workspace/llama.cpp/gguf-py:${PYTHONPATH:-}" python3 /workspace/llama.cpp/convert_lora_to_gguf.py --trust-remote-code --base "${MODEL_ID}" --outtype auto --outfile "${ADAPTER_GGUF_OUT}" "${OUT_DIR}"
     ;;
@@ -444,18 +497,23 @@ docker run --rm -it \
   --shm-size "$SHM_SIZE" \
   -v "$ROOT_DIR:/workspace/lmml" \
   -v "$TRAINING_SOURCE_ROOT:/workspace/training-source:ro" \
+  -v "$MODEL_SOURCE_ROOT:/workspace/model-source:ro" \
   -v "$LMML_DATA_ROOT:/host-lmml" \
   -v "$LMML_DATA_ROOT/llama.cpp:/workspace/llama.cpp:ro" \
   -v "$HF_CACHE:/root/.cache/huggingface" \
   -v "$PIP_CACHE:/root/.cache/pip" \
   -w /workspace/lmml \
   -e "LMML_QLORA_MODE=$MODE" \
+  -e "LMML_QLORA_IMAGE=$IMAGE" \
+  -e "LMML_QLORA_IMAGE_ID=$LMML_QLORA_IMAGE_ID" \
+  -e "LMML_CONTAINER_RUNTIME_VERSION=$LMML_CONTAINER_RUNTIME_VERSION" \
   -e "LMML_QLORA_INSTALL_DEPS=$LMML_QLORA_INSTALL_DEPS" \
   -e "LMML_QLORA_DEPS_DIR=/host-lmml/qlora-python" \
   -e "MODEL_ID=$MODEL_ID" \
   -e "DATA_PATH=$DATA_PATH" \
   -e "OUT_DIR=$OUT_DIR" \
   -e "ADAPTER_GGUF_OUT=$ADAPTER_GGUF_OUT" \
+  -e "SEED=${SEED:-}" \
   -e "SEQ_LEN=${SEQ_LEN:-}" \
   -e "LORA_R=${LORA_R:-}" \
   -e "LORA_ALPHA=${LORA_ALPHA:-}" \
@@ -489,6 +547,14 @@ docker run --rm -it \
   -e "ATTN_IMPLEMENTATION=${ATTN_IMPLEMENTATION:-eager}" \
   -e "FORCE_MATH_SDP=${FORCE_MATH_SDP:-1}" \
   -e "TARGET_MODULES=${TARGET_MODULES:-}" \
+  -e "BASE_MANIFEST=${BASE_MANIFEST:-}" \
+  -e "AUTHORIZATION_DRAFT=${AUTHORIZATION_DRAFT:-}" \
+  -e "AUTHORIZATION_ID=${AUTHORIZATION_ID:-}" \
+  -e "AUTHORIZATION_MANIFEST=${AUTHORIZATION_MANIFEST:-}" \
+  -e "TRAINING_RUN_ID=${TRAINING_RUN_ID:-}" \
+  -e "ADAPTER_ARTIFACT_ID=${ADAPTER_ARTIFACT_ID:-}" \
+  -e "TRAINING_REPORT=${TRAINING_REPORT:-}" \
+  -e "ADAPTER_MANIFEST_PATH=$ADAPTER_MANIFEST_PATH" \
   "${DEBUG_ENV_ARGS[@]}" \
   "$IMAGE" \
   bash -lc "$container_cmd"
