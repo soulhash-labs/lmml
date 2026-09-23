@@ -1114,7 +1114,7 @@ impl Default for ServerConfig {
         Self {
             port: 8080,
             host: "127.0.0.1".to_string(),
-            ctx_size: 4096,
+            ctx_size: 262_144,
             n_gpu_layers: -1,
             batch_size: 512,
             ubatch_size: 512,
@@ -1586,7 +1586,7 @@ mod tests {
         let state = AppState::default();
         assert_eq!(state.server.port, 8080);
         assert_eq!(state.server.host, "127.0.0.1");
-        assert_eq!(state.server.ctx_size, 4096);
+        assert_eq!(state.server.ctx_size, 262_144);
         assert_eq!(state.server.n_gpu_layers, -1);
         assert_eq!(state.server.batch_size, 512);
         assert_eq!(state.server.ubatch_size, 512);
