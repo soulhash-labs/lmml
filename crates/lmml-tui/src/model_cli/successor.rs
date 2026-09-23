@@ -263,18 +263,7 @@ pub(super) fn register_candidate(options: CandidateOptions<'_>, data_root: &Path
             .and_then(|()| {
                 lmml_substrate::validate_successor_structure(&base, &candidate.candidate_manifest)
             })
-            .and_then(|()| {
-                lmml_substrate::verify_safetensors(
-                    &candidate.candidate_path,
-                    &candidate.candidate_manifest,
-                )
-            })
-            .and_then(|()| {
-                lmml_substrate::validate_finite_checkpoint(
-                    &candidate.candidate_path,
-                    &candidate.candidate_manifest,
-                )
-            })
+            .and_then(|()| verify_successor_candidate_payload(&candidate))
     {
         return fail("successor merge gate", error.to_string());
     }
@@ -323,6 +312,7 @@ pub(super) fn admit(
     if let Err(error) =
         lmml_substrate::validate_successor_baseline(&successor, &baseline, &baseline_hash)
             .and_then(|()| lmml_substrate::validate_successor_admission(&successor, &candidate))
+            .and_then(|()| verify_successor_candidate_payload(&candidate))
     {
         return fail("successor admission gate", error.to_string());
     }
@@ -344,6 +334,16 @@ pub(super) fn admit(
         return fail("successor admission registration", error.to_string());
     }
     emit(&successor, &output, json, "admitted successor")
+}
+
+fn verify_successor_candidate_payload(
+    candidate: &lmml_substrate::SuccessorCandidateManifest,
+) -> Result<(), lmml_substrate::SubstrateError> {
+    lmml_substrate::verify_safetensors(&candidate.candidate_path, &candidate.candidate_manifest)?;
+    lmml_substrate::validate_finite_checkpoint(
+        &candidate.candidate_path,
+        &candidate.candidate_manifest,
+    )
 }
 
 fn read_and_parse<T>(
@@ -517,5 +517,68 @@ mod tests {
         assert!(
             validate_successor_paths(base, adapter, &adapter.join("candidate"), report).is_err()
         );
+    }
+
+    #[test]
+    fn successor_admission_rechecks_merged_checkpoint_bytes() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let candidate_path = directory.path().join("candidate");
+        std::fs::create_dir(&candidate_path).expect("candidate");
+        write_safetensors_fixture(&candidate_path);
+        let candidate_manifest = lmml_substrate::import_successor_safetensors(
+            &candidate_path,
+            "qwen38-successor-1",
+            "qwen38-27b",
+        )
+        .expect("candidate manifest");
+        let candidate = lmml_substrate::SuccessorCandidateManifest {
+            schema_version: lmml_substrate::SCHEMA_VERSION,
+            candidate_id: "candidate-1".into(),
+            parent_lineage_id: "qwen38-27b".into(),
+            training_run_id: "train-1".into(),
+            adapter_artifact_id: "adapter-1".into(),
+            candidate_path: candidate_path.clone(),
+            requested_dtype: "bfloat16".into(),
+            effective_load_dtype: "bfloat16".into(),
+            merge_dtype: "bfloat16".into(),
+            output_dtype: "bfloat16".into(),
+            candidate_manifest,
+            delta: lmml_substrate::MergeDelta {
+                changed_tensor_count: 1,
+                unchanged_tensor_count: 0,
+                max_absolute_delta: 1.0,
+                aggregate_norm_delta: 1.0,
+            },
+            equivalence_max_absolute_delta: 0.0,
+            equivalence_tolerance: 1e-4,
+            created_at: "2026-09-23T00:00:00Z".into(),
+        };
+        verify_successor_candidate_payload(&candidate).expect("unchanged candidate");
+
+        let shard = candidate_path.join("model-00001-of-00001.safetensors");
+        let mut bytes = std::fs::read(&shard).expect("shard");
+        *bytes.last_mut().expect("tensor byte") ^= 0xff;
+        std::fs::write(shard, bytes).expect("mutated shard");
+
+        assert!(verify_successor_candidate_payload(&candidate).is_err());
+    }
+
+    fn write_safetensors_fixture(root: &Path) {
+        std::fs::write(
+            root.join("config.json"),
+            r#"{"model_type":"qwen3_5","architectures":["Qwen3_5ForConditionalGeneration"]}"#,
+        )
+        .expect("config");
+        std::fs::write(root.join("tokenizer.json"), "tokenizer").expect("tokenizer");
+        std::fs::write(
+            root.join("model.safetensors.index.json"),
+            r#"{"weight_map":{"layer.weight":"model-00001-of-00001.safetensors"}}"#,
+        )
+        .expect("index");
+        let header = r#"{"layer.weight":{"dtype":"U8","shape":[4],"data_offsets":[0,4]}}"#;
+        let mut shard = (header.len() as u64).to_le_bytes().to_vec();
+        shard.extend(header.as_bytes());
+        shard.extend([1, 2, 3, 4]);
+        std::fs::write(root.join("model-00001-of-00001.safetensors"), shard).expect("shard");
     }
 }
