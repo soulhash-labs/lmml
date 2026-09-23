@@ -8,7 +8,9 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
-use crate::storage::{persist_immutable, validate_schema_version};
+use crate::storage::{
+    persist_immutable, persist_immutable_with_outcome, validate_schema_version, PersistOutcome,
+};
 use crate::{
     parse_artifact_manifest_json, validate_identifier, ArtifactManifest, BaselineManifest,
     ModelLease, ModelRepresentation, ModelRequest, RuntimeCapability, RuntimeManifest,
@@ -104,6 +106,61 @@ pub fn store_successor_manifest(
     store_json(path.as_ref(), manifest)
 }
 
+/// Register the canonical and admission records for one successor as a checked bundle.
+///
+/// Both records are validated and checked for conflicts before publication. If
+/// admission publication fails after this call created the canonical record,
+/// that exact new record is removed so an unadmitted lineage is not exposed as
+/// canonical state.
+pub fn store_admitted_successor(
+    canonical_path: impl AsRef<Path>,
+    canonical: &SubstrateManifest,
+    admission_path: impl AsRef<Path>,
+    admission: &SuccessorManifest,
+) -> Result<(PathBuf, PathBuf), SubstrateError> {
+    crate::storage::validate_substrate_manifest(canonical)?;
+    validate_successor_manifest(admission)?;
+    if canonical.model.lineage_id != admission.successor_lineage_id
+        || canonical.model.parent.as_deref() != Some(admission.parent_lineage_id.as_str())
+        || canonical.model.canonical_manifest_hash != admission.successor_hash
+        || canonical.model.canonical_manifest_hash != admission.tensor_manifest_hash
+    {
+        return Err(SubstrateError::InvalidLifecycleManifest(
+            "successor canonical and admission records disagree".to_string(),
+        ));
+    }
+
+    let canonical_path = canonical_path.as_ref();
+    let admission_path = admission_path.as_ref();
+    let canonical_payload =
+        serde_json::to_vec_pretty(canonical).map_err(SubstrateError::Serialize)?;
+    let admission_payload =
+        serde_json::to_vec_pretty(admission).map_err(SubstrateError::Serialize)?;
+    preflight_immutable(canonical_path, &canonical_payload, |path| {
+        SubstrateError::ManifestConflict(path)
+    })?;
+    preflight_immutable(admission_path, &admission_payload, |path| {
+        SubstrateError::LifecycleConflict(path)
+    })?;
+
+    let canonical_outcome = persist_immutable_with_outcome(
+        canonical_path,
+        &canonical_payload,
+        SubstrateError::ManifestConflict,
+    )?;
+    if let Err(error) = persist_immutable_with_outcome(
+        admission_path,
+        &admission_payload,
+        SubstrateError::LifecycleConflict,
+    ) {
+        if canonical_outcome == PersistOutcome::Created {
+            rollback_exact(canonical_path, &canonical_payload)?;
+        }
+        return Err(error);
+    }
+    Ok((canonical_path.to_path_buf(), admission_path.to_path_buf()))
+}
+
 /// Parse and validate an artifact-bound runtime manifest.
 pub fn parse_runtime_manifest_json(payload: &str) -> Result<RuntimeManifest, SubstrateError> {
     parse_validated(payload, validate_runtime_manifest)
@@ -116,6 +173,13 @@ pub fn store_runtime_manifest(
 ) -> Result<PathBuf, SubstrateError> {
     validate_runtime_manifest(manifest)?;
     store_json(path.as_ref(), manifest)
+}
+
+/// Compute the stable SHA-256 identity of a validated runtime manifest.
+pub fn runtime_manifest_hash(manifest: &RuntimeManifest) -> Result<crate::Hash256, SubstrateError> {
+    validate_runtime_manifest(manifest)?;
+    let payload = serde_json::to_vec(manifest).map_err(SubstrateError::Serialize)?;
+    Ok(crate::sha256_data(&payload))
 }
 
 /// Parse and validate an issued model lease.
@@ -216,6 +280,7 @@ pub fn issue_model_lease(
         model_lineage_id: request.model_lineage_id.clone(),
         artifact_id: runtime.artifact_id.clone(),
         runtime_id: runtime.runtime_id.clone(),
+        runtime_manifest_hash: runtime_manifest_hash(runtime)?,
         endpoint: runtime.endpoint.clone(),
         manifest_hash: artifact.source_hashes[0].clone(),
         artifact_hash: artifact.artifact.artifact_hash.clone(),
@@ -594,6 +659,7 @@ fn validate_successor_manifest(manifest: &SuccessorManifest) -> Result<(), Subst
 }
 
 fn validate_runtime_manifest(manifest: &RuntimeManifest) -> Result<(), SubstrateError> {
+    validate_schema_version(manifest.schema_version)?;
     validate_identifier(&manifest.runtime_id)?;
     validate_identifier(&manifest.model_lineage_id)?;
     validate_identifier(&manifest.artifact_id)?;
@@ -601,6 +667,7 @@ fn validate_runtime_manifest(manifest: &RuntimeManifest) -> Result<(), Substrate
     if manifest.backend.trim().is_empty()
         || manifest.backend_version.trim().is_empty()
         || manifest.endpoint.trim().is_empty()
+        || !manifest.backend_executable.is_absolute()
         || manifest.context_size == 0
         || manifest.pid == 0
         || manifest.capabilities.is_empty()
@@ -677,6 +744,27 @@ fn store_json<T: Serialize>(path: &Path, value: &T) -> Result<PathBuf, Substrate
     let payload = serde_json::to_vec_pretty(value).map_err(SubstrateError::Serialize)?;
     persist_immutable(path, &payload, SubstrateError::LifecycleConflict)?;
     Ok(path.to_path_buf())
+}
+
+fn preflight_immutable(
+    path: &Path,
+    payload: &[u8],
+    conflict: impl FnOnce(PathBuf) -> SubstrateError,
+) -> Result<(), SubstrateError> {
+    if path.is_file() && crate::read_required(path)? != payload {
+        return Err(conflict(path.to_path_buf()));
+    }
+    Ok(())
+}
+
+fn rollback_exact(path: &Path, payload: &[u8]) -> Result<(), SubstrateError> {
+    if crate::read_required(path)? != payload {
+        return Err(SubstrateError::LifecycleConflict(path.to_path_buf()));
+    }
+    fs::remove_file(path).map_err(|source| SubstrateError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 fn load_json_directory<T>(

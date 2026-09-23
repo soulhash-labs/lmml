@@ -382,8 +382,28 @@ async fn complete_quantized_derive_publishes_registers_and_rolls_back_conflicts(
         .is_file());
     assert!(!data_root.join("lmml/models/artifacts").exists());
     assert_eq!(admission.calls.load(Ordering::SeqCst), 0);
+    let candidate_root = data_root.join("lmml/models/candidates");
+    let first_candidate_path = candidate_root.join("qwen38-q8-pending.json");
+    let mut second_candidate = lmml_substrate::parse_gguf_candidate_manifest_json(
+        &std::fs::read_to_string(&first_candidate_path).expect("candidate record"),
+    )
+    .expect("candidate manifest");
+    second_candidate.artifact.artifact_id = "qwen38-q8-pending-copy".into();
+    let second_candidate_path =
+        lmml_substrate::append_gguf_candidate_manifest(&candidate_root, &second_candidate)
+            .expect("second candidate record");
+    let verified = super::candidate::verify(
+        &[first_candidate_path.clone(), second_candidate_path],
+        &manifest_path,
+        &source,
+        false,
+        &data_root,
+    )
+    .await;
+    assert_eq!(verified, 0);
+    assert_eq!(admission.calls.load(Ordering::SeqCst), 0);
     let admitted = super::candidate::admit_with(
-        &data_root.join("lmml/models/candidates/qwen38-q8-pending.json"),
+        &first_candidate_path,
         &manifest_path,
         &source,
         Some(&server),

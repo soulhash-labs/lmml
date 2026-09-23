@@ -350,12 +350,12 @@ pub(super) fn admit(
     let canonical_path = data_root
         .join("lmml/models/manifests")
         .join(format!("{}.json", successor.successor_lineage_id));
-    if let Err(error) =
-        lmml_substrate::store_substrate_manifest(&canonical_path, &candidate.candidate_manifest)
-    {
-        return fail("successor canonical registration", error.to_string());
-    }
-    if let Err(error) = lmml_substrate::store_successor_manifest(&output, &successor) {
+    if let Err(error) = lmml_substrate::store_admitted_successor(
+        &canonical_path,
+        &candidate.candidate_manifest,
+        &output,
+        &successor,
+    ) {
         return fail("successor admission registration", error.to_string());
     }
     emit(&successor, &output, json, "admitted successor")

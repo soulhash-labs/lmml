@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::*;
 use crate::{
@@ -494,12 +494,88 @@ fn successor_requires_distinct_explicit_parent() {
 }
 
 #[test]
+fn successor_admission_bundle_is_idempotent_and_cross_bound() {
+    let (_checkpoint_root, canonical) = checkpoint("qwen38-successor-1", Some("qwen38-27b"));
+    let successor = successor_manifest(
+        "qwen38-successor-1",
+        "qwen38-27b",
+        canonical.model.canonical_manifest_hash.clone(),
+    );
+    let directory = tempfile::tempdir().expect("bundle root");
+    let canonical_path = directory.path().join("manifests/successor.json");
+    let admission_path = directory.path().join("successors/successor.json");
+
+    store_admitted_successor(&canonical_path, &canonical, &admission_path, &successor)
+        .expect("first registration");
+    store_admitted_successor(&canonical_path, &canonical, &admission_path, &successor)
+        .expect("idempotent registration");
+    assert!(canonical_path.is_file());
+    assert!(admission_path.is_file());
+
+    let mut mismatched = successor;
+    mismatched.successor_hash = hash('9');
+    assert!(matches!(
+        store_admitted_successor(
+            directory.path().join("other-canonical.json"),
+            &canonical,
+            directory.path().join("other-admission.json"),
+            &mismatched,
+        ),
+        Err(SubstrateError::InvalidLifecycleManifest(_))
+    ));
+}
+
+#[test]
+fn successor_admission_conflict_does_not_publish_canonical_record() {
+    let (_checkpoint_root, canonical) = checkpoint("qwen38-successor-1", Some("qwen38-27b"));
+    let successor = successor_manifest(
+        "qwen38-successor-1",
+        "qwen38-27b",
+        canonical.model.canonical_manifest_hash.clone(),
+    );
+    let directory = tempfile::tempdir().expect("bundle root");
+    let canonical_path = directory.path().join("manifests/successor.json");
+    let admission_path = directory.path().join("successors/successor.json");
+    fs::create_dir_all(admission_path.parent().expect("admission parent"))
+        .expect("admission parent");
+    fs::write(&admission_path, b"conflicting admission").expect("conflict");
+
+    assert!(matches!(
+        store_admitted_successor(&canonical_path, &canonical, &admission_path, &successor,),
+        Err(SubstrateError::LifecycleConflict(_))
+    ));
+    assert!(!canonical_path.exists());
+}
+
+#[test]
+fn successor_admission_failure_rolls_back_new_canonical_record() {
+    let (_checkpoint_root, canonical) = checkpoint("qwen38-successor-1", Some("qwen38-27b"));
+    let successor = successor_manifest(
+        "qwen38-successor-1",
+        "qwen38-27b",
+        canonical.model.canonical_manifest_hash.clone(),
+    );
+    let directory = tempfile::tempdir().expect("bundle root");
+    let canonical_path = directory.path().join("manifests/successor.json");
+    let blocked_parent = directory.path().join("not-a-directory");
+    fs::write(&blocked_parent, b"block parent creation").expect("blocked parent");
+    let admission_path = blocked_parent.join("successor.json");
+
+    assert!(matches!(
+        store_admitted_successor(&canonical_path, &canonical, &admission_path, &successor,),
+        Err(SubstrateError::Io { .. })
+    ));
+    assert!(!canonical_path.exists());
+}
+
+#[test]
 fn runtime_lease_uses_exact_admitted_artifact_hash() {
     let directory = tempfile::tempdir().expect("artifact");
     let artifact_path = directory.path().join("model.gguf");
     fs::write(&artifact_path, b"GGUF-runtime-test").expect("GGUF");
     let artifact = admitted_artifact(&artifact_path);
     let runtime = RuntimeManifest {
+        schema_version: SCHEMA_VERSION,
         runtime_id: "runtime-1".into(),
         pid: 1234,
         model_lineage_id: "qwen38-27b".into(),
@@ -509,6 +585,9 @@ fn runtime_lease_uses_exact_admitted_artifact_hash() {
         quantization: Some(QuantizationKind::Q8_0),
         backend: "llama.cpp".into(),
         backend_version: "test".into(),
+        backend_executable: PathBuf::from("/usr/bin/llama-server"),
+        backend_executable_hash: hash('6'),
+        command_line_hash: hash('7'),
         endpoint: "http://127.0.0.1:1200".into(),
         context_size: 16_384,
         capabilities: vec![RuntimeCapability::TextGeneration],
@@ -520,6 +599,7 @@ fn runtime_lease_uses_exact_admitted_artifact_hash() {
         representation_preference: vec![ModelRepresentation::Gguf],
         required_capabilities: vec![RuntimeCapability::TextGeneration],
     };
+    let expected_runtime_hash = runtime_manifest_hash(&runtime).expect("runtime hash");
 
     let lease = issue_model_lease(
         &request,
@@ -530,6 +610,42 @@ fn runtime_lease_uses_exact_admitted_artifact_hash() {
     .expect("lease");
     assert_eq!(lease.artifact_hash, artifact.artifact.artifact_hash);
     assert_eq!(lease.artifact_id, artifact.artifact.artifact_id);
+    assert_eq!(lease.runtime_manifest_hash, expected_runtime_hash);
+}
+
+#[test]
+fn runtime_manifest_requires_versioned_executable_identity() {
+    let directory = tempfile::tempdir().expect("artifact");
+    let artifact_path = directory.path().join("model.gguf");
+    fs::write(&artifact_path, b"GGUF-runtime-test").expect("GGUF");
+    let artifact = admitted_artifact(&artifact_path);
+    let mut runtime = RuntimeManifest {
+        schema_version: SCHEMA_VERSION,
+        runtime_id: "runtime-1".into(),
+        pid: 1234,
+        model_lineage_id: artifact.artifact.model_lineage_id.clone(),
+        artifact_id: artifact.artifact.artifact_id,
+        artifact_hash: artifact.artifact.artifact_hash,
+        representation: ModelRepresentation::Gguf,
+        quantization: Some(QuantizationKind::Q8_0),
+        backend: "llama.cpp".into(),
+        backend_version: "test".into(),
+        backend_executable: PathBuf::from("/usr/bin/llama-server"),
+        backend_executable_hash: hash('6'),
+        command_line_hash: hash('7'),
+        endpoint: "http://127.0.0.1:1200".into(),
+        context_size: 16_384,
+        capabilities: vec![RuntimeCapability::TextGeneration],
+        created_at: TIMESTAMP.into(),
+    };
+
+    parse_runtime_manifest_json(&serde_json::to_string(&runtime).expect("serialize"))
+        .expect("complete runtime");
+    runtime.backend_executable = PathBuf::from("llama-server");
+    assert!(matches!(
+        parse_runtime_manifest_json(&serde_json::to_string(&runtime).expect("serialize")),
+        Err(SubstrateError::InvalidLifecycleManifest(_))
+    ));
 }
 
 #[test]
@@ -539,6 +655,7 @@ fn runtime_lease_rejects_runtime_artifact_metadata_mismatch() {
     fs::write(&artifact_path, b"GGUF-runtime-test").expect("GGUF");
     let artifact = admitted_artifact(&artifact_path);
     let runtime = RuntimeManifest {
+        schema_version: SCHEMA_VERSION,
         runtime_id: "runtime-1".into(),
         pid: 1234,
         model_lineage_id: artifact.artifact.model_lineage_id.clone(),
@@ -548,6 +665,9 @@ fn runtime_lease_rejects_runtime_artifact_metadata_mismatch() {
         quantization: Some(QuantizationKind::Q4_K_M),
         backend: "llama.cpp".into(),
         backend_version: "test".into(),
+        backend_executable: PathBuf::from("/usr/bin/llama-server"),
+        backend_executable_hash: hash('6'),
+        command_line_hash: hash('7'),
         endpoint: "http://127.0.0.1:1200".into(),
         context_size: 16_384,
         capabilities: vec![RuntimeCapability::TextGeneration],
@@ -612,6 +732,7 @@ fn successor_regression_is_bound_to_exact_parent_baseline() {
 #[test]
 fn llama_cpp_runtime_cannot_claim_eleven_taps() {
     let runtime = RuntimeManifest {
+        schema_version: SCHEMA_VERSION,
         runtime_id: "runtime-1".into(),
         pid: 1234,
         model_lineage_id: "qwen38-27b".into(),
@@ -621,6 +742,9 @@ fn llama_cpp_runtime_cannot_claim_eleven_taps() {
         quantization: Some(QuantizationKind::Q8_0),
         backend: "llama.cpp".into(),
         backend_version: "test".into(),
+        backend_executable: PathBuf::from("/usr/bin/llama-server"),
+        backend_executable_hash: hash('6'),
+        command_line_hash: hash('7'),
         endpoint: "http://127.0.0.1:1200".into(),
         context_size: 16_384,
         capabilities: vec![RuntimeCapability::ElevenTapObservation],

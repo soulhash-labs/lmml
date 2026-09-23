@@ -121,6 +121,21 @@ pub(crate) enum ModelCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Verify a pending GGUF candidate without loading it in a backend.
+    VerifyCandidate {
+        /// Immutable pending candidate manifest. Repeat to verify a batch.
+        #[arg(long)]
+        candidate: Vec<PathBuf>,
+        /// Canonical substrate manifest JSON.
+        #[arg(long)]
+        manifest: PathBuf,
+        /// Canonical Safetensors directory.
+        #[arg(long)]
+        source: PathBuf,
+        /// Emit a machine-readable verification report.
+        #[arg(long)]
+        json: bool,
+    },
     /// List validated append-only artifact records.
     Artifacts {
         /// Restrict output to one conceptual lineage.
@@ -320,6 +335,15 @@ pub(crate) async fn run(command: ModelCommand) -> i32 {
                 &managed_data_root(),
             )
             .await
+        }
+        ModelCommand::VerifyCandidate {
+            candidate,
+            manifest,
+            source,
+            json,
+        } => {
+            derive::verify_candidate(&candidate, &manifest, &source, json, &managed_data_root())
+                .await
         }
         ModelCommand::Artifacts { lineage_id, json } => {
             artifacts::list(lineage_id.as_deref(), &managed_data_root(), json)

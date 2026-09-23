@@ -88,6 +88,40 @@ lmml model admit-artifact \
   --source /home/angelo/repos/qwen38-safetensors
 ```
 
+Before backend admission, revalidate the canonical source, candidate hash, and
+GGUF metadata without starting `llama-server`:
+
+```sh
+lmml model verify-candidate \
+  --candidate ~/.local/share/lmml/models/candidates/qwen38-27b-bf16.json \
+  --candidate ~/.local/share/lmml/models/candidates/qwen38-27b-q8_0.json \
+  --candidate ~/.local/share/lmml/models/candidates/qwen38-27b-q6_k.json \
+  --candidate ~/.local/share/lmml/models/candidates/qwen38-27b-q4_k_m.json \
+  --manifest ~/.local/share/lmml/models/manifests/qwen38-27b.json \
+  --source /home/angelo/repos/qwen38-safetensors \
+  --json
+```
+
+Success reports `verified_pending_backend_admission`; a batch shares one
+canonical-source verification pass while hashing every GGUF before and after
+metadata inspection. It does not make a GGUF runnable or add it to the admitted
+artifact DAG.
+
+The 2026-09-23 verification pass established the following pending artifact
+evidence without starting a backend:
+
+| Candidate | SHA-256 | GGUF file type |
+| --- | --- | ---: |
+| BF16 | `cf3123616fbf0178a3abe3b58a438ca6d0e0088c19e0cafe57009408a496d86e` | 32 |
+| Q8_0 | `f60d5f08ef1524a8aee53f02aa9c19d47b276524de004440dcb3c613bfafcb7a` | 7 |
+| Q6_K | `15bba9deafd3454e5f48b7c2829e6715fa3c966d6297985ccb30444c675367ad` | 18 |
+| Q4_K_M | `9d02bb6e73b840330600e6839f6dc32a1fb0df4c01665bdee567c7781717e9c8` | 15 |
+
+All four files report GGUF v3, architecture `qwen35`, 65 blocks, 866 tensors,
+an embedding width of 5,120, and a context limit of 262,144. Backend tensor
+checks and runnable artifact admission remain pending until model loading is
+permitted.
+
 F16/BF16 conversion requires the llama.cpp converter and its Python
 dependencies. Q8_0, Q6_K, and Q4_K_M additionally require `llama-quantize`.
 LMML reports missing tools or unsupported conversion failures without
@@ -191,9 +225,12 @@ lmml runtime request \
 ```
 
 Registration re-hashes the artifact and verifies that `/proc/<pid>/cmdline`
-contains its exact path. Registration and lease issuance also require the
-endpoint's `/v1/models` response to identify that same GGUF, preventing a valid
-process from being paired with an unrelated healthy endpoint. A lease returns
+selects its exact path and declares the supplied context size exactly once. It
+also records the canonical executable path, hashes the live executable through
+`/proc/<pid>/exe`, and hashes the raw command line. Registration and lease
+issuance require the endpoint's `/v1/models` response to identify that same
+GGUF. Lease issuance rechecks the executable, command line, context, artifact,
+and endpoint before returning an exact runtime-manifest hash. A lease returns
 IDs, hashes, capabilities, and endpoint, not a filesystem path. Standard
 llama.cpp advertises text generation only and returns an explicit unsupported
 error for hidden-state or CROWN11 tap requests. An instrumented provider must
@@ -448,6 +485,7 @@ artifact path:
   "model_lineage_id": "qwen38-27b",
   "artifact_id": "qwen38-27b-q8_0",
   "runtime_id": "qwen38-q8-local",
+  "runtime_manifest_hash": "<sha256-of-validated-runtime-manifest>",
   "endpoint": "http://127.0.0.1:1200",
   "manifest_hash": "fe6a79f82e8c830c801ac5b82b0e18c19c0d6c1e5626534431b4424a8161e1d0",
   "artifact_hash": "<sha256-of-gguf>",

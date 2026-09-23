@@ -333,6 +333,8 @@ pub struct ModelLease {
     pub artifact_id: String,
     /// Runtime instance selected by LMML.
     pub runtime_id: String,
+    /// Stable hash of the exact runtime manifest used for selection.
+    pub runtime_manifest_hash: Hash256,
     /// OpenAI-compatible or local runtime endpoint.
     pub endpoint: String,
     /// Manifest hash used for selection.
@@ -346,6 +348,8 @@ pub struct ModelLease {
 /// Runtime facts recorded when an exact artifact is launched.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeManifest {
+    /// Version of the persisted lifecycle schema.
+    pub schema_version: u32,
     /// Stable runtime identifier.
     pub runtime_id: String,
     /// Local process ID attested during runtime registration.
@@ -364,6 +368,12 @@ pub struct RuntimeManifest {
     pub backend: String,
     /// Backend version or commit.
     pub backend_version: String,
+    /// Canonical path of the executable behind the registered process.
+    pub backend_executable: PathBuf,
+    /// SHA-256 of the executable bytes behind the registered process.
+    pub backend_executable_hash: Hash256,
+    /// SHA-256 of the NUL-delimited command line observed at registration.
+    pub command_line_hash: Hash256,
     /// OpenAI-compatible or provider-specific runtime endpoint.
     pub endpoint: String,
     /// Context size selected for the runtime.

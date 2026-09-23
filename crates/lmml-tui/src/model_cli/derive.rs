@@ -42,6 +42,16 @@ pub(super) async fn admit_candidate(
     .await
 }
 
+pub(super) async fn verify_candidate(
+    candidate_paths: &[PathBuf],
+    substrate_path: &Path,
+    source: &Path,
+    json: bool,
+    data_root: &Path,
+) -> i32 {
+    candidate::verify(candidate_paths, substrate_path, source, json, data_root).await
+}
+
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
 pub(crate) enum QuantizationArg {
     /// Unquantized F16 GGUF.

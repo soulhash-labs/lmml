@@ -35,6 +35,12 @@ under the operator's no-model-start instruction. Candidate conversion and hash
 verification are complete; a candidate must not be presented as runnable until
 backend admission succeeds.
 
+The safe 2026-09-23 verification pass re-hashed the 18-shard canonical source
+once and each real GGUF before and after metadata inspection. BF16, Q8_0, Q6_K,
+and Q4_K_M all report GGUF v3, `qwen35`, 65 blocks, 866 tensors, and a 262,144
+token context. Their exact hashes are recorded in
+`docs/qwen38-model-lifecycle.md`; backend admission remains pending.
+
 ### Completed QC
 
 - [x] Diagnosed Radeon AI PRO R9700 QLoRA GPUVM crashes as the default

@@ -1,5 +1,6 @@
 //! Pending GGUF candidate persistence and backend admission.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -110,6 +111,125 @@ pub(super) async fn admit(
         &LlamaServerAdmission,
     )
     .await
+}
+
+/// Verify candidate identity and structure without performing backend admission.
+pub(super) async fn verify(
+    candidate_paths: &[PathBuf],
+    substrate_path: &Path,
+    source: &Path,
+    json: bool,
+    data_root: &Path,
+) -> i32 {
+    if candidate_paths.is_empty() {
+        eprintln!("candidate verification refused: at least one candidate is required");
+        return 1;
+    }
+    let substrate = match read_substrate_manifest(substrate_path) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            eprintln!("candidate verification refused: {error}");
+            return 1;
+        }
+    };
+    eprintln!(
+        "[candidate-verify] checking canonical source once for {} candidate(s)",
+        candidate_paths.len()
+    );
+    if let Err(error) = validate_canonical_source(&substrate, source, data_root).await {
+        eprintln!("candidate verification failed: {error}");
+        return 1;
+    }
+    let mut artifact_ids = BTreeSet::new();
+    let mut reports = Vec::new();
+    for candidate_path in candidate_paths {
+        let candidate = match read_candidate(candidate_path) {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                eprintln!("candidate verification refused: {error}");
+                return 1;
+            }
+        };
+        if !artifact_ids.insert(candidate.artifact.artifact_id.clone()) {
+            eprintln!(
+                "candidate verification refused: duplicate artifact ID {}",
+                candidate.artifact.artifact_id
+            );
+            return 1;
+        }
+        eprintln!(
+            "[candidate-verify] checking payload hash for {}",
+            candidate.artifact.artifact_id
+        );
+        if let Err(error) = validate_candidate_record(&candidate, &substrate).await {
+            eprintln!("candidate verification failed: {error}");
+            return 1;
+        }
+        eprintln!(
+            "[candidate-verify] inspecting GGUF metadata for {}",
+            candidate.artifact.artifact_id
+        );
+        let metadata = match super::validate_gguf_structure(&candidate.artifact_path).await {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                eprintln!("candidate verification failed: {error}");
+                return 1;
+            }
+        };
+        if let Err(error) = verify_candidate_payload(&candidate).await {
+            eprintln!("candidate verification failed: {error}");
+            return 1;
+        }
+        let runtime = match &metadata.runtime {
+            lmml_models::GgufRuntimeRequirement::Upstream => "upstream",
+            lmml_models::GgufRuntimeRequirement::Prism => "prism",
+            lmml_models::GgufRuntimeRequirement::Unsupported { .. } => "unsupported",
+        };
+        if !json {
+            println!(
+                "verified pending candidate {}\npath: {}\nhash: {}\narchitecture: {}\ntensors: {}\nruntime: {}\nbackend admission: pending",
+                candidate.artifact.artifact_id,
+                candidate.artifact_path.display(),
+                candidate.output_hash,
+                metadata.architecture.as_deref().unwrap_or("unknown"),
+                metadata.tensor_count,
+                runtime,
+            );
+        }
+        reports.push(serde_json::json!({
+            "artifact_id": candidate.artifact.artifact_id,
+            "model_lineage_id": candidate.artifact.model_lineage_id,
+            "artifact_path": candidate.artifact_path,
+            "artifact_hash": candidate.output_hash,
+            "quantization": candidate.artifact.quantization,
+            "gguf": {
+                "version": metadata.version,
+                "tensor_count": metadata.tensor_count,
+                "architecture": metadata.architecture,
+                "context_length": metadata.context_length,
+                "embedding_length": metadata.embedding_length,
+                "block_count": metadata.block_count,
+                "file_type": metadata.file_type,
+                "runtime": runtime,
+            },
+            "backend_admission": "pending",
+        }));
+    }
+    if json {
+        let report = serde_json::json!({
+            "schema_version": lmml_substrate::SCHEMA_VERSION,
+            "status": "verified_pending_backend_admission",
+            "candidates": reports,
+        });
+        match serde_json::to_string_pretty(&report) {
+            Ok(payload) => println!("{payload}"),
+            Err(error) => {
+                eprintln!("candidate verification failed: {error}");
+                return 1;
+            }
+        }
+    }
+    0
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -247,14 +367,56 @@ async fn validate_candidate_inputs(
     .map_err(|error| format!("candidate verification task failed: {error}"))?
 }
 
+async fn validate_canonical_source(
+    substrate: &lmml_substrate::SubstrateManifest,
+    source: &Path,
+    data_root: &Path,
+) -> Result<(), String> {
+    let substrate = substrate.clone();
+    let source = source.to_path_buf();
+    let data_root = data_root.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        validate_canonical_source_blocking(&substrate, &source, &data_root)
+    })
+    .await
+    .map_err(|error| format!("canonical verification task failed: {error}"))?
+}
+
+async fn validate_candidate_record(
+    candidate: &lmml_substrate::GgufCandidateManifest,
+    substrate: &lmml_substrate::SubstrateManifest,
+) -> Result<(), String> {
+    let candidate = candidate.clone();
+    let substrate = substrate.clone();
+    tokio::task::spawn_blocking(move || validate_candidate_record_blocking(&candidate, &substrate))
+        .await
+        .map_err(|error| format!("candidate verification task failed: {error}"))?
+}
+
 fn validate_candidate_inputs_blocking(
     candidate: &lmml_substrate::GgufCandidateManifest,
     substrate: &lmml_substrate::SubstrateManifest,
     source: &Path,
     data_root: &Path,
 ) -> Result<(), String> {
+    validate_canonical_source_blocking(substrate, source, data_root)?;
+    validate_candidate_record_blocking(candidate, substrate)
+}
+
+fn validate_canonical_source_blocking(
+    substrate: &lmml_substrate::SubstrateManifest,
+    source: &Path,
+    data_root: &Path,
+) -> Result<(), String> {
     require_admitted_successor(substrate, data_root).map_err(|error| error.to_string())?;
     lmml_substrate::verify_safetensors(source, substrate).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn validate_candidate_record_blocking(
+    candidate: &lmml_substrate::GgufCandidateManifest,
+    substrate: &lmml_substrate::SubstrateManifest,
+) -> Result<(), String> {
     let expected_parent = format!("{}-safetensors", substrate.model.lineage_id);
     if candidate.canonical_model != substrate.model.lineage_id
         || candidate.parent_artifact != expected_parent
@@ -281,7 +443,7 @@ async fn verify_candidate_payload(
             Ok(())
         } else {
             Err(format!(
-                "candidate payload changed during backend admission: {}",
+                "candidate payload changed during verification: {}",
                 path.display()
             ))
         }

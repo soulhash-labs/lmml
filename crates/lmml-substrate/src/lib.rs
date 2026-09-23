@@ -1065,6 +1065,7 @@ mod tests {
             model_lineage_id: artifact.canonical_model.clone(),
             artifact_id: artifact.artifact.artifact_id.clone(),
             runtime_id: "llama-server-1".into(),
+            runtime_manifest_hash: Hash256::parse("3".repeat(64)).expect("runtime hash"),
             endpoint: "http://127.0.0.1:1200".into(),
             manifest_hash: canonical_hash.clone(),
             artifact_hash: artifact_hash.clone(),

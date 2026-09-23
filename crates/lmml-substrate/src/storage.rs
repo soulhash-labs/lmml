@@ -384,11 +384,25 @@ fn zero_hash() -> Hash256 {
     Hash256("0".repeat(64))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PersistOutcome {
+    Created,
+    Existing,
+}
+
 pub(crate) fn persist_immutable(
     path: &Path,
     payload: &[u8],
     conflict: impl FnOnce(PathBuf) -> SubstrateError,
 ) -> Result<(), SubstrateError> {
+    persist_immutable_with_outcome(path, payload, conflict).map(|_| ())
+}
+
+pub(crate) fn persist_immutable_with_outcome(
+    path: &Path,
+    payload: &[u8],
+    conflict: impl FnOnce(PathBuf) -> SubstrateError,
+) -> Result<PersistOutcome, SubstrateError> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -400,7 +414,7 @@ pub(crate) fn persist_immutable(
     if path.is_file() {
         let existing = read_required(path)?;
         return if existing == payload {
-            Ok(())
+            Ok(PersistOutcome::Existing)
         } else {
             Err(conflict(path.to_path_buf()))
         };
@@ -419,11 +433,11 @@ pub(crate) fn persist_immutable(
             source,
         })?;
     match temporary.persist_noclobber(path) {
-        Ok(_) => Ok(()),
+        Ok(_) => Ok(PersistOutcome::Created),
         Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
             let existing = read_required(path)?;
             if existing == payload {
-                Ok(())
+                Ok(PersistOutcome::Existing)
             } else {
                 Err(conflict(path.to_path_buf()))
             }
