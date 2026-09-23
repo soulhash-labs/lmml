@@ -72,20 +72,27 @@ unattested build requires a clean Prism rebuild. This is a build and launch
 capability gate, not evidence that a model produced coherent output; the
 hardware smoke test remains a separate admission step.
 
-The first unprofiled Prism launch is capped at 32K context with one slot, flash
-attention, Jinja, temperature `1.0`, top-p `0.95`, and top-k `20`. A dedicated
-model runtime profile can replace those initial safeguards after hardware
-acceptance.
+Generic ROCm preflight verifies that the host exposes usable HIP/ROCm tooling,
+concrete accelerator targets, and the required CMake development packages. It
+does not claim Prism support from hardware detection alone. Prism support is
+admitted separately by the build attestation and live launch checks above,
+including tensor-kernel evidence, target matching, and artifact hashes.
+
+Prism launches preserve the configured context size. The default is `262144`
+tokens with one slot, flash attention, Jinja, temperature `1.0`, top-p `0.95`,
+and top-k `20`; a dedicated model runtime profile can replace those safeguards
+after hardware acceptance.
 
 Current workstation-proven OpenCode route:
 
 ```text
-OpenCode -> http://127.0.0.1:1200/v1 -> lmml TUI llama-server
-server context: 131072 tokens
-OpenCode compaction.reserved: 32768 tokens
-usable input before compaction: 98304 tokens
-practical single-agent input target: 80000-90000 tokens
-hard reject/compress threshold: 96000-100000 tokens
+OpenCode -> http://127.0.0.1:8080/v1 -> lmml TUI llama-server
+server context: 262144 tokens
+OpenCode model limit: 262144 input / 16384 output tokens
+OpenCode compaction.reserved: 16384 tokens
+usable input before compaction: 245760 tokens
+practical single-agent input target: 180000-220000 tokens
+hard reject/compress threshold: 245760 tokens
 ```
 
 OpenCode uses one provider named `llamacpp`. Both `model` and `small_model`
@@ -279,7 +286,7 @@ GTX 1080 Ti with about 2.4 GiB VRAM free after load. The server reported
 validated 256k profile should use prompt cache/checkpoints and leave
 `cache_reuse = 0`.
 
-The active OpenCode route for this profile is `http://127.0.0.1:1200/v1`.
+The active OpenCode route for this profile is `http://127.0.0.1:8080/v1`.
 The active top-level model keys are:
 
 ```text
@@ -289,7 +296,7 @@ small_model: llamacpp/Qwen3.5-4B-Q8_0.gguf
 
 `opencode.json` alone may not be the whole integration. If a client
 has validator, category, or provider extension files, keep them aligned with the
-same model and `1200` base URL after provider config is corrected.
+same model and `8080` base URL after provider config is corrected.
 
 For 128k+ contexts, slot count is part of the memory budget. The 11GB GTX 1080
 Ti validation machine failed with auto `n_parallel = 4` under concurrent
@@ -356,7 +363,7 @@ grep -RInE '65536|43000|40960|contextWindow|max_input|maxInput|ctx|input.*token|
 On the validation machine, stale legacy candidates existed in
 `~/.config/llama-server/models.tsv` and `~/.config/llama-server/defaults.env`.
 Those files are not the active OpenCode route when OpenCode uses
-`http://127.0.0.1:1200/v1`, but they are exactly the kind of hidden cap that
+`http://127.0.0.1:8080/v1`, but they are exactly the kind of hidden cap that
 must be eliminated if a wrapper still participates in the request path.
 
 Doctor should also surface context capability left on the table when
@@ -541,8 +548,8 @@ Target status table:
 
 ```text
 profile        status     pid     url                         model
-opencode       ready      12345   http://127.0.0.1:1200/v1    model.gguf
-opencode-fast  ready      12345   http://127.0.0.1:1200/v1    model.gguf
+opencode       ready      12345   http://127.0.0.1:8080/v1    model.gguf
+opencode-fast  ready      12345   http://127.0.0.1:8080/v1    model.gguf
 ```
 
 ### `lmml runtime status --json`
@@ -558,7 +565,7 @@ Target runtime status JSON output:
       "name": "opencode",
       "status": "ready",
       "pid": 12345,
-      "url": "http://127.0.0.1:1200/v1",
+      "url": "http://127.0.0.1:8080/v1",
       "model": "/home/user/.local/share/lmml/models/mistral-7b-q4_k_m.gguf",
       "log_path": "/home/user/.local/share/lmml/logs/profile-opencode.log",
       "last_health": "ok",
