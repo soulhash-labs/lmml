@@ -11,7 +11,7 @@ use lmml_detect::GpuInfo;
 use reqwest::header::{CONTENT_LENGTH, RANGE};
 use serde::Deserialize;
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 
 pub mod catalog;
 
@@ -576,10 +576,11 @@ pub async fn parse_model_file(path: impl AsRef<Path>, aliased: bool) -> Option<M
 
 /// Parse the GGUF binary metadata header.
 pub async fn parse_gguf_metadata(path: impl AsRef<Path>) -> Result<GgufMetadata, GgufError> {
-    let mut file = tokio::fs::File::open(path.as_ref())
+    let file = tokio::fs::File::open(path.as_ref())
         .await
         .map_err(GgufError::Io)?;
-    parse_gguf_reader(&mut file).await
+    let mut reader = BufReader::with_capacity(1024 * 1024, file);
+    parse_gguf_reader(&mut reader).await
 }
 
 async fn parse_gguf_reader<R>(reader: &mut R) -> Result<GgufMetadata, GgufError>

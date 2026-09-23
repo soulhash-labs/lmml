@@ -13,14 +13,19 @@ pub fn render(area: Rect, app: &App, frame: &mut Frame) {
         Line::from("Press r to scan local models."),
         Line::from("Press / to search Hugging Face. Press D to download selected HF result."),
         Line::from("Press a to add a model alias. Press x to delete selected model."),
-        Line::from("Press p to switch selected model runtime profile."),
+        Line::from(format!(
+            "Press p for model profile. Press v for runtime policy ({}).",
+            app.state.build.runtime_selection
+        )),
         Line::from(format!(
             "Models dir: {}",
             app.state.model.models_dir.display()
         )),
         Line::from(""),
     ];
-    if app.models.is_empty() {
+    if app.model_scan_running {
+        left.push(Line::from("Scanning local GGUF metadata..."));
+    } else if app.models.is_empty() {
         left.push(Line::from("No models found."));
     } else {
         for (index, model) in app.models.iter().enumerate() {

@@ -294,9 +294,11 @@ mod tests {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let prism_model = tempdir.path().join("ternary.gguf");
         fs::write(&prism_model, fixture_gguf(142)).expect("Prism model");
+        let mut build = lmml_state::BuildState::default();
+        build.prism.binary = tempdir.path().join("missing/llama-server");
 
         assert!(matches!(
-            resolve_model_runtime(&lmml_state::BuildState::default(), &prism_model).await,
+            resolve_model_runtime(&build, &prism_model).await,
             Err(RuntimeCliError::RuntimeUnavailable {
                 flavor: lmml_compat::LlamaRuntimeFlavor::Prism,
                 ..

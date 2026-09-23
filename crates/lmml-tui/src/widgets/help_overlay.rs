@@ -23,6 +23,7 @@ pub fn render(area: Rect, frame: &mut Frame) {
         Line::from("p          probe server flags"),
         Line::from("Space      toggle selected setting"),
         Line::from("m          quick-swap server model"),
+        Line::from("v          cycle runtime policy"),
         Line::from("r          scan models"),
         Line::from("/          open HF search"),
         Line::from("D          download selected HF result"),

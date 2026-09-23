@@ -23,6 +23,8 @@ pub enum Action {
     SelectModel(PathBuf),
     /// Cycle the runtime profile for a local model path.
     CycleRuntimeProfile(PathBuf),
+    /// Cycle the global runtime selection policy.
+    CycleRuntimeSelection,
     /// Scan local model directories.
     ScanModels,
     /// Open the Hugging Face search pane.

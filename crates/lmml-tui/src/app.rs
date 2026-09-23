@@ -597,6 +597,22 @@ impl App {
                     self.status_message = "No runtime profiles for selected model".to_string();
                 }
             }
+            Action::CycleRuntimeSelection => {
+                self.state.build.runtime_selection = match self.state.build.runtime_selection {
+                    lmml_state::RuntimeSelectionMode::Auto => {
+                        lmml_state::RuntimeSelectionMode::Upstream
+                    }
+                    lmml_state::RuntimeSelectionMode::Upstream => {
+                        lmml_state::RuntimeSelectionMode::Prism
+                    }
+                    lmml_state::RuntimeSelectionMode::Prism => {
+                        lmml_state::RuntimeSelectionMode::Auto
+                    }
+                };
+                self.status_message =
+                    format!("Runtime policy: {}", self.state.build.runtime_selection);
+                self.save_state_after("Runtime policy selected");
+            }
             Action::ScanModels => {
                 self.model_scan_running = true;
                 self.status_message = "Scanning models".to_string();
@@ -753,6 +769,7 @@ impl App {
             }
             KeyCode::Char('?') => Some(Action::ShowHelp),
             KeyCode::Char('q') => Some(Action::Quit),
+            KeyCode::Char('v') => Some(Action::CycleRuntimeSelection),
             KeyCode::Enter if self.first_run_onboarding => Some(Action::StartBuild),
             KeyCode::Char('p') if self.active_tab == Tab::Server => self
                 .selected_server_model()
@@ -3162,6 +3179,31 @@ mod tests {
         assert_eq!(app.state.server.ubatch_size, 128);
         assert_eq!(&app.state.server.extra_args[0..2], ["--parallel", "2"]);
         assert_eq!(app.status_message, "Profile orion-qwen-q8-balanced applied");
+    }
+
+    #[test]
+    fn runtime_policy_key_cycles_and_persists_selection() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let state_path = tempdir.path().join("state.toml");
+        let mut app = App::default();
+        app.state_save_path = Some(state_path.clone());
+
+        for expected in [
+            lmml_state::RuntimeSelectionMode::Upstream,
+            lmml_state::RuntimeSelectionMode::Prism,
+            lmml_state::RuntimeSelectionMode::Auto,
+        ] {
+            let action = app.handle_event(AppEvent::Key(KeyEvent::from(KeyCode::Char('v'))));
+            assert_eq!(action, Some(Action::CycleRuntimeSelection));
+            app.dispatch(action.expect("runtime selection action"));
+            assert_eq!(app.state.build.runtime_selection, expected);
+        }
+
+        let saved = lmml_state::AppState::load_from_path(state_path).expect("saved state");
+        assert_eq!(
+            saved.build.runtime_selection,
+            lmml_state::RuntimeSelectionMode::Auto
+        );
     }
 
     #[test]

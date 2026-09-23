@@ -2,14 +2,14 @@
 source: crates/lmml-tui/src/tabs/mod.rs
 expression: render_app(&app)
 ---
-"┌lmml────────────────────────────────────────────────────────────────────────────────────────────────────────┐"
+"┌lmml | runtime: auto | build: upstream──────────────────────────────────────────────────────────────────────┐"
 "│ 1 Detect │ 2 Build │ 3 Models │ 4 Server │ 5 Settings                                                      │"
 "└────────────────────────────────────────────────────────────────────────────────────────────────────────────┘"
 "┌Models──────────────────────────────────────────┐┌Model Details─────────────────────────────────────────────┐"
 "│Press r to scan local models.                   ││Name: mistral-7b-Q4_K_M.gguf                              │"
 "│Press / to search Hugging Face. Press D to downl││Path: mistral-7b-Q4_K_M.gguf                              │"
 "│Press a to add a model alias. Press x to delete ││Runtime profile: custom/global                            │"
-"│Press p to switch selected model runtime profile││Size: 3.8 GB                                              │"
+"│Press p for model profile. Press v for runtime p││Size: 3.8 GB                                              │"
 "│Models dir: $HOME/.local/share/lmml/model││Quant: Q4_K_M                                             │"
 "│                                                ││Required runtime: upstream                                │"
 "│> mistral-7b-Q4_K_M.gguf  3.8 GB  Q4_K_M  CPU on││Tensor type IDs: none detected                            │"

@@ -1,16 +1,15 @@
 ---
 source: crates/lmml-tui/src/tabs/mod.rs
-assertion_line: 327
 expression: render_app(&app)
 ---
-"┌lmml────────────────────────────────────────────────────────────────────────────────────────────────────────┐"
+"┌lmml | runtime: auto | build: upstream──────────────────────────────────────────────────────────────────────┐"
 "│ 1 Detect │ 2 Build │ 3 Models │ 4 Server │ 5 Settings                                                      │"
 "└────────────────────────────────────────────────────────────────────────────────────────────────────────────┘"
 "┌Models──────────────────────────────────────────┐┌Model Details─────────────────────────────────────────────┐"
 "│Press r to scan local models.                   ││Last model:                                               │"
 "│Press / to search Hugging Face. Press D to downl││                                                          │"
 "│Press a to add a model alias. Press x to delete ││                                                          │"
-"│Press p to switch selected model runtime profile││                                                          │"
+"│Press p for model profile. Press v for runtime p││                                                          │"
 "│Models dir: $HOME/.local/share/lmml/model││                                                          │"
 "│                                                ││                                                          │"
 "│No models found.                                ││                                                          │"

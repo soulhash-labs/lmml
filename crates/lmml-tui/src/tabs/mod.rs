@@ -68,7 +68,14 @@ fn render_tab_bar(area: Rect, app: &App, frame: &mut Frame) {
     frame.render_widget(
         Tabs::new(titles)
             .select(selected)
-            .block(Block::default().title("lmml").borders(Borders::ALL))
+            .block(
+                Block::default()
+                    .title(format!(
+                        "lmml | runtime: {} | build: {}",
+                        app.state.build.runtime_selection, app.state.build.build_flavor
+                    ))
+                    .borders(Borders::ALL),
+            )
             .highlight_style(
                 Style::default()
                     .fg(Color::Cyan)
@@ -325,6 +332,10 @@ mod tests {
         let mut app = App::default();
         app.active_tab = Tab::Models;
         insta::assert_snapshot!("models_empty", render_app(&app));
+
+        app.model_scan_running = true;
+        insta::assert_snapshot!("models_scanning", render_app(&app));
+        app.model_scan_running = false;
 
         app.models = vec![model_entry("mistral-7b-Q4_K_M.gguf", 4_100_000_000)];
         insta::assert_snapshot!("models_populated", render_app(&app));
