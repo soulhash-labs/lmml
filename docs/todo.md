@@ -4,6 +4,99 @@
 
 ---
 
+## Active Work - 2026-09-23
+
+### Immediate TODO
+
+- [ ] When model loading is permitted, admit the real Qwen3.8-27B BF16,
+  Q8_0, Q6_K, and Q4_K_M candidates with CPU-only
+  `llama-server --check-tensors` admission and exact `/v1/models` identity
+  verification.
+- [ ] Confirm all four admitted records appear in the append-only artifact DAG
+  with canonical lineage
+  `fe6a79f82e8c830c801ac5b82b0e18c19c0d6c1e5626534431b4424a8161e1d0`.
+- [ ] Run and persist the deterministic pristine Qwen3.8 baseline from
+  `docs/fixtures/qwen38-baseline-prompts.json` against an admitted artifact.
+- [ ] Start one admitted Qwen3.8 artifact, register the live process and exact
+  endpoint, then issue and inspect a real artifact-bound runtime lease.
+- [ ] Run the first controlled Qwen3.8 successor cycle through training
+  authorization, finite adapter validation, candidate-only merge, live-adapter
+  versus merged-logit equivalence, baseline regression, and admission.
+- [ ] Quantize an admitted successor to the required GGUF variants and confirm
+  that an unadmitted candidate remains unavailable to production selection.
+- [ ] Run a clean Prism hardware acceptance test after each new target build:
+  coherent completion, expected accelerator allocation, exact model identity,
+  and no upstream/Prism library mixing.
+- [ ] Add Vulkan heap telemetry and multi-server operation from the remaining
+  v2 roadmap after the lifecycle acceptance work is complete.
+
+Model admission, baseline generation, and the live lease test remain paused
+under the operator's no-model-start instruction. Candidate conversion and hash
+verification are complete; a candidate must not be presented as runnable until
+backend admission succeeds.
+
+### Completed QC
+
+- [x] Diagnosed Radeon AI PRO R9700 QLoRA GPUVM crashes as the default
+  hipBLASLt path.
+- [x] Stabilized QLoRA training with `ROCM_BLAS_BACKEND=rocblas` and
+  `ROCBLAS_USE_HIPBLASLT=0`.
+- [x] Completed a three-epoch QLoRA run with stable memory and finite losses.
+- [x] Converted and quantized the adapter/model workflow for GGUF deployment.
+- [x] Added LMML model identity, deterministic manifests, artifacts, lineage,
+  verification, and guarded derivation foundations.
+- [x] Produced and hash-verified real Qwen3.8-27B BF16, Q8_0, Q6_K, and
+  Q4_K_M GGUF candidates without marking them admitted.
+- [x] Added artifact-bound runtime registration, capability leases, baseline
+  execution, and successor train/merge/admission gates.
+- [x] Bound artifact admission, runtime registration, and lease issuance to
+  exact artifact bytes and `/v1/models` identity.
+- [x] Added Prism runtime support for PQ2_0 and PTQ1_0 models.
+- [x] Added isolated upstream and Prism source trees, build directories,
+  binaries, libraries, commits, and fingerprints.
+- [x] Added ROCm `gfx1201` and CUDA architecture attestation with kernel
+  evidence, target validation, executable/library hashes, and live hardware
+  probing.
+- [x] Fixed Prism loading for
+  `TERNARY-BONSAI-2-27B-DERISKED-PQ2_0.gguf`.
+- [x] Raised the default context from 4,096 to 262,144 tokens and removed the
+  stale Prism 32K clamp.
+- [x] Published context limits to OpenCode and synchronized OpenCode routing to
+  port 8080.
+- [x] Added TUI engine switching: `v` cycles
+  `auto -> upstream -> prism`; `p` changes model runtime profiles.
+- [x] Updated README, usage documentation, runtime contracts, lifecycle
+  documentation, and TUI snapshots.
+- [x] Completed and pushed the Prism/TUI QC snapshot through commit `86d31df`.
+- [x] Added, validated, and published lifecycle follow-ups `74e79c4` and
+  `dda4217` with this active-work tracker after the `86d31df` QC snapshot.
+
+### What We Learned
+
+- Generic ROCm detection does not prove Prism compatibility. Prism requires
+  separate build-time and launch-time attestation.
+- Runtime selection, build flavor, model profile, and model format are separate
+  concerns and must remain separate in state and UI.
+- PQ2_0/PTQ1_0 GGUF models require Prism; ordinary GGUF models can use upstream
+  llama.cpp.
+- Live accelerator probing is required because cached hardware state can become
+  stale or move between machines.
+- Hashing both `llama-server` and the resolved accelerator library prevents
+  replaced or mismatched binaries from retaining valid-looking attestations.
+- Process identity and health are insufficient for a runtime lease. LMML must
+  bind the PID, artifact bytes, and `/v1/models` endpoint identity together.
+- Canonical Safetensors, derived GGUFs, adapters, candidates, and admission
+  records require separate identities and append-only lineage.
+- A configured 262K context does not prove a request fits. OpenCode must compact
+  or start a new session when a request exceeds the published model limit.
+- Port and model identity must remain synchronized across LMML, OpenCode, and
+  external harness configuration.
+- TUI snapshots expose user-facing regressions that ordinary unit tests miss.
+- The correct abstraction is model-aware runtime brokering, not one globally
+  preferred inference engine.
+
+---
+
 ## Current v2 Status
 
 The active implementation is the Rust workspace under `crates/`, with the
