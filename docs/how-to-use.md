@@ -100,14 +100,14 @@ On the Server tab, press `s`.
 A healthy local server usually reports:
 
 ```text
-Status: Ready { url: "http://127.0.0.1:1200" }
+Status: Ready { url: "http://127.0.0.1:8080" }
 ```
 
 Verify from a shell:
 
 ```sh
-curl -fsS http://127.0.0.1:1200/health
-curl -fsS http://127.0.0.1:1200/v1/models
+curl -fsS http://127.0.0.1:8080/health
+curl -fsS http://127.0.0.1:8080/v1/models
 ```
 
 Large GGUF files and long-context profiles can take several minutes before
@@ -127,10 +127,10 @@ Agents should use lmml as a local OpenAI-compatible HTTP endpoint.
 For the TUI-managed server:
 
 ```text
-http://127.0.0.1:1200/v1
+http://127.0.0.1:8080/v1
 ```
 
-Use this when the lmml Server tab says ready on port `1200`.
+Use this when the lmml Server tab says ready on port `8080`.
 
 ### OpenCode route
 
@@ -151,10 +151,10 @@ If OpenCode is intentionally using the TUI-managed server, provider `baseURL`
 should be:
 
 ```json
-"baseURL": "http://127.0.0.1:1200/v1"
+"baseURL": "http://127.0.0.1:8080/v1"
 ```
 
-The public OpenCode setup uses the active TUI-managed server on `1200`. If an
+The public OpenCode setup uses the active TUI-managed server on `8080`. If an
 operator configures another port, keep all provider lanes aligned with that one
 active server.
 
@@ -450,8 +450,8 @@ mkdir -p /home/user/.local/share/lmml/llama-slots
 Check the provider endpoint and timeout:
 
 ```sh
-curl -fsS http://127.0.0.1:1200/health
-curl -fsS http://127.0.0.1:1200/v1/models
+curl -fsS http://127.0.0.1:8080/health
+curl -fsS http://127.0.0.1:8080/v1/models
 ```
 
 OpenCode provider timeout should be long enough for local large-context prompt

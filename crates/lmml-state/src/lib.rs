@@ -101,7 +101,7 @@ impl AppState {
             path: path.to_path_buf(),
             source,
         })?;
-        state.repair_legacy_build_binary();
+        state.repair_legacy_state();
         Ok(state)
     }
 
@@ -120,7 +120,7 @@ impl AppState {
             path: path.to_path_buf(),
             source,
         })?;
-        state.repair_legacy_build_binary();
+        state.repair_legacy_state();
         Ok(state)
     }
 
@@ -145,10 +145,18 @@ impl AppState {
         Self::default().save_to_path(path)
     }
 
-    fn repair_legacy_build_binary(&mut self) {
+    fn repair_legacy_state(&mut self) {
         let legacy = legacy_server_binary(&self.build.source_dir);
         if self.build.binary == legacy {
             self.build.binary = expected_server_binary(&self.build.source_dir);
+        }
+
+        // Model profiles created before the single-server 8080 default could
+        // silently override the global port with the retired 1200 endpoint.
+        for profile in &mut self.model.profiles {
+            if profile.server.host == "127.0.0.1" && profile.server.port == 1200 {
+                profile.server.port = 8080;
+            }
         }
     }
 }
@@ -790,7 +798,7 @@ fn gemma4_mtp_server_config(slot_save_path: &str) -> ServerConfig {
         .join("models")
         .join("mtp-gemma-4-12B-it.gguf");
     ServerConfig {
-        port: 1200,
+        port: 8080,
         host: "127.0.0.1".to_string(),
         ctx_size: 73_728,
         n_gpu_layers: 99,
@@ -889,7 +897,7 @@ fn r9700_qwen35_27b_q6_deep_server_config(slot_save_path: &str) -> ServerConfig 
 
 fn qwen38_mtp_server_config(slot_save_path: &str) -> ServerConfig {
     ServerConfig {
-        port: 1200,
+        port: 8080,
         host: "127.0.0.1".to_string(),
         ctx_size: 16_384,
         n_gpu_layers: 999,
@@ -951,7 +959,7 @@ fn qwen_server_config(
     slot_save_path: &str,
 ) -> ServerConfig {
     ServerConfig {
-        port: 1200,
+        port: 8080,
         host: "127.0.0.1".to_string(),
         ctx_size,
         n_gpu_layers: -1,
@@ -2223,6 +2231,33 @@ mod tests {
             loaded.build.binary,
             expected_server_binary(&state.build.source_dir)
         );
+    }
+
+    #[test]
+    fn load_migrates_legacy_local_model_profile_port() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir.path().join("lmml").join("state.toml");
+        let mut state = sample_state();
+        state.model.profiles.push(ModelRuntimeProfile {
+            name: "legacy-qwen".to_string(),
+            model: PathBuf::from("model.gguf"),
+            server: ServerConfig {
+                port: 1200,
+                host: "127.0.0.1".to_string(),
+                ..ServerConfig::default()
+            },
+        });
+        state.save_to_path(&path).expect("save legacy state");
+
+        let loaded = AppState::load_from_path(&path).expect("load migrated state");
+
+        let profile = loaded
+            .model
+            .profiles
+            .iter()
+            .find(|profile| profile.name == "legacy-qwen")
+            .expect("migrated profile");
+        assert_eq!(profile.server.port, 8080);
     }
 
     #[test]
