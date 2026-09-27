@@ -586,7 +586,8 @@ impl App {
                     .cycle_runtime_profile_for_path(&path)
                     .cloned()
                 {
-                    self.state.server = resolved_profile_server(&path, &profile);
+                    let endpoint = self.state.server.clone();
+                    self.state.server = resolved_profile_server(&path, &profile, &endpoint);
                     self.status_message = if running {
                         format!("Profile {}; restart server to apply", profile.name)
                     } else {
@@ -1530,7 +1531,7 @@ impl App {
         self.state
             .model
             .runtime_profile_for_path(&model.path)
-            .map(|profile| resolved_profile_server(&model.path, profile))
+            .map(|profile| resolved_profile_server(&model.path, profile, &self.state.server))
             .unwrap_or_else(|| self.state.server.clone())
     }
 
@@ -1575,7 +1576,8 @@ impl App {
         self.state.model.last_used = path.clone();
         if let Some(profile) = self.state.model.runtime_profile_for_path(&path).cloned() {
             self.state.model.active_profile = profile.name.clone();
-            self.state.server = resolved_profile_server(&path, &profile);
+            let endpoint = self.state.server.clone();
+            self.state.server = resolved_profile_server(&path, &profile, &endpoint);
             true
         } else {
             false
@@ -1684,8 +1686,12 @@ fn recommended_ngl_from_fit(fit: &VramFit) -> i32 {
 fn resolved_profile_server(
     model_path: &Path,
     profile: &lmml_state::ModelRuntimeProfile,
+    endpoint: &lmml_state::ServerConfig,
 ) -> lmml_state::ServerConfig {
     let mut server = profile.server.clone();
+    // Profiles own tuning; the global server endpoint flows through them.
+    server.host = endpoint.host.clone();
+    server.port = endpoint.port;
     let Some(model_dir) = model_path.parent() else {
         return server;
     };
@@ -3057,6 +3063,8 @@ mod tests {
     #[test]
     fn server_config_uses_matching_model_runtime_profile() {
         let mut app = App::default();
+        app.state.server.host = "127.0.0.1".to_string();
+        app.state.server.port = 8089;
         app.state.server.chat_template = "/templates/global-qwen.jinja".to_string();
         app.state.server.jinja = true;
         app.state.model.profiles = vec![lmml_state::ModelRuntimeProfile {
@@ -3084,6 +3092,8 @@ mod tests {
         ));
 
         assert_eq!(config.chat_template, None);
+        assert_eq!(config.host, "127.0.0.1");
+        assert_eq!(config.port, 8089);
         assert!(config.jinja);
         assert_eq!(config.ctx_size, 262_144);
         assert_eq!(config.extra_args, vec!["--parallel", "1"]);

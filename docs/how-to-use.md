@@ -154,9 +154,12 @@ should be:
 "baseURL": "http://127.0.0.1:8080/v1"
 ```
 
-The public OpenCode setup uses the active TUI-managed server on `8080`. If an
-operator configures another port, keep all provider lanes aligned with that one
-active server.
+The endpoint is global. Change `host` or `port` in Settings and the new value
+flows through every selected model and runtime profile. Profiles provide model
+tuning such as context size, batch size, and extra arguments; they do not
+override the endpoint. For example, setting `port` to `8089` makes LMML serve
+on `http://127.0.0.1:8089`, and OpenCode should use
+`http://127.0.0.1:8089/v1`.
 
 ### Agent context policy
 

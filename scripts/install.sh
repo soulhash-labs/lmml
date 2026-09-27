@@ -618,7 +618,8 @@ if [ "$LMML_PROFILE_HINT" = "bc250-qwen35-9b-q4km-vulkan" ]; then
   echo "    if your model is named differently:  rename or symlink it to Qwen3.5-9B-Q4_K_M.gguf"
   echo
   echo "  TUI runtime profile:"
-  echo "    bc250-qwen9b-q4km-vulkan:            host 0.0.0.0, port 8080"
+  echo "    bc250-qwen9b-q4km-vulkan:            host 0.0.0.0, default port 8080"
+  echo "    endpoint:                             change host/port in LMML Settings"
   echo "    ctx_size:                            4096"
   echo "    gpu layers:                          99"
   echo "    threads:                             6"
@@ -629,5 +630,5 @@ if [ "$LMML_PROFILE_HINT" = "bc250-qwen35-9b-q4km-vulkan" ]; then
   echo
   echo "  Service guidance:"
   echo "    See docs/lan-client-install.md for a systemd unit that starts lmml/llama-server on boot."
-  echo "    Exposing 0.0.0.0:8080 is for trusted LANs only; use firewall rules on shared networks."
+  echo "    Exposing 0.0.0.0 is for trusted LANs only; choose a port and use firewall rules on shared networks."
 fi

@@ -986,7 +986,11 @@ fn qwen_server_config(
     }
 }
 
-/// Server settings that should apply when a matching model is selected.
+/// Model-specific server tuning that should apply when a matching model is selected.
+///
+/// The active global [`ServerConfig`] owns the listener host and port. The TUI
+/// overlays those endpoint fields after selecting this profile, so changing
+/// Settings applies consistently to every model and runtime.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelRuntimeProfile {
@@ -994,7 +998,8 @@ pub struct ModelRuntimeProfile {
     pub name: String,
     /// Exact GGUF path or file name this profile applies to.
     pub model: PathBuf,
-    /// Server settings to apply for this model.
+    /// Model tuning to apply for this model. Host and port are legacy fields;
+    /// the active global server endpoint takes precedence.
     pub server: ServerConfig,
 }
 

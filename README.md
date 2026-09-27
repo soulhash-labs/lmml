@@ -256,12 +256,13 @@ curl -fsSL http://192.168.1.100:8000/preflight.sh | \
 
 ### OpenCode
 
-OpenCode is the first-class local coding harness target. Keep the TUI-managed
-server on port `8080` by default and point OpenCode at the OpenAI-compatible
-base URL:
+OpenCode is the first-class local coding harness target. LMML defaults to port
+`8080`; the endpoint is configurable in TUI Settings and flows through every
+model profile and runtime. Point OpenCode at the active OpenAI-compatible base
+URL:
 
 ```text
-baseURL: http://127.0.0.1:8080/v1
+baseURL: http://127.0.0.1:<lmml-port>/v1
 model: llamacpp/<your-gguf-model-name>
 ```
 
@@ -282,11 +283,12 @@ LMML publishes the model limit to OpenCode as `context: 262144` and
 OpenCode session has already grown beyond that limit, compact it or start a
 new session; restarting the server does not shrink the old session history.
 
-Quick verification:
+Quick verification (replace `<lmml-port>` with the port shown on LMML's Server
+tab):
 
 ```sh
-curl -fsS http://127.0.0.1:8080/health
-curl -fsS http://127.0.0.1:8080/v1/models
+curl -fsS http://127.0.0.1:<lmml-port>/health
+curl -fsS http://127.0.0.1:<lmml-port>/v1/models
 opencode models llamacpp
 ```
 

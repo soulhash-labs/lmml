@@ -115,12 +115,16 @@ The built-in profile is:
 ```text
 bc250-qwen9b-q4km-vulkan
 host: 0.0.0.0
-port: 8080
+default port: 8080
 ctx_size: 4096
 gpu layers: 99
 threads: 6
 parallel: 1
 ```
+
+The host and port are global LMML server settings, not fixed model-profile
+values. Change them in the TUI Settings screen; the selected model and runtime
+continue using the same endpoint.
 
 Equivalent raw llama.cpp command shape:
 

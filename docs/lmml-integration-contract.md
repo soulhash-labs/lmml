@@ -94,7 +94,7 @@ Public profile fields should remain generic and portable:
 name = "example"
 model = "~/.local/share/lmml/models/model.gguf"
 host = "127.0.0.1"
-port = 1200
+port = 8080
 ctx_size = 65536
 gpu_layers = -1
 batch_size = 512
@@ -114,8 +114,10 @@ Profile rules:
   multiple slots only for bounded fanout.
 - KV cache quantization should be explicit for long-context profiles.
 - `extra_args` are appended after LMML-owned args but should not duplicate them.
-- Model-family overrides must be tied to a specific model/profile, not applied
-  globally.
+- The active LMML server host and port are global endpoint settings. Model
+  profiles may provide tuning, but must not override the selected endpoint.
+- If the operator changes the port, clients must use the new value from the
+  LMML Server tab or the configured runtime handoff.
 
 ## Runtime Flavors
 
