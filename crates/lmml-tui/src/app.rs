@@ -278,6 +278,8 @@ impl App {
         first_run_onboarding: bool,
     ) -> Self {
         state.model.ensure_builtin_profiles();
+        let configured_host = state.server.host.clone();
+        let configured_port = state.server.port;
         if let Some(profile) = state
             .model
             .runtime_profile_for_path(&state.model.last_used)
@@ -285,6 +287,8 @@ impl App {
         {
             state.model.active_profile = profile.name;
             state.server = profile.server;
+            state.server.host = configured_host;
+            state.server.port = configured_port;
         }
         let onboarding_models_dir_buffer = state.model.models_dir.to_string_lossy().into_owned();
         let onboarding_port_buffer = state.server.port.to_string();

@@ -18,6 +18,13 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Child;
 use tokio::sync::{mpsc, watch, Mutex};
 
+mod properties;
+
+pub use properties::{
+    query_server_properties, verify_context_capacity, verify_context_capacity_endpoint,
+    ServerProperties,
+};
+
 /// Default llama-server readiness timeout in seconds.
 ///
 /// Large GGUF files can spend multiple minutes loading and allocating KV cache
@@ -190,6 +197,27 @@ impl ServerManager {
                         reason,
                     });
                 }
+                let expected_context = context_per_slot(&config);
+                if let Err(error) = verify_context_capacity(
+                    &config.host,
+                    config.port,
+                    expected_context,
+                    config.api_key.as_deref(),
+                )
+                .await
+                {
+                    tracing::error!(error = %error, "server context verification failed");
+                    let child = Arc::new(Mutex::new(Some(child)));
+                    let _ignored = stop_child(child).await;
+                    let reason = error.to_string();
+                    let _ignored = status_tx.send(ServerStatus::Failed {
+                        reason: reason.clone(),
+                    });
+                    return Err(ServerError::Startup {
+                        elapsed: started_at.elapsed(),
+                        reason,
+                    });
+                }
                 tracing::info!(url = %url, "server ready");
                 let _ignored = status_tx.send(ServerStatus::Ready { url });
             }
@@ -243,6 +271,18 @@ fn flag_values<'a>(args: &'a [String], flag: &'a str) -> impl Iterator<Item = &'
     args.windows(2)
         .filter(move |window| window[0] == flag)
         .map(|window| Path::new(&window[1]))
+}
+
+fn context_per_slot(config: &ServerConfig) -> u32 {
+    let parallel = config
+        .extra_args
+        .windows(2)
+        .rev()
+        .find(|args| args[0] == "--parallel")
+        .and_then(|args| args[1].parse::<u32>().ok())
+        .filter(|parallel| *parallel > 0)
+        .unwrap_or(1);
+    config.ctx_size / parallel
 }
 
 /// Check whether a host/port can be bound before spawning llama-server.
@@ -631,6 +671,43 @@ pub enum ServerError {
         expected: PathBuf,
         /// Model identifiers returned by `/v1/models`.
         reported: Vec<String>,
+    },
+    /// The ready server's properties endpoint could not be queried or decoded.
+    #[error("failed to query llama-server properties at {url}: {source}")]
+    PropertiesRequest {
+        /// `/props` URL.
+        url: String,
+        /// HTTP transport or JSON decoding error.
+        #[source]
+        source: reqwest::Error,
+    },
+    /// The ready server rejected its properties request.
+    #[error("llama-server properties endpoint {url} returned HTTP {status}")]
+    PropertiesStatus {
+        /// `/props` URL.
+        url: String,
+        /// HTTP status code.
+        status: u16,
+    },
+    /// The properties response omitted a required numeric field.
+    #[error("llama-server properties at {url} did not include {field}")]
+    PropertiesShape {
+        /// `/props` URL.
+        url: String,
+        /// Missing JSON field.
+        field: &'static str,
+    },
+    /// The live server exposes less per-slot context than LMML would publish.
+    #[error(
+        "llama-server exposes {actual} tokens per slot across {slots} slot(s), but LMML requires at least {expected}"
+    )]
+    ContextCapacityMismatch {
+        /// Minimum per-slot context required by the selected profile.
+        expected: u32,
+        /// Per-slot context reported by `/props`.
+        actual: u32,
+        /// Parallel slots reported by `/props`.
+        slots: u32,
     },
     /// Readiness polling timed out.
     #[error("server did not become ready within {timeout:?}")]

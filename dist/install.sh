@@ -210,8 +210,8 @@ case "$INSTALL_MODE" in
 esac
 
 case "$LMML_PROFILE_HINT" in
-  ""|orion-qwen35-4b-q8|quadro-m6000-qwen35-9b-q8|radeon-r9700-qwen35-9b-q8|qwen36-27b-q4|qwen36-35b-a3b-q4|gemma4-12b-mtp-q4km|bc250-qwen35-9b-q4km-vulkan) ;;
-  *) fail "Unsupported LMML_PROFILE_HINT=$LMML_PROFILE_HINT" "Supported hints: orion-qwen35-4b-q8, quadro-m6000-qwen35-9b-q8, radeon-r9700-qwen35-9b-q8, qwen36-27b-q4, qwen36-35b-a3b-q4, gemma4-12b-mtp-q4km, bc250-qwen35-9b-q4km-vulkan." ;;
+  ""|orion-qwen35-4b-q8|quadro-m6000-qwen35-9b-q8|radeon-r9700-qwen35-9b-q8|qwen38-27b-mtp|qwen36-27b-q4|qwen36-35b-a3b-q4|gemma4-12b-mtp-q4km|bc250-qwen35-9b-q4km-vulkan) ;;
+  *) fail "Unsupported LMML_PROFILE_HINT=$LMML_PROFILE_HINT" "Supported hints: orion-qwen35-4b-q8, quadro-m6000-qwen35-9b-q8, radeon-r9700-qwen35-9b-q8, qwen38-27b-mtp, qwen36-27b-q4, qwen36-35b-a3b-q4, gemma4-12b-mtp-q4km, bc250-qwen35-9b-q4km-vulkan." ;;
 esac
 
 case "$LMML_CHECKSUM_VERIFY" in
@@ -549,6 +549,24 @@ if [ "$LMML_PROFILE_HINT" = "radeon-r9700-qwen35-9b-q8" ]; then
   echo "    Keep ROCm packages from the same AMD 7.14 tree."
   echo "    Use embedded GGUF chat templates by leaving lmml chat_template empty unless a per-model override is proven."
   echo "    Two slots split the configured context pool; use the deep profile when one full-depth slot matters more than concurrency."
+fi
+
+if [ "$LMML_PROFILE_HINT" = "qwen38-27b-mtp" ]; then
+  echo
+  echo "  Qwen3.8 27B native MTP profile target:"
+  echo "    model variants:                    Q4_K_M, Q6_K, or Q8_0 GGUF"
+  echo "    llama-server ctx_size:              262144 tokens"
+  echo "    llama-server parallel slots:        1"
+  echo "    native speculation:                 draft-mtp, max 3 tokens"
+  echo "    recommended KV/cache args:          [\"-ctk\", \"q8_0\", \"-ctv\", \"q8_0\"]"
+  echo "    OpenCode endpoint:                  http://127.0.0.1:8089/v1 or active LMML port"
+  echo "    required readiness evidence:        log line n_ctx_slot = 262144"
+  echo "    required model source:               Blackfrost-AI Qwen3.8 GGUF"
+  echo
+  echo "  Notes:"
+  echo "    The TUI context display is configuration only; verify the live server slot size."
+  echo "    LMML verifies /props before publishing the model to OpenCode."
+  echo "    Restart OpenCode after LMML synchronizes model or endpoint settings."
 fi
 
 if [ "$LMML_PROFILE_HINT" = "qwen36-27b-q4" ] || [ "$LMML_PROFILE_HINT" = "qwen36-35b-a3b-q4" ]; then

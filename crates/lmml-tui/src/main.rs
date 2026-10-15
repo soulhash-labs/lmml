@@ -930,6 +930,27 @@ async fn run_runtime_configure(state: &lmml_state::AppState, args: RuntimeConfig
                         return 1;
                     }
                 }
+                let expected_context = match runtime_cli::opencode_context_per_slot(state) {
+                    Ok(context) => context,
+                    Err(error) => {
+                        eprintln!("failed to resolve OpenCode context capacity: {error}");
+                        return 1;
+                    }
+                };
+                match lmml_server::verify_context_capacity(host, port, expected_context, api_key)
+                    .await
+                {
+                    Ok(properties) => println!(
+                        "verified live llama-server context: {} tokens per slot across {} slot(s)",
+                        properties.context_per_slot, properties.total_slots
+                    ),
+                    Err(error) => {
+                        eprintln!(
+                            "refusing to publish OpenCode context metadata because the live server does not match LMML: {error}"
+                        );
+                        return 1;
+                    }
+                }
             }
             if !args.yes && !confirm("Apply OpenCode config changes? [y/N] ") {
                 println!("aborted; no files written");

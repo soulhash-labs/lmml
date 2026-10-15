@@ -333,9 +333,24 @@ pub async fn start_profile(
     let readiness =
         match lmml_server::wait_for_ready(&profile.host, profile.port, startup_timeout).await {
             Ok(url) => {
-                lmml_server::verify_served_model(&profile.host, profile.port, &profile.model, None)
+                match lmml_server::verify_served_model(
+                    &profile.host,
+                    profile.port,
+                    &profile.model,
+                    None,
+                )
+                .await
+                {
+                    Ok(_) => lmml_server::verify_context_capacity(
+                        &profile.host,
+                        profile.port,
+                        profile.context_per_slot(),
+                        None,
+                    )
                     .await
-                    .map(|_| url)
+                    .map(|_| url),
+                    Err(error) => Err(error),
+                }
             }
             Err(error) => Err(error),
         };
@@ -950,6 +965,8 @@ fn desired_dual_provider_object(
 }
 
 fn desired_provider(profile: &RuntimeProfile, model: &str, label: &str) -> Value {
+    let context = profile.context_per_slot();
+    let output = 16_384.min((context / 4).max(1));
     json!({
         "npm": "@ai-sdk/openai-compatible",
         "name": "lmml llama.cpp",
@@ -962,12 +979,17 @@ fn desired_provider(profile: &RuntimeProfile, model: &str, label: &str) -> Value
             (model): {
                 "name": format!("{model} ({label})"),
                 "limit": {
-                    "context": profile.ctx_size,
-                    "output": 16_384
+                    "context": context,
+                    "output": output
                 }
             }
         }
     })
+}
+
+/// Return the context capacity LMML will publish for one OpenCode request.
+pub fn opencode_context_per_slot(state: &AppState) -> Result<u32, RuntimeCliError> {
+    Ok(opencode_primary_profile(state)?.context_per_slot())
 }
 
 fn opencode_model_name(
@@ -2005,6 +2027,38 @@ mod tests {
             updated["provider"]["llamacpp"]["models"]["current.gguf"]["limit"]["output"],
             16_384
         );
+    }
+
+    #[test]
+    fn opencode_provider_advertises_per_slot_context() {
+        let mut state = AppState::default();
+        state.runtime.mode = OpenCodeRuntimeMode::SingleServer;
+        state.model.last_used = PathBuf::from("/models/current.gguf");
+        state.server.ctx_size = 262_144;
+        state.server.extra_args = vec!["--parallel".to_string(), "2".to_string()];
+
+        let rendered = desired_opencode_config(&state).expect("OpenCode config");
+        let limits = &rendered["provider"]["llamacpp"]["models"]["current.gguf"]["limit"];
+
+        assert_eq!(limits["context"], 131_072);
+        assert_eq!(limits["output"], 16_384);
+        assert_eq!(opencode_context_per_slot(&state).expect("context"), 131_072);
+    }
+
+    #[test]
+    fn small_per_slot_context_reduces_advertised_output_budget() {
+        let profile = RuntimeProfile {
+            model: PathBuf::from("/models/current.gguf"),
+            ctx_size: 32_768,
+            parallel: 2,
+            ..RuntimeProfile::default()
+        };
+
+        let provider = desired_provider(&profile, "current.gguf", "test");
+        let limits = &provider["models"]["current.gguf"]["limit"];
+
+        assert_eq!(limits["context"], 16_384);
+        assert_eq!(limits["output"], 4_096);
     }
 
     #[test]

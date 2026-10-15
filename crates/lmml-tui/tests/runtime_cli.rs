@@ -248,6 +248,8 @@ PORT="8080"
 MODE="ready"
 PID_FILE=""
 MODEL=""
+CTX="4096"
+PARALLEL="1"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --host) shift; HOST="$1" ;;
@@ -255,7 +257,9 @@ while [ "$#" -gt 0 ]; do
     --stub-mode) shift; MODE="$1" ;;
     --pid-file) shift; PID_FILE="$1" ;;
     --model|-m) shift; MODEL="$1" ;;
-    --ctx-size|--context-size|-c|-ngl|--n-gpu-layers|--batch-size|-b|--threads|-t|--ubatch-size|--micro-batch-size|-ub) shift ;;
+    --ctx-size|--context-size|-c) shift; CTX="$1" ;;
+    --parallel) shift; PARALLEL="$1" ;;
+    -ngl|--n-gpu-layers|--batch-size|-b|--threads|-t|--ubatch-size|--micro-batch-size|-ub) shift ;;
   esac
   shift
 done
@@ -267,7 +271,7 @@ if [ "$MODE" = "never-child" ]; then
   exit 0
 fi
 echo "stub runtime ready on $HOST:$PORT"
-python3 -u - "$HOST" "$PORT" "$MODEL" <<'PY' &
+python3 -u - "$HOST" "$PORT" "$MODEL" "$CTX" "$PARALLEL" <<'PY' &
 import http.server
 import json
 import os
@@ -276,6 +280,8 @@ import sys
 host = sys.argv[1]
 port = int(sys.argv[2])
 model = os.path.basename(sys.argv[3])
+context = int(sys.argv[4]) // int(sys.argv[5])
+parallel = int(sys.argv[5])
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -285,6 +291,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(b"ok")
         elif self.path == "/v1/models":
             body = json.dumps({"data": [{"id": model}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path == "/props":
+            body = json.dumps({
+                "default_generation_settings": {"n_ctx": context},
+                "total_slots": parallel,
+            }).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))

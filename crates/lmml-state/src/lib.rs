@@ -16,6 +16,7 @@ const STATE_FILE_NAME: &str = "state.toml";
 const LOG_FILE_NAME: &str = "lmml.log";
 const OPENCODE_PROFILE: &str = "opencode";
 const OPENCODE_FAST_PROFILE: &str = "opencode-fast";
+const QWEN38_CONTEXT_SIZE: u32 = 262_144;
 
 /// Complete persisted application state.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -483,14 +484,21 @@ impl ModelState {
             env::var_os("USERPROFILE"),
         );
         let slot_save_path = data_dir.join("llama-slots").to_string_lossy().into_owned();
-        let builtins = builtin_model_profiles(slot_save_path);
+        let builtins = builtin_model_profiles(slot_save_path.clone());
 
         for builtin in builtins {
-            let exists = self
+            let existing = self
                 .profiles
-                .iter()
-                .any(|profile| profile.name == builtin.name && profile.model == builtin.model);
-            if !exists {
+                .iter_mut()
+                .find(|profile| profile.name == builtin.name && profile.model == builtin.model);
+            if let Some(existing) = existing {
+                let legacy = legacy_qwen38_mtp_server_config(&slot_save_path);
+                if is_qwen38_profile_name(&existing.name)
+                    && is_legacy_qwen38_server_config(&existing.server, &legacy)
+                {
+                    existing.server = builtin.server;
+                }
+            } else {
                 self.profiles.push(builtin);
             }
         }
@@ -896,6 +904,18 @@ fn r9700_qwen35_27b_q6_deep_server_config(slot_save_path: &str) -> ServerConfig 
 }
 
 fn qwen38_mtp_server_config(slot_save_path: &str) -> ServerConfig {
+    let mut server = legacy_qwen38_mtp_server_config(slot_save_path);
+    server.ctx_size = QWEN38_CONTEXT_SIZE;
+    server.extra_args.extend([
+        "-ctk".to_string(),
+        "q8_0".to_string(),
+        "-ctv".to_string(),
+        "q8_0".to_string(),
+    ]);
+    server
+}
+
+fn legacy_qwen38_mtp_server_config(slot_save_path: &str) -> ServerConfig {
     ServerConfig {
         port: 8080,
         host: "127.0.0.1".to_string(),
@@ -926,6 +946,28 @@ fn qwen38_mtp_server_config(slot_save_path: &str) -> ServerConfig {
             "20".to_string(),
         ],
     }
+}
+
+fn is_qwen38_profile_name(name: &str) -> bool {
+    matches!(
+        name,
+        "qwen38-27b-mtp-q4km" | "qwen38-27b-mtp-q6" | "qwen38-27b-mtp-q8"
+    )
+}
+
+fn is_legacy_qwen38_server_config(server: &ServerConfig, legacy: &ServerConfig) -> bool {
+    server == legacy
+        || (server.ctx_size == legacy.ctx_size
+            && server.n_gpu_layers == legacy.n_gpu_layers
+            && server.batch_size == legacy.batch_size
+            && server.ubatch_size == legacy.ubatch_size
+            && server.threads == legacy.threads
+            && server.flash_attn == legacy.flash_attn
+            && server.mlock == legacy.mlock
+            && server.api_key == legacy.api_key
+            && server.jinja == legacy.jinja
+            && server.chat_template == legacy.chat_template
+            && server.extra_args == legacy.extra_args)
 }
 
 fn qwen_kv_unified_server_config(
@@ -1261,6 +1303,25 @@ impl RuntimeProfile {
             .and_then(|name| name.to_str())
             .unwrap_or("")
             .to_string()
+    }
+
+    /// Return the configured number of parallel llama-server slots.
+    ///
+    /// An explicit `--parallel` argument wins because LMML forwards
+    /// `extra_args` after its managed flags.
+    pub fn parallel_slots(&self) -> usize {
+        self.extra_args
+            .windows(2)
+            .rev()
+            .find(|args| args[0] == "--parallel")
+            .and_then(|args| args[1].parse::<usize>().ok())
+            .filter(|parallel| *parallel > 0)
+            .unwrap_or(self.parallel.max(1))
+    }
+
+    /// Return the maximum context available to one parallel request slot.
+    pub fn context_per_slot(&self) -> u32 {
+        self.ctx_size / u32::try_from(self.parallel_slots()).unwrap_or(u32::MAX)
     }
 }
 
@@ -2031,7 +2092,7 @@ mod tests {
             .into_iter()
             .find(|profile| profile.name == "qwen38-27b-mtp-q6")
             .expect("Qwen3.8 Q6 native MTP profile");
-        assert_eq!(q6.server.ctx_size, 16_384);
+        assert_eq!(q6.server.ctx_size, QWEN38_CONTEXT_SIZE);
 
         let profile = model_state
             .runtime_profiles_for_path(Path::new("/models/Qwen3.8-27B-ABLITERATED-Q8_0.gguf"))
@@ -2040,8 +2101,18 @@ mod tests {
             .expect("Qwen3.8 native MTP profile");
 
         assert_eq!(profile.server.n_gpu_layers, 999);
-        assert_eq!(profile.server.ctx_size, 16_384);
+        assert_eq!(profile.server.ctx_size, QWEN38_CONTEXT_SIZE);
         assert!(profile.server.jinja);
+        assert!(profile
+            .server
+            .extra_args
+            .windows(2)
+            .any(|args| args == ["-ctk", "q8_0"]));
+        assert!(profile
+            .server
+            .extra_args
+            .windows(2)
+            .any(|args| args == ["-ctv", "q8_0"]));
         assert!(profile
             .server
             .extra_args
@@ -2058,6 +2129,54 @@ mod tests {
             .extra_args
             .iter()
             .any(|arg| arg == "--spec-draft-model"));
+    }
+
+    #[test]
+    fn legacy_qwen38_profiles_migrate_without_overwriting_custom_profiles() {
+        let data_dir = default_data_dir_from_env(
+            env::var_os("XDG_DATA_HOME"),
+            env::var_os("HOME"),
+            env::var_os("USERPROFILE"),
+        );
+        let slot_save_path = data_dir.join("llama-slots").to_string_lossy().into_owned();
+        let mut customized = legacy_qwen38_mtp_server_config(&slot_save_path);
+        customized.threads = 20;
+        let mut model_state = ModelState {
+            profiles: vec![
+                ModelRuntimeProfile {
+                    name: "qwen38-27b-mtp-q4km".to_string(),
+                    model: PathBuf::from("Qwen3.8-27B-ABLITERATED-Q4_K_M.gguf"),
+                    server: legacy_qwen38_mtp_server_config(&slot_save_path),
+                },
+                ModelRuntimeProfile {
+                    name: "qwen38-27b-mtp-q6".to_string(),
+                    model: PathBuf::from("Qwen3.8-27B-ABLITERATED-Q6_K.gguf"),
+                    server: customized.clone(),
+                },
+            ],
+            ..ModelState::default()
+        };
+
+        model_state.ensure_builtin_profiles();
+
+        let migrated = model_state
+            .profiles
+            .iter()
+            .find(|profile| profile.name == "qwen38-27b-mtp-q4km")
+            .expect("migrated Qwen3.8 profile");
+        assert_eq!(migrated.server.ctx_size, QWEN38_CONTEXT_SIZE);
+        assert!(migrated
+            .server
+            .extra_args
+            .windows(2)
+            .any(|args| args == ["-ctk", "q8_0"]));
+
+        let preserved = model_state
+            .profiles
+            .iter()
+            .find(|profile| profile.name == "qwen38-27b-mtp-q6")
+            .expect("custom Qwen3.8 profile");
+        assert_eq!(preserved.server, customized);
     }
 
     #[test]

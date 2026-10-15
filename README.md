@@ -278,10 +278,17 @@ The command verifies the live model before writing, preserves unrelated
 settings, removes the fake `llamacpp_fast` route in single-server mode, and
 creates timestamped backups. Restart OpenCode after synchronization.
 
-LMML publishes the model limit to OpenCode as `context: 262144` and
-`output: 16384`. A request cannot exceed 262,144 tokens. If an existing
-OpenCode session has already grown beyond that limit, compact it or start a
-new session; restarting the server does not shrink the old session history.
+LMML publishes the model limit to OpenCode as a per-slot `context` value and
+an `output` value. The Qwen3.8 single-slot profile publishes `context: 262144`
+and `output: 16384`. LMML also queries llama-server `/props` before updating
+OpenCode routing, so a server that actually started with a smaller slot is
+rejected instead of being advertised as a 262K endpoint.
+
+After reinstalling or changing a Qwen3.8 profile, check the LMML server log for
+`n_ctx_slot = 262144`. The TUI’s configured context is not proof that the
+running process received it. If an existing OpenCode session has already grown
+beyond the usable window, compact it or start a new session; restarting the
+server does not shrink old session history.
 
 Quick verification (replace `<lmml-port>` with the port shown on LMML's Server
 tab):
@@ -470,11 +477,15 @@ NextN/MTP block. The profiles enable `draft-mtp` with up to three speculative
 tokens and do not add a separate draft model:
 
 ```text
-qwen38-27b-mtp-q4km: Qwen3.8-27B-ABLITERATED-Q4_K_M.gguf, ctx 16384
-qwen38-27b-mtp-q6:   Qwen3.8-27B-ABLITERATED-Q6_K.gguf, ctx 16384
-qwen38-27b-mtp-q8:   Qwen3.8-27B-ABLITERATED-Q8_0.gguf, ctx 16384
-args: --spec-type draft-mtp --spec-draft-n-max 3 --jinja -fa on
+qwen38-27b-mtp-q4km: Qwen3.8-27B-ABLITERATED-Q4_K_M.gguf, ctx 262144
+qwen38-27b-mtp-q6:   Qwen3.8-27B-ABLITERATED-Q6_K.gguf, ctx 262144
+qwen38-27b-mtp-q8:   Qwen3.8-27B-ABLITERATED-Q8_0.gguf, ctx 262144
+args: --spec-type draft-mtp --spec-draft-n-max 3 --jinja -fa on -ctk q8_0 -ctv q8_0
 ```
+
+These are single-slot profiles. LMML publishes context limits to OpenCode per
+slot and verifies the live llama-server `/props` value before updating harness
+routing, so a short-context server cannot be advertised as a 262K endpoint.
 
 The ABLITERATED GGUF files are provided by [Blackfrost-AI on Hugging Face](https://huggingface.co/Blackfrost-AI/Qwen3.8-27B-ABLITERATED-GGUF).
 LMML does not bundle or redistribute the model weights; download them under
