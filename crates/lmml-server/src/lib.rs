@@ -5,6 +5,7 @@
 //! caller, checks port availability before spawning, and waits for HTTP
 //! readiness before reporting the server as usable.
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -16,7 +17,8 @@ use lmml_models::ModelEntry;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Child;
-use tokio::sync::{mpsc, watch, Mutex};
+use tokio::sync::{mpsc, oneshot, watch, Mutex};
+use tokio::task::JoinHandle;
 
 mod properties;
 
@@ -33,6 +35,9 @@ pub const DEFAULT_STARTUP_TIMEOUT_SECS: u64 = 600;
 const HEALTH_CHECK_TIMEOUT_SECS: u64 = 10;
 const HEALTH_CHECK_INTERVAL_SECS: u64 = 2;
 const HEALTH_FAILURE_LOG_THRESHOLD: u32 = 3;
+
+type GatewayTask = JoinHandle<Result<(), std::io::Error>>;
+type GatewayTaskSlot = Arc<Mutex<Option<GatewayTask>>>;
 
 /// Return the default llama-server readiness timeout.
 pub fn default_startup_timeout() -> Duration {
@@ -70,6 +75,8 @@ pub struct ServerHandle {
 #[derive(Debug)]
 struct ServerInner {
     child: Arc<Mutex<Option<Child>>>,
+    gateway_shutdown: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    gateway_task: GatewayTaskSlot,
     status_rx: watch::Receiver<ServerStatus>,
     status_tx: watch::Sender<ServerStatus>,
 }
@@ -85,9 +92,19 @@ impl ServerHandle {
         self.inner.status_rx.clone()
     }
 
+    /// Return the owned child PID while the managed process is alive.
+    pub async fn pid(&self) -> Option<u32> {
+        self.inner.child.lock().await.as_ref().and_then(Child::id)
+    }
+
     /// Stop the child process, waiting briefly for a graceful exit.
     #[tracing::instrument(skip(self))]
     pub async fn stop(&self) {
+        stop_gateway(
+            self.inner.gateway_shutdown.clone(),
+            self.inner.gateway_task.clone(),
+        )
+        .await;
         if let Err(error) = stop_child(self.inner.child.clone()).await {
             let _ignored = self.inner.status_tx.send(ServerStatus::Failed {
                 reason: error.to_string(),
@@ -100,6 +117,11 @@ impl ServerHandle {
 
 impl Drop for ServerInner {
     fn drop(&mut self) {
+        if let Ok(mut shutdown) = self.gateway_shutdown.try_lock() {
+            if let Some(shutdown) = shutdown.take() {
+                let _ignored = shutdown.send(());
+            }
+        }
         if let Ok(mut child) = self.child.try_lock() {
             if let Some(child) = child.as_mut() {
                 let _ignored = child.start_kill();
@@ -117,7 +139,121 @@ pub struct ServerManager {
     pub caps: LlamaBinaryCapabilities,
 }
 
+/// Inputs for starting a private backend with a policy gateway.
+pub struct GatewayStartOptions<'a> {
+    /// Model loaded by the backend.
+    pub model: &'a ModelEntry,
+    /// Backend server configuration.
+    pub backend_config: &'a ServerConfig,
+    /// Gateway state enforcing the approval policy.
+    pub gateway: lmml_gateway::GatewayState,
+    /// Client-facing gateway address.
+    pub listen: SocketAddr,
+    /// Stream receiving backend logs.
+    pub log_tx: mpsc::Sender<String>,
+    /// Maximum backend startup duration.
+    pub startup_timeout: Duration,
+    /// Explicit environment for the backend child.
+    pub environment: Option<&'a BTreeMap<String, String>>,
+}
+
 impl ServerManager {
+    /// Adopt an already-started LMML approved-runtime process.
+    ///
+    /// The process is expected to own both the private backend and public
+    /// gateway. This keeps the TUI's lifecycle semantics identical to a
+    /// directly managed llama-server child without exposing the backend.
+    pub async fn adopt_external_child(
+        child: Child,
+        host: String,
+        port: u16,
+        url: String,
+        log_tx: mpsc::Sender<String>,
+    ) -> Result<ServerHandle, ServerError> {
+        let (status_tx, status_rx) = watch::channel(ServerStatus::Ready { url });
+        let child = Arc::new(Mutex::new(Some(child)));
+        spawn_runtime_monitor(child.clone(), status_tx.clone(), host, port, log_tx);
+        Ok(ServerHandle {
+            inner: Arc::new(ServerInner {
+                child,
+                gateway_shutdown: Arc::new(Mutex::new(None)),
+                gateway_task: Arc::new(Mutex::new(None)),
+                status_rx,
+                status_tx,
+            }),
+        })
+    }
+
+    /// Start a private backend and expose it through the policy gateway.
+    ///
+    /// `backend_config` must point at an internal listener. `listen` is the
+    /// client-facing gateway address and is not passed to llama-server.
+    pub async fn start_with_gateway(
+        &self,
+        model: &ModelEntry,
+        backend_config: &ServerConfig,
+        gateway: lmml_gateway::GatewayState,
+        listen: SocketAddr,
+        log_tx: mpsc::Sender<String>,
+        startup_timeout: Duration,
+    ) -> Result<ServerHandle, ServerError> {
+        self.start_with_gateway_and_env(GatewayStartOptions {
+            model,
+            backend_config,
+            gateway,
+            listen,
+            log_tx,
+            startup_timeout,
+            environment: None,
+        })
+        .await
+    }
+
+    /// Start a private backend with an explicit child environment and gateway.
+    pub async fn start_with_gateway_and_env(
+        &self,
+        options: GatewayStartOptions<'_>,
+    ) -> Result<ServerHandle, ServerError> {
+        let handle = self
+            .start_with_timeout_and_env(
+                options.model,
+                options.backend_config,
+                options.log_tx,
+                options.startup_timeout,
+                options.environment,
+            )
+            .await?;
+        if let Err(error) = Self::attach_gateway(&handle, options.gateway, options.listen).await {
+            handle.stop().await;
+            return Err(error);
+        }
+        Ok(handle)
+    }
+
+    /// Attach a private-backend gateway to an already ready managed server.
+    ///
+    /// The backend must have been started on a private port. The gateway owns
+    /// the client-facing listener and is stopped with the returned handle.
+    pub async fn attach_gateway(
+        handle: &ServerHandle,
+        gateway: lmml_gateway::GatewayState,
+        listen: SocketAddr,
+    ) -> Result<(), ServerError> {
+        let listener = tokio::net::TcpListener::bind(listen)
+            .await
+            .map_err(|source| ServerError::GatewayBind {
+                address: listen,
+                source,
+            })?;
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(gateway.serve(listener, shutdown_rx));
+        *handle.inner.gateway_shutdown.lock().await = Some(shutdown_tx);
+        *handle.inner.gateway_task.lock().await = Some(task);
+        let url = format!("http://{}:{}", listen.ip(), listen.port());
+        let _ignored = handle.inner.status_tx.send(ServerStatus::Ready { url });
+        Ok(())
+    }
+
     /// Start llama-server for `model` using a stable compat config.
     #[tracing::instrument(skip(self, model, config, log_tx), fields(binary = %self.binary.display(), model = %model.path.display(), host = %config.host, port = config.port))]
     pub async fn start(
@@ -139,6 +275,19 @@ impl ServerManager {
         log_tx: mpsc::Sender<String>,
         startup_timeout: Duration,
     ) -> Result<ServerHandle, ServerError> {
+        self.start_with_timeout_and_env(model, config, log_tx, startup_timeout, None)
+            .await
+    }
+
+    /// Start llama-server with a restricted child environment when supplied.
+    pub async fn start_with_timeout_and_env(
+        &self,
+        model: &ModelEntry,
+        config: &ServerConfig,
+        log_tx: mpsc::Sender<String>,
+        startup_timeout: Duration,
+        environment: Option<&BTreeMap<String, String>>,
+    ) -> Result<ServerHandle, ServerError> {
         check_port_free(&config.host, config.port).await?;
         tracing::info!("server start requested");
 
@@ -154,15 +303,19 @@ impl ServerManager {
             ))
             .await;
 
-        let mut child = tokio::process::Command::new(&self.binary)
+        let mut command = tokio::process::Command::new(&self.binary);
+        command
             .args(&argv)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|source| ServerError::Spawn {
-                binary: self.binary.clone(),
-                source,
-            })?;
+            .stderr(Stdio::piped());
+        if let Some(environment) = environment {
+            command.env_clear();
+            command.envs(environment);
+        }
+        let mut child = command.spawn().map_err(|source| ServerError::Spawn {
+            binary: self.binary.clone(),
+            source,
+        })?;
 
         if let Some(stdout) = child.stdout.take() {
             spawn_log_reader(stdout, log_tx.clone());
@@ -248,6 +401,8 @@ impl ServerManager {
         Ok(ServerHandle {
             inner: Arc::new(ServerInner {
                 child,
+                gateway_shutdown: Arc::new(Mutex::new(None)),
+                gateway_task: Arc::new(Mutex::new(None)),
                 status_rx,
                 status_tx,
             }),
@@ -591,6 +746,15 @@ async fn stop_child(child: Arc<Mutex<Option<Child>>>) -> Result<(), ServerError>
     }
 }
 
+async fn stop_gateway(shutdown: Arc<Mutex<Option<oneshot::Sender<()>>>>, task: GatewayTaskSlot) {
+    if let Some(shutdown) = shutdown.lock().await.take() {
+        let _ignored = shutdown.send(());
+    }
+    if let Some(task) = task.lock().await.take() {
+        let _ignored = task.await;
+    }
+}
+
 fn health_urls(host: &str, port: u16) -> Vec<String> {
     let base = base_url(host, port);
     vec![format!("{base}/health"), format!("{base}/v1/health")]
@@ -617,6 +781,15 @@ fn connect_host(host: &str) -> &str {
 /// Errors returned by server lifecycle management.
 #[derive(Debug, Error)]
 pub enum ServerError {
+    /// The policy gateway could not bind its client-facing listener.
+    #[error("LMML gateway failed to bind {address}: {source}")]
+    GatewayBind {
+        /// Requested gateway listener.
+        address: SocketAddr,
+        /// Bind error.
+        #[source]
+        source: std::io::Error,
+    },
     /// The configured port is already bound or unavailable.
     #[error("llama-server failed to start — port {port} is already in use")]
     PortInUse {

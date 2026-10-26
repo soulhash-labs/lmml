@@ -1,17 +1,154 @@
 # Template Approval and Deployment Integrity Plan
 
-Status: planning only. No template approval or runtime-enforcement behavior is
-implemented by this document.
+Status: The controlled approval path is implemented through the Slice 6
+client guards and the Slice 7 trust-root rotation contract. The default
+runtime remains `inspection_only`; enforcement is enabled explicitly with a
+validated approval bundle until real-host integration evidence is recorded.
+The repository now contains
+inspection/identity contracts, signed receipts, immutable deployment snapshots,
+and an explicit `runtime serve-approved` path that exposes only the gateway
+after all admission checks. The ordinary TUI launch path remains
+`inspection_only` and does not silently switch to this path.
 
-Until the launch gate and request gate described here exist, LMML must describe
-the feature as **template inspection**, not enforced template approval.
+Until the launch gate and request gate are wired into the ordinary TUI and
+migrated clients, LMML must describe the default feature as **template
+inspection**, not globally enforced template approval.
+
+The implemented contract boundary is in
+`crates/lmml-substrate/src/approval.rs`. It includes deterministic,
+domain-separated prompt/runtime/deployment hashes, source template inspection,
+Ed25519-signed receipts with no unsigned fallback, and a separately anchored
+revocation state. It also includes content-addressed deployment snapshot
+publication and a computed admission state that invalidates identity changes.
+It includes a versioned request validator that rejects request-level template
+and parser overrides. The new `crates/lmml-gateway` crate provides the
+fail-closed transport boundary and streaming revocation behavior; it forwards
+to the backend only with a private bearer key. `lmml-server::ServerHandle` can
+own and shut down that gateway alongside the backend child. The explicit
+`lmml runtime serve-approved` command activates this path only after receipt,
+revocation, snapshot, model, argv, executable, and identity checks. The TUI
+can supervise the bundle path when `LMML_APPROVAL_ENFORCEMENT=1` and
+`LMML_APPROVAL_BUNDLE` are set; external clients still require explicit
+gateway configuration until Slice 6 is complete.
+
+Source inspection is available without enabling approval:
+
+```text
+lmml model inspect-template /path/to/model --json
+# Add --deployed model.gguf to compare embedded GGUF template variants.
+```
+
+The command reports source container, named-template, external-template, and
+special-token hashes and explicitly reports `inspection_only`.
+
+The isolated enforcement path is invoked explicitly with
+`lmml runtime serve-approved`. It requires the signed prompt, runtime, and
+deployment records, the pinned trust root, the content-addressed snapshot
+root, the exact model and binary, and a private backend bearer key. It may
+also receive a signed revocation state. It verifies those identities before
+starting llama-server on a private loopback port and exposes only the gateway
+port. `lmml model approve-template --bundle-out` can persist these references
+as one immutable managed bundle, and `lmml runtime serve-approved-bundle`
+resolves that bundle without accepting loose model or binary paths. These
+commands are integration targets for Slice 5; they are not yet the default
+TUI/client launch path.
+
+Both approved runtime commands accept `--json`; ready evidence includes the
+endpoint, process ID, receipt ID and sequence, prompt/runtime/deployment
+hashes, model hash, and executable hash.
+
+For controlled TUI migration testing, set the bundle and backend secret before
+starting `lmml`:
+
+```sh
+export LMML_APPROVAL_BUNDLE=/path/to/approval-bundle.json
+export LMML_BACKEND_API_KEY='private-backend-token'
+export LMML_APPROVAL_ENFORCEMENT=1
+export LMML_GATEWAY_ID=gateway-terran
+export LMML_GATEWAY_DEPLOYMENT_HASH=sha256:...
+export LMML_GATEWAY_RECEIPT_ID=receipt-...
+export LMML_GATEWAY_RECEIPT_SEQUENCE=1
+export LMML_GATEWAY_REVOCATION_EPOCH=0
+# Hex-encoded PKCS#8 Ed25519 key held only by the gateway process.
+export LMML_GATEWAY_ATTESTATION_PRIVATE_KEY_HEX=...
+lmml
+```
+
+The corresponding raw public key must be provisioned into each enforced node
+and router as `LMML_GATEWAY_ATTESTATION_PUBLIC_KEY_HEX`. The private key is an
+operator trust-root input and must not be placed in a bundle, model directory,
+or client configuration. For a new key pair, provision the PKCS#8 bytes and
+raw 32-byte Ed25519 public key with a protected operator workflow, for example:
+
+```sh
+openssl genpkey -algorithm Ed25519 -out gateway-attestation.pem
+export LMML_GATEWAY_ATTESTATION_PRIVATE_KEY_HEX="$(openssl pkey -in gateway-attestation.pem -outform DER | xxd -p -c 99999)"
+export LMML_GATEWAY_ATTESTATION_PUBLIC_KEY_HEX="$(openssl pkey -in gateway-attestation.pem -pubout -outform DER | tail -c 32 | xxd -p -c 99999)"
+```
+
+Key rotation requires restarting the gateway, nodes, and router with the new
+public key after the deployment is re-approved; there is no unsigned or
+implicit key fallback.
+
+With enforcement enabled, the TUI refuses every direct backend launch and
+supervises `serve-approved-bundle` instead. Unset the switch to retain legacy
+inspection-only behavior while client migration is incomplete.
+
+`lmml-node` uses the same switch to require a valid, short-lived,
+Ed25519-signed gateway attestation on the configured upstream health endpoint;
+the public key is supplied through
+`LMML_GATEWAY_ATTESTATION_PUBLIC_KEY_HEX`. Nodes and routers must also receive
+the five `LMML_GATEWAY_*` binding values above; they reject signatures whose
+gateway, deployment, receipt, sequence, or revocation epoch differs. A raw
+llama-server upstream or a
+forged `x-lmml-approved-upstream` marker is rejected before the node starts.
+The node repeats this check before every forwarded inference request, and
+`lmml-router` verifies the same attestation on every discovery refresh.
+
+The gateway backend URL is restricted to an unauthenticated loopback HTTP
+endpoint. The public listener is not the backend listener. The gateway starts
+in `blocked` state, so its health and inference routes remain unavailable
+until model bytes and loaded-library checks complete; only then is admission
+atomically activated. In enforced mode, a missing attestation key is a launch
+failure rather than an unsigned fallback.
+
+Signed receipts can be produced for review records with
+`lmml model approve-template`. Receipt creation does not enable the ordinary
+TUI launch path; the default client integration remains disabled until the
+private backend and all client migration gates pass.
+
+`lmml model template-status` recomputes the bound identities and verifies the
+receipt/trust-root/revocation state without launching a process. Supplying
+`--snapshot-root` also re-hashes every deployed file before reporting status.
+Its non-zero exit status is suitable for client and installer preflight checks.
+
+Trust-root rotation is explicit and old-key authorized:
+
+```sh
+lmml model rotate-approval-trust-root \
+  --old-root current-root.json \
+  --old-private-key current-key.pkcs8 \
+  --new-key-id operator-epoch-2 \
+  --new-root-out next-root.json \
+  --new-private-key-out next-key.pkcs8 \
+  --migration-out trust-root-rotation.json \
+  --sequence 2
+```
+
+The replacement root is accepted only when the old key signs the migration and
+the key epoch advances. Existing receipts are not silently reinterpreted under
+the new root.
+
+For migration testing, `LMML_APPROVAL_ENFORCEMENT=1` makes ordinary TUI server
+actions and detached runtime-profile starts fail closed with an instruction to
+use the approved gateway path. This is a guardrail, not a substitute for
+Slice 6 client migration.
 
 ## Release Invariant
 
 The feature is enabled only when both conditions are true:
 
 1. An unapproved effective prompt configuration cannot become reachable through
-   an LMML-managed runtime.
 2. A change to an approved prompt or runtime configuration invalidates
    admission before another request is accepted.
 
@@ -102,9 +239,10 @@ The following is based on the current repository, not the earlier review text.
   and can use `llama-server` to open the artifact before registration.
 - The current substrate types distinguish `ModelIdentity`, `ArtifactIdentity`,
   `ArtifactManifest`, `GgufCandidateManifest`, and `ArtifactAdmission`.
-- Template extraction and template approval are currently absent. Existing
-  substrate manifests record tokenizer-related source assets, but no typed
-  template identity or effective renderer configuration exists.
+- `crates/lmml-tui/src/model_cli.rs` exposes `model inspect-template` for
+  source and deployed GGUF metadata inspection and `model approve-template`
+  for signed review records. These commands remain inspection-only; they do
+  not make a raw backend reachable.
 
 ### Configuration resolution
 
@@ -141,14 +279,15 @@ TUI Server tab
   -> health/readiness and served-model verification
 ```
 
-`crates/lmml-tui/src/runtime_cli/model_runtime.rs` selects upstream or Prism
+`crates/lmml-tui/src/runtime_cli.rs` selects upstream or Prism
 from GGUF metadata and runtime policy. Prism has strong binary/library/target
 attestation, but template approval is not part of that check.
 
 `crates/lmml-server/src/lib.rs` owns the child process, port checks, readiness
-polling, model identity verification, and process health monitoring. It does
-not currently create immutable deployment snapshots or enforce per-request
-approval.
+polling, model identity verification, and process health monitoring. Its
+approved start API also supports a restricted child environment and gateway
+ownership; snapshot and approval resolution remain in the TUI admission
+command. The ordinary `start_with_timeout` path remains legacy until Slice 6.
 
 ### Lease issuance and runtime manifests
 
@@ -162,27 +301,36 @@ hash, endpoint, context, backend, and capabilities. They do not bind a prompt
 configuration hash, template identity, environment allowlist, loaded libraries,
 or deployment snapshot.
 
-The lifecycle lease path and the ordinary TUI server-start path are not yet a
-single mandatory admission path. The implementation must unify them before
-claiming enforced approval.
+The lifecycle lease path and ordinary TUI server-start path remain legacy by
+default. Under `LMML_APPROVAL_ENFORCEMENT=1`, the TUI is redirected to
+`runtime serve-approved-bundle`; this controlled path is the only enforced
+launch path until the client migration gate is enabled globally.
 
 ### Readiness and request handling
 
 - `lmml-server` verifies health and `/v1/models` identity after launch.
 - `crates/lmml-node/src/lib.rs` proxies requests to a configured
-  `llama_base_url`; it is not currently a template-policy gateway.
+  `llama_base_url`; it now forwards the node bearer key upstream, allowing the
+  configured URL to be the authenticated LMML gateway. It is not itself the
+  approval authority.
 - `crates/lmml-router/src/lib.rs` routes requests to configured upstreams; it
   is not currently a template-policy gateway.
-- OpenCode can be configured directly against the TUI-managed
-  `llama-server`, creating a direct backend access path.
-- No current component validates a request's template kwargs, checks approval
-  state on every request, cancels streams on revocation, or fails closed when
-  the approval store is unavailable.
+- OpenCode can be configured against the TUI-managed endpoint. Until Slice 6
+  is enabled, that endpoint may still be the legacy direct server, creating a
+  direct backend access path; the approval enforcement switch rejects new
+  legacy launches.
+- The new `lmml-gateway` validates request policy, rechecks signed admission
+  state on every request, and stops streams after revocation. The explicit
+  `serve-approved` path uses it. The ordinary TUI and detached runtime-profile
+  paths remain legacy unless enforcement is explicitly enabled. Enforced
+  `lmml-node` requires the gateway marker, and enforced `lmml-router` requires
+  the node marker before routing; OpenCode requires an approved gateway
+  endpoint during configuration.
 
 ## 3. Identity Contracts
 
 These types belong in `crates/lmml-substrate/src/types.rs` or a private
-`template_approval` module exported by `lmml-substrate`. All schemas require a
+`approval` module exported by `lmml-substrate`. All schemas require a
 version and deterministic serialization.
 
 ### Deterministic serialization
@@ -462,6 +610,11 @@ reachable. LMML stops the child, waits for exit, removes only unreferenced
 staging directories, and retains signed evidence of the failed admission.
 Active deployments remain until no lease or process references them.
 
+The approved launch path now performs a post-readiness Linux loader-map check:
+every mapped shared library must be declared and hash-match the runtime
+configuration, and every required declared library must be observed. The
+ordinary TUI launch path remains outside this admission path until migration.
+
 ## 5. Admission State Machine
 
 Persisted decisions and computed runtime status are separate.
@@ -625,6 +778,20 @@ The acceptance test compares the production/helper build identity, tokenizer
 identity, exact rendered bytes, and token IDs for every fixture. Python-only
 rendering cannot satisfy admission.
 
+The current implementation uses the first mechanism: `lmml model
+verify-template` calls `/apply-template` and `/tokenize` on the exact running
+llama-server, verifies `/health` and `/v1/models`, and records the supplied
+binary/model hashes with the fixture result. Approved launch additionally
+requires `renderer_id = llama.cpp/server-native` and the prompt renderer build
+hash to equal the admitted server executable hash. The verifier is not yet
+automatically invoked by the TUI review workflow; that remains a Slice 6
+integration task.
+
+The gateway checks approval while a response is streaming, including while the
+backend is stalled between chunks. Revocation, invalidation, approval-store
+failure, and the bounded request deadline terminate the forwarded stream
+rather than waiting indefinitely for another backend chunk.
+
 ### Fixtures and supported features
 
 Store fixture inputs and expected hashes/token IDs for:
@@ -678,7 +845,7 @@ Files:
 
 - `crates/lmml-substrate/src/types.rs`
 - `crates/lmml-substrate/src/lib.rs`
-- new `crates/lmml-substrate/src/template_approval.rs`
+- new `crates/lmml-substrate/src/approval.rs`
 - `docs/template-approval-deployment-plan.md`
 
 Work:
@@ -736,7 +903,7 @@ Files:
 
 - new `crates/lmml-substrate/src/deployment.rs`
 - `crates/lmml-tui/src/model_cli/derive.rs`
-- `crates/lmml-tui/src/runtime_cli/model_runtime.rs`
+- `crates/lmml-tui/src/runtime_cli.rs`
 - `crates/lmml-build/src/verification.rs`
 
 Work:
@@ -784,7 +951,7 @@ Files:
 
 - `crates/lmml-tui/src/event_loop.rs`
 - `crates/lmml-server/src/lib.rs`
-- `crates/lmml-tui/src/runtime_cli/model_runtime.rs`
+- `crates/lmml-tui/src/runtime_cli.rs`
 - `crates/lmml-tui/src/lifecycle_runtime_cli.rs`
 - `crates/lmml-substrate/src/lifecycle.rs`
 - `crates/lmml-substrate/src/types.rs`
@@ -843,20 +1010,31 @@ Acceptance:
   to active streams;
 - node/router paths cannot bypass the gateway.
 
+When enforcement is enabled, an `lmml-node` health response carries
+`x-lmml-approved-upstream: approved` only after the node has verified its
+configured inference upstream as an LMML gateway. `lmml-router` requires that
+marker before routing to any node, so the LAN path cannot silently downgrade
+from an approved gateway to a raw llama-server endpoint. Legacy mode does not
+require the marker.
+
 The gateway and private backend transport must pass their tests, but Slice 5
 does not enable enforced approval for existing clients.
 
 Compatibility: clients remain in inspection-only/legacy mode until Slice 6
 migrates them to the gateway.
 
+`lmml-gateway::ApprovalStore` now reloads and verifies the signed receipt,
+trust root, and optional revocation state on each request. Store read,
+signature, identity, or revocation failures become `blocked`; the gateway
+does not retain an indefinitely valid in-memory approval.
+
 ### Slice 6: client migration, inspection, review, and TUI
 
 Files:
 
 - `crates/lmml-tui/src/model_cli.rs`
-- `crates/lmml-tui/src/tabs/models.rs`
-- `crates/lmml-tui/src/tabs/server.rs`
-- `crates/lmml-tui/src/tabs/settings.rs`
+- `crates/lmml-tui/src/event_loop.rs`
+- `crates/lmml-tui/src/main.rs`
 - `crates/lmml-tui/src/lifecycle_runtime_cli.rs`
 - `docs/how-to-use.md`
 - `docs/llm-model-support.md`
@@ -882,7 +1060,7 @@ release switch from inspection-only to enforced approval.
 
 Files:
 
-- `crates/lmml-substrate/src/template_approval.rs`
+- `crates/lmml-substrate/src/approval.rs`
 - managed key/receipt storage modules;
 - `docs/release-checklist.md`;
 - integration tests.
@@ -941,6 +1119,11 @@ Required integration scenarios:
 Each scenario must emit machine-readable evidence containing deployment hash,
 prompt configuration hash, runtime configuration hash, receipt ID/sequence,
 revocation epoch, process ID, endpoint, and rejection reason where applicable.
+
+Current validation evidence: `cargo test --workspace --offline` passes outside
+the restricted socket sandbox, including node/router HTTP integration and TUI
+end-to-end tests; `cargo clippy --workspace --all-targets --offline --
+-D warnings`, `cargo fmt --all -- --check`, and `git diff --check` also pass.
 
 ## Unresolved Decisions and Recommended Defaults
 

@@ -133,6 +133,10 @@ pub(crate) async fn register(options: RegisterOptions<'_>) -> i32 {
         endpoint: options.endpoint.to_string(),
         context_size: process_after.context_size,
         capabilities: vec![lmml_substrate::RuntimeCapability::TextGeneration],
+        prompt_configuration_hash: None,
+        runtime_configuration_hash: None,
+        deployment_manifest_hash: None,
+        approval_receipt_id: None,
         created_at,
     };
     let path = data_root

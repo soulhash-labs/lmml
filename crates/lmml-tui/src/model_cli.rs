@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Subcommand;
 use derive::{derive_model, QuantizationArg};
+use serde::de::DeserializeOwned;
 
 /// Commands for canonical model substrate registration and inspection.
 #[derive(Debug, Subcommand)]
@@ -39,6 +40,155 @@ pub(crate) enum ModelCommand {
         /// Path to a substrate manifest JSON file.
         manifest: PathBuf,
         /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect source tokenizer and chat-template assets without executing them.
+    InspectTemplate {
+        /// Root directory containing tokenizer_config.json and optional template assets.
+        source: PathBuf,
+        /// Optional deployed GGUF whose embedded templates should be compared.
+        #[arg(long)]
+        deployed: Option<PathBuf>,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Verify rendered prompt bytes and token IDs using the exact running llama-server.
+    VerifyTemplate {
+        /// Base URL of the private llama-server used for the verification.
+        #[arg(long)]
+        endpoint: String,
+        /// Exact llama-server executable used by that instance.
+        #[arg(long)]
+        binary: PathBuf,
+        /// Exact GGUF model loaded by that instance.
+        #[arg(long)]
+        model: PathBuf,
+        /// JSON fixture array containing messages, rendered_prompt_hash, and token_ids.
+        #[arg(long)]
+        fixtures: PathBuf,
+        /// Optional bearer token for a protected llama-server.
+        #[arg(long)]
+        api_key: Option<String>,
+        /// Emit machine-readable evidence.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Sign and persist an explicit template/runtime approval receipt.
+    ApproveTemplate {
+        /// JSON PromptConfiguration produced by inspection/review tooling.
+        #[arg(long)]
+        prompt: PathBuf,
+        /// JSON RuntimeConfiguration for the exact launch.
+        #[arg(long)]
+        runtime: PathBuf,
+        /// JSON DeploymentManifest for the immutable snapshot.
+        #[arg(long)]
+        deployment: PathBuf,
+        /// Operator-pinned trust-root JSON.
+        #[arg(long)]
+        trust_root: PathBuf,
+        /// Operator-held Ed25519 PKCS#8 private key.
+        #[arg(long)]
+        private_key: PathBuf,
+        /// Stable receipt identifier.
+        #[arg(long)]
+        receipt_id: String,
+        /// Monotonic receipt sequence.
+        #[arg(long)]
+        sequence: u64,
+        /// Authorized reviewer identity.
+        #[arg(long)]
+        reviewer_id: String,
+        /// Approval policy version.
+        #[arg(long, default_value = "template-approval-v1")]
+        policy_version: String,
+        /// Validation-suite identity.
+        #[arg(long, default_value = "manual-review-v1")]
+        validation_suite_id: String,
+        /// Receipt storage directory.
+        #[arg(long)]
+        store_dir: PathBuf,
+        /// Protected receipt sequence anchor.
+        #[arg(long)]
+        anchor: PathBuf,
+        /// Content-addressed deployment snapshot root.
+        #[arg(long)]
+        snapshot_root: Option<PathBuf>,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+        /// Optional managed bundle output for approved launch.
+        #[arg(long)]
+        bundle_out: Option<PathBuf>,
+        /// Environment variable containing the private backend bearer token.
+        #[arg(long, default_value = "LMML_BACKEND_API_KEY")]
+        backend_api_key_env: String,
+        /// Public gateway port recorded in the bundle.
+        #[arg(long, default_value_t = 8080)]
+        public_port: u16,
+        /// Private backend port recorded in the bundle.
+        #[arg(long, default_value_t = 1200)]
+        backend_port: u16,
+        /// Context size recorded in the bundle.
+        #[arg(long, default_value_t = 262_144)]
+        context: u32,
+        /// GPU layer setting recorded in the bundle.
+        #[arg(long, default_value_t = -1)]
+        gpu_layers: i32,
+        /// Worker thread setting recorded in the bundle.
+        #[arg(long, default_value_t = 0)]
+        threads: usize,
+    },
+    /// Rotate the pinned approval trust root through an old-key-signed migration.
+    RotateApprovalTrustRoot {
+        /// Current operator trust-root JSON.
+        #[arg(long)]
+        old_root: PathBuf,
+        /// Current operator Ed25519 PKCS#8 private key.
+        #[arg(long)]
+        old_private_key: PathBuf,
+        /// Identifier for the replacement key.
+        #[arg(long)]
+        new_key_id: String,
+        /// Replacement trust-root JSON destination.
+        #[arg(long)]
+        new_root_out: PathBuf,
+        /// Replacement private-key destination.
+        #[arg(long)]
+        new_private_key_out: PathBuf,
+        /// Signed migration record destination.
+        #[arg(long)]
+        migration_out: PathBuf,
+        /// Monotonic migration sequence.
+        #[arg(long)]
+        sequence: u64,
+    },
+    /// Compute current template/runtime/deployment admission without launching.
+    TemplateStatus {
+        /// JSON PromptConfiguration.
+        #[arg(long)]
+        prompt: PathBuf,
+        /// JSON RuntimeConfiguration.
+        #[arg(long)]
+        runtime: PathBuf,
+        /// JSON DeploymentManifest.
+        #[arg(long)]
+        deployment: PathBuf,
+        /// Signed approval receipt JSON.
+        #[arg(long)]
+        receipt: PathBuf,
+        /// Pinned approval trust root JSON.
+        #[arg(long)]
+        trust_root: PathBuf,
+        /// Optional signed revocation state JSON.
+        #[arg(long)]
+        revocation_state: Option<PathBuf>,
+        /// Optional content-addressed snapshot root to verify before status.
+        #[arg(long)]
+        snapshot_root: Option<PathBuf>,
+        /// Emit machine-readable output.
         #[arg(long)]
         json: bool,
     },
@@ -281,6 +431,110 @@ pub(crate) async fn run(command: ModelCommand) -> i32 {
             json,
         } => import_model(path, lineage_id, parent, manifest, json),
         ModelCommand::Inspect { manifest, json } => inspect_model(&manifest, json),
+        ModelCommand::InspectTemplate {
+            source,
+            deployed,
+            json,
+        } => inspect_template(&source, deployed.as_deref(), json).await,
+        ModelCommand::VerifyTemplate {
+            endpoint,
+            binary,
+            model,
+            fixtures,
+            api_key,
+            json,
+        } => {
+            crate::template::verify(
+                &endpoint,
+                &binary,
+                &model,
+                &fixtures,
+                api_key.as_deref(),
+                json,
+            )
+            .await
+        }
+        ModelCommand::ApproveTemplate {
+            prompt,
+            runtime,
+            deployment,
+            trust_root,
+            private_key,
+            receipt_id,
+            sequence,
+            reviewer_id,
+            policy_version,
+            validation_suite_id,
+            store_dir,
+            anchor,
+            snapshot_root,
+            json,
+            bundle_out,
+            backend_api_key_env,
+            public_port,
+            backend_port,
+            context,
+            gpu_layers,
+            threads,
+        } => approve_template(ApproveTemplateOptions {
+            prompt: &prompt,
+            runtime: &runtime,
+            deployment: &deployment,
+            trust_root: &trust_root,
+            private_key: &private_key,
+            receipt_id: &receipt_id,
+            sequence,
+            reviewer_id: &reviewer_id,
+            policy_version: &policy_version,
+            validation_suite_id: &validation_suite_id,
+            store_dir: &store_dir,
+            anchor: &anchor,
+            snapshot_root,
+            json,
+            bundle_out,
+            backend_api_key_env,
+            public_port,
+            backend_port,
+            context,
+            gpu_layers,
+            threads,
+        }),
+        ModelCommand::TemplateStatus {
+            prompt,
+            runtime,
+            deployment,
+            receipt,
+            trust_root,
+            revocation_state,
+            snapshot_root,
+            json,
+        } => template_status(TemplateStatusOptions {
+            prompt: &prompt,
+            runtime: &runtime,
+            deployment: &deployment,
+            receipt: &receipt,
+            trust_root: &trust_root,
+            revocation_state: revocation_state.as_deref(),
+            snapshot_root: snapshot_root.as_deref(),
+            json,
+        }),
+        ModelCommand::RotateApprovalTrustRoot {
+            old_root,
+            old_private_key,
+            new_key_id,
+            new_root_out,
+            new_private_key_out,
+            migration_out,
+            sequence,
+        } => rotate_approval_trust_root(
+            &old_root,
+            &old_private_key,
+            &new_key_id,
+            &new_root_out,
+            &new_private_key_out,
+            &migration_out,
+            sequence,
+        ),
         ModelCommand::Verify {
             path,
             manifest,
@@ -538,6 +792,394 @@ fn inspect_model(path: &Path, json: bool) -> i32 {
         println!("parameters: {}", substrate.parameter_count);
     }
     0
+}
+
+async fn inspect_template(source: &Path, deployed: Option<&Path>, json: bool) -> i32 {
+    let inspection = match lmml_substrate::inspect_template_source(source) {
+        Ok(inspection) => inspection,
+        Err(error) => {
+            eprintln!("template inspection failed: {error}");
+            return 1;
+        }
+    };
+    let deployed_templates = if let Some(deployed) = deployed {
+        match lmml_models::parse_gguf_metadata(deployed).await {
+            Ok(metadata) => Some(metadata.chat_templates),
+            Err(error) => {
+                eprintln!("deployed GGUF inspection failed: {error}");
+                return 1;
+            }
+        }
+    } else {
+        None
+    };
+    if json {
+        let payload = serde_json::json!({
+            "source": inspection,
+            "deployed_chat_templates": deployed_templates,
+            "mode": "inspection_only",
+        });
+        match serde_json::to_string_pretty(&payload) {
+            Ok(payload) => println!("{payload}"),
+            Err(error) => {
+                eprintln!("could not serialize template inspection: {error}");
+                return 1;
+            }
+        }
+    } else {
+        println!(
+            "source template container: {}",
+            inspection.source_template_container_hash
+        );
+        println!("template variants: {}", inspection.template_hashes.len());
+        for (variant, hash) in inspection.template_hashes {
+            println!("  {variant}: {hash}");
+        }
+        println!(
+            "external template: {}",
+            inspection
+                .external_template_hash
+                .map_or_else(|| "none".to_string(), |hash| hash.to_string())
+        );
+        println!(
+            "special-token map: {}",
+            inspection
+                .special_tokens_hash
+                .map_or_else(|| "none".to_string(), |hash| hash.to_string())
+        );
+        println!("mode: inspection_only");
+        if let Some(templates) = deployed_templates {
+            println!("deployed GGUF templates: {}", templates.len());
+            for (name, template) in templates {
+                println!(
+                    "  {}: {}",
+                    name,
+                    lmml_substrate::sha256_data(template.as_bytes())
+                );
+            }
+        }
+    }
+    0
+}
+
+struct ApproveTemplateOptions<'a> {
+    prompt: &'a Path,
+    runtime: &'a Path,
+    deployment: &'a Path,
+    trust_root: &'a Path,
+    private_key: &'a Path,
+    receipt_id: &'a str,
+    sequence: u64,
+    reviewer_id: &'a str,
+    policy_version: &'a str,
+    validation_suite_id: &'a str,
+    store_dir: &'a Path,
+    anchor: &'a Path,
+    snapshot_root: Option<PathBuf>,
+    json: bool,
+    bundle_out: Option<PathBuf>,
+    backend_api_key_env: String,
+    public_port: u16,
+    backend_port: u16,
+    context: u32,
+    gpu_layers: i32,
+    threads: usize,
+}
+
+fn approve_template(options: ApproveTemplateOptions<'_>) -> i32 {
+    let prompt: lmml_substrate::PromptConfiguration = match read_json(options.prompt) {
+        Ok(value) => value,
+        Err(error) => return model_cli_error("prompt configuration", error),
+    };
+    let runtime: lmml_substrate::RuntimeConfiguration = match read_json(options.runtime) {
+        Ok(value) => value,
+        Err(error) => return model_cli_error("runtime configuration", error),
+    };
+    let deployment: lmml_substrate::DeploymentManifest = match read_json(options.deployment) {
+        Ok(value) => value,
+        Err(error) => return model_cli_error("deployment manifest", error),
+    };
+    let trust_root = match lmml_substrate::load_approval_trust_root(options.trust_root) {
+        Ok(value) => value,
+        Err(error) => return model_cli_error("trust root", error),
+    };
+    let private_key = match std::fs::read(options.private_key) {
+        Ok(value) => value,
+        Err(error) => return model_cli_error("private key", error),
+    };
+    let prompt_hash = match lmml_substrate::prompt_configuration_hash(&prompt) {
+        Ok(value) => value,
+        Err(error) => return model_cli_error("prompt configuration", error),
+    };
+    let runtime_hash = match lmml_substrate::runtime_configuration_hash(&runtime) {
+        Ok(value) => value,
+        Err(error) => return model_cli_error("runtime configuration", error),
+    };
+    let deployment_hash = match lmml_substrate::deployment_manifest_hash(&deployment) {
+        Ok(value) => value,
+        Err(error) => return model_cli_error("deployment manifest", error),
+    };
+    let issued_at = match time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+    {
+        Ok(value) => value,
+        Err(error) => return model_cli_error("receipt timestamp", error),
+    };
+    let mut receipt = lmml_substrate::ApprovalReceipt {
+        schema_version: 1,
+        receipt_id: options.receipt_id.to_string(),
+        decision: lmml_substrate::ApprovalDecision::Approved,
+        model_lineage_id: prompt.model_lineage_id,
+        artifact_hash: prompt.artifact_hash,
+        prompt_configuration_hash: prompt_hash,
+        runtime_configuration_hash: runtime_hash,
+        deployment_manifest_hash: deployment_hash,
+        policy_version: options.policy_version.to_string(),
+        validation_suite_id: options.validation_suite_id.to_string(),
+        reviewer_id: options.reviewer_id.to_string(),
+        signing_key_id: trust_root.key_id.clone(),
+        sequence: options.sequence,
+        issued_at,
+        signature_hex: String::new(),
+    };
+    if let Err(error) = lmml_substrate::sign_approval_receipt(&mut receipt, &private_key) {
+        return model_cli_error("approval signing", error);
+    }
+    let path = match lmml_substrate::store_approval_receipt(
+        options.store_dir,
+        options.anchor,
+        &receipt,
+        &trust_root,
+    ) {
+        Ok(path) => path,
+        Err(error) => return model_cli_error("approval storage", error),
+    };
+    let bundle_path = if let Some(bundle_path) = options.bundle_out.as_ref() {
+        let bundle = lmml_substrate::ApprovalBundle {
+            schema_version: 1,
+            bundle_id: options.receipt_id.to_string(),
+            prompt: options.prompt.to_path_buf(),
+            runtime: options.runtime.to_path_buf(),
+            deployment: options.deployment.to_path_buf(),
+            snapshot_root: match options.snapshot_root.as_ref() {
+                Some(path) => path.clone(),
+                None => {
+                    return model_cli_error(
+                        "approval bundle",
+                        "--snapshot-root is required when --bundle-out is used",
+                    )
+                }
+            },
+            receipt: path.clone(),
+            trust_root: options.trust_root.to_path_buf(),
+            revocation_state: None,
+            backend_api_key_env: options.backend_api_key_env.clone(),
+            public_port: options.public_port,
+            backend_port: options.backend_port,
+            context: options.context,
+            gpu_layers: options.gpu_layers,
+            threads: options.threads,
+        };
+        if let Err(error) = lmml_substrate::validate_approval_bundle(&bundle) {
+            return model_cli_error("approval bundle", error);
+        }
+        match lmml_substrate::store_approval_bundle(bundle_path, &bundle) {
+            Ok(path) => Some(path),
+            Err(error) => return model_cli_error("approval bundle", error),
+        }
+    } else {
+        None
+    };
+    if options.json {
+        match serde_json::to_string_pretty(&receipt) {
+            Ok(payload) => println!("{payload}"),
+            Err(error) => return model_cli_error("approval output", error),
+        }
+    } else {
+        println!("approved receipt: {}", path.display());
+        println!("receipt id: {}", receipt.receipt_id);
+        println!(
+            "prompt configuration: {}",
+            receipt.prompt_configuration_hash
+        );
+        println!(
+            "runtime configuration: {}",
+            receipt.runtime_configuration_hash
+        );
+        println!("deployment: {}", receipt.deployment_manifest_hash);
+        match bundle_path {
+            Some(path) => println!(
+                "bundle: {} (launch requires LMML_APPROVAL_ENFORCEMENT=1)",
+                path.display()
+            ),
+            None => println!("mode: inspection_only (no launch bundle created)"),
+        }
+    }
+    0
+}
+
+fn rotate_approval_trust_root(
+    old_root_path: &Path,
+    old_private_key_path: &Path,
+    new_key_id: &str,
+    new_root_path: &Path,
+    new_private_key_path: &Path,
+    migration_path: &Path,
+    sequence: u64,
+) -> i32 {
+    let old_root = match lmml_substrate::load_approval_trust_root(old_root_path) {
+        Ok(root) => root,
+        Err(error) => return model_cli_error("old trust root", error),
+    };
+    let old_private_key = match std::fs::read(old_private_key_path) {
+        Ok(key) => key,
+        Err(error) => return model_cli_error("old private key", error),
+    };
+    let (new_root, new_private_key) =
+        match lmml_substrate::generate_approval_trust_root(new_key_id.to_string()) {
+            Ok(value) => value,
+            Err(error) => return model_cli_error("new trust root", error),
+        };
+    let issued_at = match time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+    {
+        Ok(value) => value,
+        Err(error) => return model_cli_error("rotation timestamp", error),
+    };
+    let mut rotation = lmml_substrate::TrustRootRotation {
+        schema_version: 1,
+        old_key_id: old_root.key_id.clone(),
+        old_key_epoch: old_root.key_epoch,
+        new_root: new_root.clone(),
+        sequence,
+        issued_at,
+        signature_hex: String::new(),
+    };
+    if let Err(error) = lmml_substrate::sign_trust_root_rotation(&mut rotation, &old_private_key) {
+        return model_cli_error("rotation signing", error);
+    }
+    if let Err(error) = write_private_key(new_private_key_path, &new_private_key) {
+        return model_cli_error("new private key", error);
+    }
+    if let Err(error) = lmml_substrate::store_trust_root_rotation(
+        new_root_path,
+        migration_path,
+        &rotation,
+        &old_root,
+    ) {
+        return model_cli_error("trust-root rotation", error);
+    }
+    println!("new trust root: {}", new_root_path.display());
+    println!("new private key: {}", new_private_key_path.display());
+    println!("signed migration: {}", migration_path.display());
+    0
+}
+
+fn write_private_key(path: &Path, key: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| error.to_string())?;
+    file.write_all(key).map_err(|error| error.to_string())?;
+    file.sync_all().map_err(|error| error.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+struct TemplateStatusOptions<'a> {
+    prompt: &'a Path,
+    runtime: &'a Path,
+    deployment: &'a Path,
+    receipt: &'a Path,
+    trust_root: &'a Path,
+    revocation_state: Option<&'a Path>,
+    snapshot_root: Option<&'a Path>,
+    json: bool,
+}
+
+fn template_status(options: TemplateStatusOptions<'_>) -> i32 {
+    let prompt: lmml_substrate::PromptConfiguration = match read_json(options.prompt) {
+        Ok(value) => value,
+        Err(error) => return model_cli_error("prompt configuration", error),
+    };
+    let runtime: lmml_substrate::RuntimeConfiguration = match read_json(options.runtime) {
+        Ok(value) => value,
+        Err(error) => return model_cli_error("runtime configuration", error),
+    };
+    let deployment: lmml_substrate::DeploymentManifest = match read_json(options.deployment) {
+        Ok(value) => value,
+        Err(error) => return model_cli_error("deployment manifest", error),
+    };
+    if let Some(snapshot_root) = options.snapshot_root {
+        if let Err(error) = lmml_substrate::verify_deployment_snapshot(snapshot_root, &deployment) {
+            return model_cli_error("deployment snapshot", error);
+        }
+    }
+    let trust_root = match lmml_substrate::load_approval_trust_root(options.trust_root) {
+        Ok(value) => value,
+        Err(error) => return model_cli_error("trust root", error),
+    };
+    let receipt = match lmml_substrate::load_approval_receipt(options.receipt, &trust_root) {
+        Ok(value) => value,
+        Err(error) => return model_cli_error("approval receipt", error),
+    };
+    let revoked = match options.revocation_state {
+        Some(path) => match lmml_substrate::load_revocation_state(path, &trust_root) {
+            Ok(state) => lmml_substrate::is_receipt_revoked(&state, &receipt.receipt_id),
+            Err(error) => return model_cli_error("revocation state", error),
+        },
+        None => false,
+    };
+    let prompt_hash = match lmml_substrate::prompt_configuration_hash(&prompt) {
+        Ok(value) => value,
+        Err(error) => return model_cli_error("prompt configuration", error),
+    };
+    let runtime_hash = match lmml_substrate::runtime_configuration_hash(&runtime) {
+        Ok(value) => value,
+        Err(error) => return model_cli_error("runtime configuration", error),
+    };
+    let deployment_hash = match lmml_substrate::deployment_manifest_hash(&deployment) {
+        Ok(value) => value,
+        Err(error) => return model_cli_error("deployment manifest", error),
+    };
+    let status = lmml_substrate::compute_admission_status(
+        Some(&receipt),
+        &prompt_hash,
+        &runtime_hash,
+        &deployment_hash,
+        revoked,
+    );
+    if options.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&status).expect("admission status serialization")
+        );
+    } else {
+        println!("state: {:?}", status.state);
+        println!("reason: {}", status.reason);
+        println!("receipt: {}", receipt.receipt_id);
+    }
+    (status.state != lmml_substrate::AdmissionState::Approved) as i32
+}
+
+fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, String> {
+    let payload = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+    serde_json::from_str(&payload).map_err(|error| error.to_string())
+}
+
+fn model_cli_error(context: &str, error: impl std::fmt::Display) -> i32 {
+    eprintln!("{context} failed: {error}");
+    1
 }
 
 fn verify_model(root: &Path, manifest_path: &Path, json: bool) -> i32 {

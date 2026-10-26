@@ -12,16 +12,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::State;
-use axum::http::{HeaderMap, Request as AxumRequest, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Request as AxumRequest, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use lmml_api::{
-    AgentQDescriptor, ApiErrorBody, BackendKind, ErrorResponse, GpuDescriptor, HealthResponse,
-    InferRequest, InferResponse, LoadResponse, ModelDescriptor, NodeCapabilities, NodeRole,
-    NodeStatus, PrivacyTier, ServerAction, ServerControlRequest, ServerControlResponse,
-    API_VERSION, HEADER_REQUEST_ID, LAN_DISCOVERY_DEFAULT_INTERVAL_MS,
-    LAN_DISCOVERY_MULTICAST_ADDR,
+    unix_now, validate_gateway_attestation_binding, verify_gateway_attestation, AgentQDescriptor,
+    ApiErrorBody, BackendKind, ErrorResponse, GpuDescriptor, HealthResponse, InferRequest,
+    InferResponse, LoadResponse, ModelDescriptor, NodeCapabilities, NodeRole, NodeStatus,
+    PrivacyTier, ServerAction, ServerControlRequest, ServerControlResponse, API_VERSION,
+    HEADER_APPROVED_UPSTREAM, HEADER_GATEWAY_ATTESTATION, HEADER_REQUEST_ID,
+    LAN_DISCOVERY_DEFAULT_INTERVAL_MS, LAN_DISCOVERY_MULTICAST_ADDR,
 };
 use lmml_detect::{
     detect_rocm_vram, BuildBackend, GpuInfo, GpuVramInfo, RocmGpuInfo, SystemProfile,
@@ -67,7 +68,9 @@ pub struct NodeConfig {
     pub public_url: Option<String>,
     /// Directories scanned for local GGUF models.
     pub model_dirs: Vec<PathBuf>,
-    /// Local llama-server base URL used by `POST /v1/infer`.
+    /// Local llama-server or LMML-gateway base URL used by `POST /v1/infer`.
+    /// When the URL is an authenticated gateway, [`NodeConfig::api_key`] is
+    /// forwarded as the upstream bearer credential.
     pub llama_base_url: String,
     /// Timeout for proxied inference requests in milliseconds.
     pub infer_timeout_ms: u64,
@@ -158,6 +161,15 @@ pub enum NodeConfigError {
     /// Server control requires bearer authentication even on localhost.
     #[error("API key required when enabling lmml-node server control")]
     ApiKeyRequiredForServerControl,
+    /// Approval enforcement requires a verified LMML gateway upstream.
+    #[error("LMML_APPROVAL_ENFORCEMENT requires llama_base_url to be an approved LMML gateway")]
+    ApprovalGatewayRequired,
+    /// The configured approval gateway could not be reached.
+    #[error("approved LMML gateway health check failed: {reason}")]
+    ApprovalGatewayUnavailable {
+        /// Transport or client construction failure.
+        reason: String,
+    },
     /// LAN advertisement requires bearer authentication on protected routes.
     #[error("API key required when enabling lmml-node LAN advertisement")]
     ApiKeyRequiredForLanAdvertisement,
@@ -207,6 +219,9 @@ impl NodeSnapshot {
     #[tracing::instrument(skip(config), fields(node_id = %config.node_id))]
     pub async fn detect(config: NodeConfig) -> Result<Self, NodeConfigError> {
         config.validate()?;
+        if approval_enforcement_enabled() {
+            verify_approval_gateway(&config.llama_base_url, config.api_key.as_deref()).await?;
+        }
         let system = if config.skip_system_probe {
             SystemProfile::skipped_probe()
         } else {
@@ -310,6 +325,108 @@ impl NodeSnapshot {
     }
 }
 
+fn approval_enforcement_enabled() -> bool {
+    matches!(
+        std::env::var("LMML_APPROVAL_ENFORCEMENT").ok().as_deref(),
+        Some("1" | "true" | "yes")
+    )
+}
+
+async fn verify_approval_gateway(
+    base_url: &str,
+    api_key: Option<&str>,
+) -> Result<(), NodeConfigError> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|error| NodeConfigError::ApprovalGatewayUnavailable {
+            reason: error.to_string(),
+        })?;
+    let mut request = client.get(format!("{}/health", base_url.trim_end_matches('/')));
+    if let Some(api_key) = api_key.filter(|value| !value.is_empty()) {
+        request = request.bearer_auth(api_key);
+    }
+    let response =
+        request
+            .send()
+            .await
+            .map_err(|error| NodeConfigError::ApprovalGatewayUnavailable {
+                reason: error.to_string(),
+            })?;
+    if !response.status().is_success() {
+        return Err(NodeConfigError::ApprovalGatewayRequired);
+    }
+    let attestation = response
+        .headers()
+        .get(HEADER_GATEWAY_ATTESTATION)
+        .and_then(|value| value.to_str().ok())
+        .ok_or(NodeConfigError::ApprovalGatewayRequired)?;
+    let public_key =
+        gateway_attestation_public_key().ok_or(NodeConfigError::ApprovalGatewayRequired)?;
+    if verify_gateway_attestation_bound(attestation, &public_key).is_err() {
+        return Err(NodeConfigError::ApprovalGatewayRequired);
+    }
+    Ok(())
+}
+
+fn gateway_attestation_binding() -> Option<lmml_api::GatewayAttestationBinding> {
+    Some(lmml_api::GatewayAttestationBinding {
+        gateway_id: std::env::var("LMML_GATEWAY_ID").ok()?,
+        deployment_hash: std::env::var("LMML_GATEWAY_DEPLOYMENT_HASH").ok()?,
+        receipt_id: std::env::var("LMML_GATEWAY_RECEIPT_ID").ok()?,
+        receipt_sequence: std::env::var("LMML_GATEWAY_RECEIPT_SEQUENCE")
+            .ok()?
+            .parse()
+            .ok()?,
+        revocation_epoch: std::env::var("LMML_GATEWAY_REVOCATION_EPOCH")
+            .ok()?
+            .parse()
+            .ok()?,
+    })
+}
+
+fn verify_gateway_attestation_bound(
+    encoded: &str,
+    public_key: &[u8],
+) -> Result<lmml_api::GatewayAttestation, NodeConfigError> {
+    let attestation = verify_gateway_attestation(encoded, public_key, unix_now())
+        .map_err(|_| NodeConfigError::ApprovalGatewayRequired)?;
+    let binding = gateway_attestation_binding().ok_or(NodeConfigError::ApprovalGatewayRequired)?;
+    validate_gateway_attestation_binding(&attestation.claims, &binding)
+        .map_err(|_| NodeConfigError::ApprovalGatewayRequired)?;
+    Ok(attestation)
+}
+
+fn gateway_attestation_public_key() -> Option<Vec<u8>> {
+    let value = std::env::var("LMML_GATEWAY_ATTESTATION_PUBLIC_KEY_HEX").ok()?;
+    if !value.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..value.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&value[index..index + 2], 16).ok())
+        .collect()
+}
+
+async fn ensure_approved_upstream(state: &NodeAppState) -> Result<(), ApiFailure> {
+    if !approval_enforcement_enabled() {
+        return Ok(());
+    }
+    verify_approval_gateway(
+        &state.snapshot.config.llama_base_url,
+        state.snapshot.config.api_key.as_deref(),
+    )
+    .await
+    .map_err(|error| {
+        ApiFailure::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "approved_gateway_unavailable",
+            error.to_string(),
+            None,
+        )
+    })
+}
+
 /// Shared application state for the node HTTP router.
 #[derive(Debug, Clone)]
 pub struct NodeAppState {
@@ -343,9 +460,61 @@ pub fn router(state: NodeAppState) -> Router {
         .with_state(state)
 }
 
-async fn health(State(state): State<NodeAppState>) -> Json<HealthResponse> {
+async fn health(State(state): State<NodeAppState>) -> Response {
     let llama_healthy = upstream_llama_healthy(&state).await;
-    Json(state.snapshot.health(llama_healthy))
+    let mut response = Json(state.snapshot.health(llama_healthy)).into_response();
+    if approval_enforcement_enabled() {
+        if let Ok(attestation) = fetch_verified_gateway_attestation(&state).await {
+            response.headers_mut().insert(
+                HEADER_APPROVED_UPSTREAM,
+                HeaderValue::from_static("approved"),
+            );
+            if let Ok(value) = HeaderValue::try_from(attestation) {
+                response
+                    .headers_mut()
+                    .insert(HEADER_GATEWAY_ATTESTATION, value);
+            }
+        }
+    }
+    response
+}
+
+async fn fetch_verified_gateway_attestation(
+    state: &NodeAppState,
+) -> Result<String, NodeConfigError> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|error| NodeConfigError::ApprovalGatewayUnavailable {
+            reason: error.to_string(),
+        })?;
+    let mut request = client.get(format!(
+        "{}/health",
+        state.snapshot.config.llama_base_url.trim_end_matches('/')
+    ));
+    if let Some(api_key) = state.snapshot.config.api_key.as_deref() {
+        request = request.bearer_auth(api_key);
+    }
+    let response =
+        request
+            .send()
+            .await
+            .map_err(|error| NodeConfigError::ApprovalGatewayUnavailable {
+                reason: error.to_string(),
+            })?;
+    if !response.status().is_success() {
+        return Err(NodeConfigError::ApprovalGatewayRequired);
+    }
+    let attestation = response
+        .headers()
+        .get(HEADER_GATEWAY_ATTESTATION)
+        .and_then(|value| value.to_str().ok())
+        .ok_or(NodeConfigError::ApprovalGatewayRequired)?
+        .to_string();
+    let public_key =
+        gateway_attestation_public_key().ok_or(NodeConfigError::ApprovalGatewayRequired)?;
+    verify_gateway_attestation_bound(&attestation, &public_key)?;
+    Ok(attestation)
 }
 
 async fn capabilities(
@@ -428,6 +597,7 @@ async fn server_control(
 ) -> Result<Json<ServerControlResponse>, ApiFailure> {
     let request_id = request_id_from_headers(request.headers());
     authorize(&state.snapshot.config, request.headers())?;
+    ensure_approved_upstream(&state).await?;
     if !state.snapshot.config.enable_server_control {
         return Err(ApiFailure::new(
             StatusCode::NOT_FOUND,
@@ -561,6 +731,7 @@ async fn proxy_json_passthrough(
     request: AxumRequest<axum::body::Body>,
     upstream_path: &str,
 ) -> Result<Response, ApiFailure> {
+    ensure_approved_upstream(state).await?;
     let body = read_authorized_body(&state.snapshot.config, request).await?;
     ensure_json_body(&body)?;
     let url = upstream_url(&state.snapshot.config.llama_base_url, upstream_path);
@@ -573,6 +744,7 @@ async fn proxy_json_passthrough(
             .post(url)
             .header(axum::http::header::CONTENT_TYPE, "application/json")
             .body(upstream_body);
+        request = authenticate_upstream(request, state.snapshot.config.api_key.as_deref());
         if let Some(request_id) = upstream_request_id.as_deref() {
             request = request.header(HEADER_REQUEST_ID, request_id);
         }
@@ -642,6 +814,7 @@ async fn anthropic_messages_inner(
     state: &NodeAppState,
     request: AxumRequest<axum::body::Body>,
 ) -> Result<Response, ApiFailure> {
+    ensure_approved_upstream(state).await?;
     let body = read_authorized_body(&state.snapshot.config, request).await?;
     let request = serde_json::from_slice::<Value>(&body.bytes).map_err(|error| {
         ApiFailure::new(
@@ -676,7 +849,10 @@ async fn call_upstream_chat_json(
     let url = upstream_chat_completions_url(&state.snapshot.config.llama_base_url);
     let timeout = Duration::from_millis(state.snapshot.config.infer_timeout_ms);
     let upstream = tokio::time::timeout(timeout, async {
-        let mut request = state.client.post(url).json(upstream_request);
+        let mut request = authenticate_upstream(
+            state.client.post(url).json(upstream_request),
+            state.snapshot.config.api_key.as_deref(),
+        );
         if let Some(request_id) = request_id.as_deref() {
             request = request.header(HEADER_REQUEST_ID, request_id);
         }
@@ -1301,6 +1477,7 @@ async fn proxy_infer(
     state: &NodeAppState,
     request: InferRequest,
 ) -> Result<InferResponse, ApiFailure> {
+    ensure_approved_upstream(state).await?;
     let request_id = normalized_request_id(request.request_id.as_deref());
     if request.prompt.trim().is_empty() {
         return Err(ApiFailure::new(
@@ -1377,7 +1554,11 @@ async fn upstream_llama_healthy(state: &NodeAppState) -> bool {
     let timeout = Duration::from_millis(HEALTH_CHECK_TIMEOUT_MS);
     for path in ["/v1/health", "/health"] {
         let url = upstream_url(&state.snapshot.config.llama_base_url, path);
-        let Ok(result) = tokio::time::timeout(timeout, state.client.get(url).send()).await else {
+        let request = authenticate_upstream(
+            state.client.get(url),
+            state.snapshot.config.api_key.as_deref(),
+        );
+        let Ok(result) = tokio::time::timeout(timeout, request.send()).await else {
             continue;
         };
         let Ok(response) = result else {
@@ -1475,6 +1656,16 @@ fn next_request_id() -> String {
 
 fn upstream_chat_completions_url(base_url: &str) -> String {
     upstream_url(base_url, "/v1/chat/completions")
+}
+
+fn authenticate_upstream(
+    request: reqwest::RequestBuilder,
+    api_key: Option<&str>,
+) -> reqwest::RequestBuilder {
+    match api_key.filter(|value| !value.is_empty()) {
+        Some(api_key) => request.bearer_auth(api_key),
+        None => request,
+    }
 }
 
 fn upstream_url(base_url: &str, path: &str) -> String {

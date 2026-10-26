@@ -18,6 +18,7 @@ path = "src/main.rs"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"
 lmml-build = { path = "../lmml-build" }
+lmml-gateway = { path = "../lmml-gateway" }
 lmml-compat = { path = "../lmml-compat" }
 lmml-detect = { path = "../lmml-detect" }
 lmml-models = { path = "../lmml-models" }
@@ -31,7 +32,7 @@ serde_json = "1"
 tempfile = "3"
 time = { version = "0.3", features = ["formatting"] }
 thiserror = "2"
-tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

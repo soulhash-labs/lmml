@@ -959,7 +959,9 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 name = "lmml-api"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "pretty_assertions",
+ "ring",
  "serde",
  "serde_json",
 ]
@@ -1000,6 +1002,22 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "lmml-gateway"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "futures-util",
+ "lmml-api",
+ "lmml-substrate",
+ "reqwest",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tower",
+ "url",
 ]
 
 [[package]]
@@ -1064,6 +1082,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "lmml-compat",
+ "lmml-gateway",
  "lmml-models",
  "pretty_assertions",
  "reqwest",
@@ -1090,6 +1109,7 @@ dependencies = [
 name = "lmml-substrate"
 version = "0.1.0"
 dependencies = [
+ "ring",
  "serde",
  "serde_json",
  "sha2",
@@ -1109,6 +1129,7 @@ dependencies = [
  "lmml-build",
  "lmml-compat",
  "lmml-detect",
+ "lmml-gateway",
  "lmml-models",
  "lmml-server",
  "lmml-state",

@@ -274,6 +274,9 @@ pub async fn start_profile(
     profile_name: &str,
     startup_timeout: Duration,
 ) -> Result<RuntimeStartResult, RuntimeCliError> {
+    if approval_enforcement_enabled() {
+        return Err(RuntimeCliError::ApprovalGatewayRequired);
+    }
     let profile = state
         .runtime
         .profile(profile_name)
@@ -390,6 +393,14 @@ pub async fn start_profile(
             })
         }
     }
+}
+
+/// Return whether legacy direct llama-server launches are disabled.
+pub fn approval_enforcement_enabled() -> bool {
+    matches!(
+        env::var("LMML_APPROVAL_ENFORCEMENT").ok().as_deref(),
+        Some("1" | "true" | "TRUE" | "yes" | "YES")
+    )
 }
 
 /// Stop a detached runtime profile process recorded in state.
@@ -1356,6 +1367,11 @@ fn default_opencode_config_path_from_env(
 /// Errors returned by runtime-profile CLI helpers.
 #[derive(Debug, Error)]
 pub enum RuntimeCliError {
+    /// Legacy direct backend launch is disabled until the approved gateway path is used.
+    #[error(
+        "direct llama-server launch is disabled by LMML_APPROVAL_ENFORCEMENT; use the approved gateway path"
+    )]
+    ApprovalGatewayRequired,
     /// Runtime profile was not known.
     #[error("unknown runtime profile")]
     UnknownProfile,

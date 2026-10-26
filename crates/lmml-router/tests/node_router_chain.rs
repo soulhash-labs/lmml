@@ -314,11 +314,7 @@ fn fallback_binary(name: &str) -> PathBuf {
     }
     path.push("debug");
     path.push(name);
-    let package = match name {
-        "lmml-node" => "lmml-node",
-        "lmml-router" => "lmml-router",
-        _ => name,
-    };
+    let package = name;
     let status = StdCommand::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
         .arg("build")
         .arg("-p")

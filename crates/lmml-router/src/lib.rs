@@ -19,9 +19,11 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use lmml_api::{
-    ApiErrorBody, BackendKind, ErrorResponse, HealthResponse, InferRequest, LoadResponse,
-    ModelDescriptor, NodeCapabilities, NodeRole, NodeStatus, PrivacyTier, API_VERSION,
-    HEADER_NODE_ID, HEADER_REQUEST_ID, LAN_DISCOVERY_DEFAULT_TTL_MS,
+    unix_now, validate_gateway_attestation_binding, verify_gateway_attestation, ApiErrorBody,
+    BackendKind, ErrorResponse, GatewayAttestationBinding, HealthResponse, InferRequest,
+    LoadResponse, ModelDescriptor, NodeCapabilities, NodeRole, NodeStatus, PrivacyTier,
+    API_VERSION, HEADER_APPROVED_UPSTREAM, HEADER_GATEWAY_ATTESTATION, HEADER_NODE_ID,
+    HEADER_REQUEST_ID, LAN_DISCOVERY_DEFAULT_TTL_MS,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -466,6 +468,7 @@ async fn embeddings(
 struct UpstreamProbe {
     config: UpstreamNodeConfig,
     health: Option<HealthResponse>,
+    approved_upstream: bool,
     capabilities: Option<NodeCapabilities>,
     load: Option<LoadResponse>,
 }
@@ -483,7 +486,8 @@ impl UpstreamProbe {
                 .as_ref()
                 .map(|capabilities| capabilities.auth_required)
                 .unwrap_or(false);
-        health_ready && auth_verified
+        let approval_verified = !approval_enforcement_enabled() || self.approved_upstream;
+        health_ready && auth_verified && approval_verified
     }
 
     fn running_requests(&self) -> u32 {
@@ -755,17 +759,97 @@ async fn fetch_upstream_probe(
     upstream: &UpstreamNodeConfig,
 ) -> UpstreamProbe {
     let timeout = Duration::from_millis(state.config.discovery_timeout_ms);
-    let health = get_upstream_json::<HealthResponse>(state, upstream, "/v1/health", timeout);
+    let health = get_upstream_health(state, upstream, timeout);
     let capabilities =
         get_upstream_json::<NodeCapabilities>(state, upstream, "/v1/capabilities", timeout);
     let load = get_upstream_json::<LoadResponse>(state, upstream, "/v1/load", timeout);
     let (health, capabilities, load) = tokio::join!(health, capabilities, load);
+    let (health, approved_upstream) = health.unwrap_or((None, false));
     UpstreamProbe {
         config: upstream.clone(),
-        health: health.ok(),
+        health,
+        approved_upstream,
         capabilities: capabilities.ok(),
         load: load.ok(),
     }
+}
+
+async fn get_upstream_health(
+    state: &RouterAppState,
+    upstream: &UpstreamNodeConfig,
+    timeout: Duration,
+) -> Result<(Option<HealthResponse>, bool), reqwest::Error> {
+    let mut request = state
+        .client
+        .get(upstream_url(&upstream.base_url, "/v1/health"));
+    if let Some(api_key) = upstream.api_key.as_deref() {
+        request = request.bearer_auth(api_key);
+    }
+    let response = request.timeout(timeout).send().await?;
+    let approved = if approval_enforcement_enabled() {
+        let key = std::env::var("LMML_GATEWAY_ATTESTATION_PUBLIC_KEY_HEX")
+            .ok()
+            .and_then(|value| decode_hex(&value));
+        response
+            .headers()
+            .get(HEADER_GATEWAY_ATTESTATION)
+            .and_then(|value| value.to_str().ok())
+            .zip(key.as_deref())
+            .and_then(|(attestation, key)| verify_gateway_attestation_bound(attestation, key).ok())
+            .is_some()
+    } else {
+        response
+            .headers()
+            .get(HEADER_APPROVED_UPSTREAM)
+            .and_then(|value| value.to_str().ok())
+            == Some("approved")
+    };
+    let health = response.json::<HealthResponse>().await?;
+    Ok((Some(health), approved))
+}
+
+fn decode_hex(value: &str) -> Option<Vec<u8>> {
+    if !value.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..value.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&value[index..index + 2], 16).ok())
+        .collect()
+}
+
+fn gateway_attestation_binding() -> Option<GatewayAttestationBinding> {
+    Some(GatewayAttestationBinding {
+        gateway_id: std::env::var("LMML_GATEWAY_ID").ok()?,
+        deployment_hash: std::env::var("LMML_GATEWAY_DEPLOYMENT_HASH").ok()?,
+        receipt_id: std::env::var("LMML_GATEWAY_RECEIPT_ID").ok()?,
+        receipt_sequence: std::env::var("LMML_GATEWAY_RECEIPT_SEQUENCE")
+            .ok()?
+            .parse()
+            .ok()?,
+        revocation_epoch: std::env::var("LMML_GATEWAY_REVOCATION_EPOCH")
+            .ok()?
+            .parse()
+            .ok()?,
+    })
+}
+
+fn verify_gateway_attestation_bound(
+    encoded: &str,
+    public_key: &[u8],
+) -> Result<lmml_api::GatewayAttestation, String> {
+    let attestation = verify_gateway_attestation(encoded, public_key, unix_now())?;
+    let binding = gateway_attestation_binding()
+        .ok_or_else(|| "gateway attestation binding is not configured".to_string())?;
+    validate_gateway_attestation_binding(&attestation.claims, &binding)?;
+    Ok(attestation)
+}
+
+fn approval_enforcement_enabled() -> bool {
+    matches!(
+        std::env::var("LMML_APPROVAL_ENFORCEMENT").ok().as_deref(),
+        Some("1" | "true" | "yes")
+    )
 }
 
 async fn get_upstream_json<T>(

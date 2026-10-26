@@ -15,7 +15,11 @@
 //! ```
 
 use std::collections::BTreeMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
+use ring::signature;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -27,6 +31,141 @@ pub const HEADER_REQUEST_ID: &str = "x-lmml-request-id";
 
 /// Header used by nodes to identify the worker handling a response.
 pub const HEADER_NODE_ID: &str = "x-lmml-node-id";
+
+/// Header used by enforced nodes to prove that their inference upstream is an
+/// approved LMML gateway rather than a raw llama-server endpoint.
+pub const HEADER_APPROVED_UPSTREAM: &str = "x-lmml-approved-upstream";
+
+/// Signed, short-lived proof that an upstream is the admitted LMML gateway.
+pub const HEADER_GATEWAY_ATTESTATION: &str = "x-lmml-gateway-attestation";
+
+/// Claims signed by the gateway attestation key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatewayAttestationClaims {
+    /// Contract version.
+    pub schema_version: u32,
+    /// Stable gateway identity.
+    pub gateway_id: String,
+    /// Deployment hash currently loaded by the gateway.
+    pub deployment_hash: String,
+    /// Approval receipt identity and sequence.
+    pub receipt_id: String,
+    /// Approval receipt sequence.
+    pub receipt_sequence: u64,
+    /// Revocation epoch observed when the proof was issued.
+    pub revocation_epoch: u64,
+    /// Unix seconds when the proof was issued.
+    pub issued_at_unix: i64,
+    /// Unix seconds after which the proof is invalid.
+    pub expires_at_unix: i64,
+}
+
+/// Wire representation of a signed gateway attestation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatewayAttestation {
+    /// Signed claims.
+    pub claims: GatewayAttestationClaims,
+    /// Ed25519 signature encoded as lowercase hexadecimal.
+    pub signature_hex: String,
+}
+
+/// Expected approval context used to bind a gateway proof to one deployment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GatewayAttestationBinding {
+    /// Expected gateway identity.
+    pub gateway_id: String,
+    /// Expected deployment hash.
+    pub deployment_hash: String,
+    /// Expected receipt identity.
+    pub receipt_id: String,
+    /// Expected receipt sequence.
+    pub receipt_sequence: u64,
+    /// Expected revocation epoch.
+    pub revocation_epoch: u64,
+}
+
+/// Sign gateway claims with an operator-provisioned Ed25519 PKCS#8 key.
+pub fn sign_gateway_attestation(
+    claims: GatewayAttestationClaims,
+    pkcs8_key: &[u8],
+) -> Result<String, String> {
+    let key = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8_key)
+        .map_err(|_| "invalid gateway attestation private key".to_string())?;
+    let payload = serde_json::to_vec(&claims).map_err(|error| error.to_string())?;
+    let signature_hex = hex_encode(key.sign(&payload).as_ref());
+    let attestation = GatewayAttestation {
+        claims,
+        signature_hex,
+    };
+    let bytes = serde_json::to_vec(&attestation).map_err(|error| error.to_string())?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
+}
+
+/// Verify and decode a gateway attestation, including its expiry window.
+pub fn verify_gateway_attestation(
+    encoded: &str,
+    public_key: &[u8],
+    now_unix: i64,
+) -> Result<GatewayAttestation, String> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| "invalid gateway attestation encoding".to_string())?;
+    let attestation: GatewayAttestation = serde_json::from_slice(&bytes)
+        .map_err(|_| "invalid gateway attestation JSON".to_string())?;
+    if attestation.claims.schema_version != 1
+        || attestation.claims.expires_at_unix <= now_unix
+        || attestation.claims.issued_at_unix > now_unix + 5
+        || attestation.claims.issued_at_unix >= attestation.claims.expires_at_unix
+    {
+        return Err("gateway attestation is expired or invalid".to_string());
+    }
+    let signature_bytes = hex_decode(&attestation.signature_hex)
+        .ok_or_else(|| "invalid gateway attestation signature".to_string())?;
+    let public = signature::UnparsedPublicKey::new(&signature::ED25519, public_key);
+    let payload = serde_json::to_vec(&attestation.claims).map_err(|error| error.to_string())?;
+    public
+        .verify(&payload, &signature_bytes)
+        .map_err(|_| "gateway attestation signature verification failed".to_string())?;
+    Ok(attestation)
+}
+
+/// Verify that signed claims belong to the expected approved deployment.
+pub fn validate_gateway_attestation_binding(
+    claims: &GatewayAttestationClaims,
+    expected: &GatewayAttestationBinding,
+) -> Result<(), String> {
+    if claims.gateway_id != expected.gateway_id
+        || claims.deployment_hash != expected.deployment_hash
+        || claims.receipt_id != expected.receipt_id
+        || claims.receipt_sequence != expected.receipt_sequence
+        || claims.revocation_epoch != expected.revocation_epoch
+    {
+        return Err("gateway attestation claims do not match the approved deployment".into());
+    }
+    Ok(())
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn hex_decode(value: &str) -> Option<Vec<u8>> {
+    if !value.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..value.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&value[index..index + 2], 16).ok())
+        .collect()
+}
+
+/// Return current Unix seconds for gateway attestation issuance.
+pub fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or_default()
+}
 
 /// Default IPv4 multicast endpoint for LAN node advertisements.
 pub const LAN_DISCOVERY_MULTICAST_ADDR: &str = "239.77.77.11:8177";
@@ -519,6 +658,7 @@ pub struct ApiErrorBody {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+    use ring::signature::KeyPair;
     use serde_json::json;
 
     #[test]
@@ -627,5 +767,51 @@ mod tests {
             serde_json::from_str(&text).expect("deserialize error response");
 
         assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn gateway_attestation_is_signed_and_expires() {
+        let rng = ring::rand::SystemRandom::new();
+        let key = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("generate key");
+        let pair = ring::signature::Ed25519KeyPair::from_pkcs8(key.as_ref()).expect("parse key");
+        let claims = GatewayAttestationClaims {
+            schema_version: 1,
+            gateway_id: "gateway-a".into(),
+            deployment_hash: "sha256:deployment".into(),
+            receipt_id: "receipt-a".into(),
+            receipt_sequence: 4,
+            revocation_epoch: 2,
+            issued_at_unix: 100,
+            expires_at_unix: 130,
+        };
+        let encoded = sign_gateway_attestation(claims.clone(), key.as_ref()).expect("sign");
+        let verified =
+            verify_gateway_attestation(&encoded, pair.public_key().as_ref(), 110).expect("verify");
+        assert_eq!(verified.claims, claims);
+        validate_gateway_attestation_binding(
+            &verified.claims,
+            &GatewayAttestationBinding {
+                gateway_id: "gateway-a".into(),
+                deployment_hash: "sha256:deployment".into(),
+                receipt_id: "receipt-a".into(),
+                receipt_sequence: 4,
+                revocation_epoch: 2,
+            },
+        )
+        .expect("binding");
+        let mut mismatched = verified.claims.clone();
+        mismatched.deployment_hash = "sha256:other".into();
+        assert!(validate_gateway_attestation_binding(
+            &mismatched,
+            &GatewayAttestationBinding {
+                gateway_id: "gateway-a".into(),
+                deployment_hash: "sha256:deployment".into(),
+                receipt_id: "receipt-a".into(),
+                receipt_sequence: 4,
+                revocation_epoch: 2,
+            },
+        )
+        .is_err());
+        assert!(verify_gateway_attestation(&encoded, pair.public_key().as_ref(), 130).is_err());
     }
 }

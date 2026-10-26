@@ -6,6 +6,7 @@ use std::time::Duration;
 use crossterm::event::{self, Event, KeyEventKind};
 use lmml_build::{RealBuildRunner, UpdateCheck};
 use lmml_server::{ServerHandle, ServerManager};
+use tokio::io::AsyncBufReadExt;
 use tokio::sync::{mpsc, watch};
 
 use crate::action::Action;
@@ -364,6 +365,22 @@ impl EventLoop {
             Action::StartServer => {
                 app.dispatch(Action::StartServer);
                 let tx = self.app_tx.clone();
+                if crate::runtime_cli::approval_enforcement_enabled() {
+                    let Some(bundle) = approved_bundle_from_environment() else {
+                        let _ignored = tx
+                            .send(AppEvent::ServerStarted(Err(
+                                "approval enforcement is enabled; set LMML_APPROVAL_BUNDLE to a signed bundle"
+                                    .to_string(),
+                            )))
+                            .await;
+                        return;
+                    };
+                    if let Ok(bundle_state) = lmml_substrate::load_approval_bundle(&bundle) {
+                        app.state.server.port = bundle_state.public_port;
+                    }
+                    spawn_approved_bundle_start(tx, bundle, None);
+                    return;
+                }
                 let Some(model) = app.selected_server_model() else {
                     let _ignored = tx
                         .send(AppEvent::ServerStarted(Err(
@@ -414,6 +431,25 @@ impl EventLoop {
             Action::ConfirmModelSwap(model) => {
                 app.dispatch(Action::ConfirmModelSwap(model.clone()));
                 let tx = self.app_tx.clone();
+                if crate::runtime_cli::approval_enforcement_enabled() {
+                    let Some(bundle) = approved_bundle_from_environment() else {
+                        let _ignored = tx
+                            .send(AppEvent::ServerStarted(Err(
+                                "approval enforcement is enabled; set LMML_APPROVAL_BUNDLE to a signed bundle"
+                                    .to_string(),
+                            )))
+                            .await;
+                        return;
+                    };
+                    if let Ok(bundle_state) = lmml_substrate::load_approval_bundle(&bundle) {
+                        app.state.server.port = bundle_state.public_port;
+                    }
+                    if let Some(handle) = self.server_handle.take() {
+                        handle.stop().await;
+                    }
+                    spawn_approved_bundle_start(tx, bundle, Some(model));
+                    return;
+                }
                 let config = app.server_config(&model);
                 let runtime =
                     match crate::runtime_cli::resolve_model_runtime(&app.state.build, &model.path)
@@ -456,6 +492,102 @@ impl EventLoop {
             | Action::ShowHelp => app.dispatch(action),
         }
     }
+}
+
+fn approved_bundle_from_environment() -> Option<std::path::PathBuf> {
+    std::env::var_os("LMML_APPROVAL_BUNDLE")
+        .map(std::path::PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+}
+
+fn spawn_approved_bundle_start(
+    tx: mpsc::Sender<AppEvent>,
+    bundle_path: std::path::PathBuf,
+    swap_model: Option<lmml_models::ModelEntry>,
+) {
+    tokio::spawn(async move {
+        let bundle = match lmml_substrate::load_approval_bundle(&bundle_path) {
+            Ok(bundle) => bundle,
+            Err(error) => {
+                send_server_start_result(&tx, swap_model, Err(error.to_string())).await;
+                return;
+            }
+        };
+        let url = format!("http://127.0.0.1:{}", bundle.public_port);
+        let log_tx = start_server_log_forwarder(tx.clone());
+        let executable = match std::env::current_exe() {
+            Ok(path) => path,
+            Err(error) => {
+                send_server_start_result(&tx, swap_model, Err(error.to_string())).await;
+                return;
+            }
+        };
+        let mut child = match tokio::process::Command::new(executable)
+            .args(["runtime", "serve-approved-bundle", "--bundle"])
+            .arg(&bundle_path)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => {
+                send_server_start_result(&tx, swap_model, Err(error.to_string())).await;
+                return;
+            }
+        };
+        if let Some(stdout) = child.stdout.take() {
+            stream_child_log(stdout, log_tx.clone());
+        }
+        if let Some(stderr) = child.stderr.take() {
+            stream_child_log(stderr, log_tx.clone());
+        }
+        let timeout = server_startup_timeout();
+        if let Err(error) =
+            lmml_server::wait_for_ready("127.0.0.1", bundle.public_port, timeout).await
+        {
+            let _ignored = child.kill().await;
+            send_server_start_result(&tx, swap_model, Err(error.to_string())).await;
+            return;
+        }
+        match ServerManager::adopt_external_child(
+            child,
+            "127.0.0.1".to_string(),
+            bundle.public_port,
+            url,
+            log_tx,
+        )
+        .await
+        {
+            Ok(handle) => send_server_start_result(&tx, swap_model, Ok(handle)).await,
+            Err(error) => send_server_start_result(&tx, swap_model, Err(error.to_string())).await,
+        }
+    });
+}
+
+fn start_server_log_forwarder(tx: mpsc::Sender<AppEvent>) -> mpsc::Sender<String> {
+    let (log_tx, mut log_rx) = mpsc::channel(256);
+    tokio::spawn(async move {
+        while let Some(line) = log_rx.recv().await {
+            if tx.send(AppEvent::ServerLog(line)).await.is_err() {
+                break;
+            }
+        }
+    });
+    log_tx
+}
+
+fn stream_child_log<R>(reader: R, tx: mpsc::Sender<String>)
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(reader).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if tx.send(line).await.is_err() {
+                break;
+            }
+        }
+    });
 }
 
 impl Default for EventLoop {
@@ -653,6 +785,7 @@ async fn send_server_start_result(
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use std::path::PathBuf;
 

@@ -380,6 +380,18 @@ pub struct RuntimeManifest {
     pub context_size: usize,
     /// Capabilities actually exposed by this runtime.
     pub capabilities: Vec<RuntimeCapability>,
+    /// Prompt configuration bound to this runtime, when approval is enabled.
+    #[serde(default)]
+    pub prompt_configuration_hash: Option<Hash256>,
+    /// Runtime configuration identity, when approval is enabled.
+    #[serde(default)]
+    pub runtime_configuration_hash: Option<Hash256>,
+    /// Immutable deployment identity, when approval is enabled.
+    #[serde(default)]
+    pub deployment_manifest_hash: Option<Hash256>,
+    /// Signed approval receipt identity, when approval is enabled.
+    #[serde(default)]
+    pub approval_receipt_id: Option<String>,
     /// RFC3339 registration timestamp.
     pub created_at: String,
 }
@@ -687,6 +699,27 @@ impl ActivationObservationProvider for LlamaCppActivationProvider {
 /// Import or verification failures for canonical substrate data.
 #[derive(Debug, Error)]
 pub enum SubstrateError {
+    /// A template approval or deployment contract is malformed.
+    #[error("invalid template approval contract: {0}")]
+    InvalidApprovalContract(String),
+    /// A signed approval receipt is missing its mandatory signature.
+    #[error("approval receipt is unsigned")]
+    UnsignedApproval,
+    /// A signed approval receipt does not verify against the pinned key.
+    #[error("approval receipt signature verification failed")]
+    ApprovalSignatureInvalid,
+    /// A receipt or revocation record would move monotonic state backwards.
+    #[error("approval state rollback detected: {0}")]
+    ApprovalRollback(String),
+    /// A request does not satisfy the approved prompt schema.
+    #[error("request violates approved prompt schema: {0}")]
+    RequestPolicyViolation(String),
+    /// An immutable approval record already exists with different contents.
+    #[error("approval receipt already exists with different contents: {0}")]
+    ApprovalConflict(PathBuf),
+    /// An immutable revocation record already exists with different contents.
+    #[error("revocation state already exists with different contents: {0}")]
+    RevocationConflict(PathBuf),
     /// Canonical root does not exist or is not a directory.
     #[error("canonical substrate root is missing: {0}")]
     MissingRoot(PathBuf),

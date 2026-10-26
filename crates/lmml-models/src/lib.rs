@@ -503,6 +503,8 @@ pub struct GgufMetadata {
     pub tensor_count: u64,
     /// Model display name.
     pub name: Option<String>,
+    /// Embedded default or named chat templates keyed by GGUF metadata key.
+    pub chat_templates: std::collections::BTreeMap<String, String>,
     /// Architecture string.
     pub architecture: Option<String>,
     /// Context length.
@@ -703,6 +705,9 @@ fn apply_metadata_value(metadata: &mut GgufMetadata, key: &str, value: GgufValue
     match (key, value) {
         ("general.name", GgufValue::String(value)) => metadata.name = Some(value),
         ("general.architecture", GgufValue::String(value)) => metadata.architecture = Some(value),
+        (key, GgufValue::String(value)) if key.starts_with("tokenizer.chat_template") => {
+            metadata.chat_templates.insert(key.to_string(), value);
+        }
         ("general.file_type", value) => metadata.file_type = value_to_u32(value),
         (key, value) if key.ends_with(".context_length") => {
             metadata.context_length = value_to_u32(value);
@@ -974,6 +979,7 @@ mod tests {
                 version: 3,
                 tensor_count: 1,
                 name: Some("Mistral Test".to_string()),
+                chat_templates: std::collections::BTreeMap::new(),
                 architecture: Some("llama".to_string()),
                 context_length: Some(4096),
                 embedding_length: Some(4096),

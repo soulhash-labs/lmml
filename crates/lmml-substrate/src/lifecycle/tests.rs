@@ -591,6 +591,10 @@ fn runtime_lease_uses_exact_admitted_artifact_hash() {
         endpoint: "http://127.0.0.1:1200".into(),
         context_size: 16_384,
         capabilities: vec![RuntimeCapability::TextGeneration],
+        prompt_configuration_hash: None,
+        runtime_configuration_hash: None,
+        deployment_manifest_hash: None,
+        approval_receipt_id: None,
         created_at: TIMESTAMP.into(),
     };
     let request = ModelRequest {
@@ -636,6 +640,10 @@ fn runtime_manifest_requires_versioned_executable_identity() {
         endpoint: "http://127.0.0.1:1200".into(),
         context_size: 16_384,
         capabilities: vec![RuntimeCapability::TextGeneration],
+        prompt_configuration_hash: None,
+        runtime_configuration_hash: None,
+        deployment_manifest_hash: None,
+        approval_receipt_id: None,
         created_at: TIMESTAMP.into(),
     };
 
@@ -671,6 +679,10 @@ fn runtime_lease_rejects_runtime_artifact_metadata_mismatch() {
         endpoint: "http://127.0.0.1:1200".into(),
         context_size: 16_384,
         capabilities: vec![RuntimeCapability::TextGeneration],
+        prompt_configuration_hash: None,
+        runtime_configuration_hash: None,
+        deployment_manifest_hash: None,
+        approval_receipt_id: None,
         created_at: TIMESTAMP.into(),
     };
     let request = ModelRequest {
@@ -748,6 +760,10 @@ fn llama_cpp_runtime_cannot_claim_eleven_taps() {
         endpoint: "http://127.0.0.1:1200".into(),
         context_size: 16_384,
         capabilities: vec![RuntimeCapability::ElevenTapObservation],
+        prompt_configuration_hash: None,
+        runtime_configuration_hash: None,
+        deployment_manifest_hash: None,
+        approval_receipt_id: None,
         created_at: TIMESTAMP.into(),
     };
 

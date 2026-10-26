@@ -12,6 +12,7 @@ use crossterm::terminal::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use serde::de::DeserializeOwned;
 
 use lmml_tui::app::App;
 use lmml_tui::event_loop::EventLoop;
@@ -23,6 +24,7 @@ use tracing_subscriber::EnvFilter;
 mod lifecycle_runtime_cli;
 mod model_cli;
 mod ocr_cli;
+mod template;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -116,6 +118,66 @@ enum RuntimeCommand {
         /// Start in the background and return after readiness.
         #[arg(long)]
         detach: bool,
+    },
+    /// Serve one exact, signed approval through a private backend gateway.
+    ServeApproved {
+        /// GGUF model to serve.
+        #[arg(long)]
+        model: PathBuf,
+        /// llama-server executable.
+        #[arg(long)]
+        binary: PathBuf,
+        /// Prompt configuration JSON used for review.
+        #[arg(long)]
+        prompt: PathBuf,
+        /// Runtime configuration JSON used for review.
+        #[arg(long)]
+        runtime: PathBuf,
+        /// Deployment manifest JSON used for review.
+        #[arg(long)]
+        deployment: PathBuf,
+        /// Content-addressed deployment snapshot root.
+        #[arg(long)]
+        snapshot_root: PathBuf,
+        /// Signed approval receipt JSON.
+        #[arg(long)]
+        receipt: PathBuf,
+        /// Pinned approval trust root JSON.
+        #[arg(long)]
+        trust_root: PathBuf,
+        /// Signed revocation state JSON, when a revocation store is configured.
+        #[arg(long)]
+        revocation_state: Option<PathBuf>,
+        /// Private backend port.
+        #[arg(long, default_value_t = 1200)]
+        backend_port: u16,
+        /// Bearer token required by the private backend.
+        #[arg(long)]
+        backend_api_key: String,
+        /// Public gateway port.
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+        /// Context size passed to llama-server.
+        #[arg(long, default_value_t = 4096)]
+        context: u32,
+        /// GPU layers passed to llama-server.
+        #[arg(long, default_value_t = -1)]
+        gpu_layers: i32,
+        /// llama-server worker threads.
+        #[arg(long, default_value_t = 0)]
+        threads: usize,
+        /// Emit machine-readable launch evidence.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Start a managed runtime from one validated approval bundle.
+    ServeApprovedBundle {
+        /// Approval bundle JSON produced by review tooling.
+        #[arg(long)]
+        bundle: PathBuf,
+        /// Emit machine-readable launch evidence.
+        #[arg(long)]
+        json: bool,
     },
     /// Stop a managed runtime profile.
     Stop {
@@ -576,6 +638,116 @@ fn build_export_lora_argv(model: &Path, lora: &Path, output: &Path) -> Vec<Strin
 async fn run_runtime(command: RuntimeCommand) -> i32 {
     match command {
         RuntimeCommand::Start { profile, detach } => run_runtime_start(&profile, detach).await,
+        RuntimeCommand::ServeApproved {
+            model,
+            binary,
+            prompt,
+            runtime,
+            deployment,
+            snapshot_root,
+            receipt,
+            trust_root,
+            revocation_state,
+            backend_port,
+            backend_api_key,
+            port,
+            context,
+            gpu_layers,
+            threads,
+            json,
+        } => {
+            run_runtime_serve_approved(ServeApprovedOptions {
+                model,
+                binary,
+                prompt,
+                runtime,
+                deployment,
+                snapshot_root,
+                receipt,
+                trust_root,
+                revocation_state,
+                backend_port,
+                backend_api_key,
+                port,
+                context,
+                gpu_layers,
+                threads,
+                json,
+            })
+            .await
+        }
+        RuntimeCommand::ServeApprovedBundle { bundle, json } => {
+            let bundle = match lmml_substrate::load_approval_bundle(&bundle) {
+                Ok(bundle) => bundle,
+                Err(error) => return serve_error("approval bundle", error),
+            };
+            let backend_api_key = match std::env::var(&bundle.backend_api_key_env) {
+                Ok(value) if !value.is_empty() => value,
+                Ok(_) => {
+                    return serve_error(
+                        "approval bundle",
+                        format!("{} is empty", bundle.backend_api_key_env),
+                    )
+                }
+                Err(_) => {
+                    return serve_error(
+                        "approval bundle",
+                        format!("{} is not set", bundle.backend_api_key_env),
+                    )
+                }
+            };
+            let prompt: lmml_substrate::PromptConfiguration = match read_main_json(&bundle.prompt) {
+                Ok(value) => value,
+                Err(error) => return serve_error("approval bundle prompt", error),
+            };
+            let runtime: lmml_substrate::RuntimeConfiguration =
+                match read_main_json(&bundle.runtime) {
+                    Ok(value) => value,
+                    Err(error) => return serve_error("approval bundle runtime", error),
+                };
+            let deployment: lmml_substrate::DeploymentManifest =
+                match read_main_json(&bundle.deployment) {
+                    Ok(value) => value,
+                    Err(error) => return serve_error("approval bundle deployment", error),
+                };
+            let model = match resolve_snapshot_file(
+                &bundle.snapshot_root,
+                &deployment,
+                &prompt.artifact_hash,
+                "model",
+            ) {
+                Ok(path) => path,
+                Err(error) => return serve_error("approval bundle model", error),
+            };
+            let binary = match resolve_snapshot_file(
+                &bundle.snapshot_root,
+                &deployment,
+                &runtime.executable_hash,
+                "llama-server",
+            ) {
+                Ok(path) => path,
+                Err(error) => return serve_error("approval bundle binary", error),
+            };
+            run_runtime_serve_approved(ServeApprovedOptions {
+                model,
+                binary,
+                prompt: bundle.prompt,
+                runtime: bundle.runtime,
+                deployment: bundle.deployment,
+                snapshot_root: bundle.snapshot_root,
+                receipt: bundle.receipt,
+                trust_root: bundle.trust_root,
+                revocation_state: bundle.revocation_state,
+                backend_port: bundle.backend_port,
+                backend_api_key,
+                port: bundle.public_port,
+                context: bundle.context,
+                gpu_layers: bundle.gpu_layers,
+                threads: bundle.threads,
+                json,
+            })
+            .await
+        }
         RuntimeCommand::Stop { profile } => run_runtime_stop(&profile).await,
         RuntimeCommand::Status { json } => {
             let mut state = match lmml_state::AppState::load_existing_or_default() {
@@ -671,6 +843,439 @@ async fn run_runtime(command: RuntimeCommand) -> i32 {
             lifecycle_runtime_cli::inspect(&manifest, json)
         }
     }
+}
+
+struct ServeApprovedOptions {
+    model: PathBuf,
+    binary: PathBuf,
+    prompt: PathBuf,
+    runtime: PathBuf,
+    deployment: PathBuf,
+    snapshot_root: PathBuf,
+    receipt: PathBuf,
+    trust_root: PathBuf,
+    revocation_state: Option<PathBuf>,
+    backend_port: u16,
+    backend_api_key: String,
+    port: u16,
+    context: u32,
+    gpu_layers: i32,
+    threads: usize,
+    json: bool,
+}
+
+async fn run_runtime_serve_approved(options: ServeApprovedOptions) -> i32 {
+    let prompt: lmml_substrate::PromptConfiguration = match read_main_json(&options.prompt) {
+        Ok(value) => value,
+        Err(error) => return serve_error("prompt configuration", error),
+    };
+    let runtime: lmml_substrate::RuntimeConfiguration = match read_main_json(&options.runtime) {
+        Ok(value) => value,
+        Err(error) => return serve_error("runtime configuration", error),
+    };
+    let deployment: lmml_substrate::DeploymentManifest = match read_main_json(&options.deployment) {
+        Ok(value) => value,
+        Err(error) => return serve_error("deployment manifest", error),
+    };
+    if let Err(error) =
+        lmml_substrate::verify_deployment_snapshot(&options.snapshot_root, &deployment)
+    {
+        return serve_error("deployment snapshot", error);
+    }
+    let trust_root = match lmml_substrate::load_approval_trust_root(&options.trust_root) {
+        Ok(value) => value,
+        Err(error) => return serve_error("trust root", error),
+    };
+    let receipt = match lmml_substrate::load_approval_receipt(&options.receipt, &trust_root) {
+        Ok(value) => value,
+        Err(error) => return serve_error("approval receipt", error),
+    };
+    let (revoked, revocation_epoch) = match options.revocation_state.as_deref() {
+        Some(path) => match lmml_substrate::load_revocation_state(path, &trust_root) {
+            Ok(state) => (
+                lmml_substrate::is_receipt_revoked(&state, &receipt.receipt_id),
+                state.epoch,
+            ),
+            Err(error) => return serve_error("revocation state", error),
+        },
+        None => (false, 0),
+    };
+    let prompt_hash = match lmml_substrate::prompt_configuration_hash(&prompt) {
+        Ok(value) => value,
+        Err(error) => return serve_error("prompt configuration", error),
+    };
+    let runtime_hash = match lmml_substrate::runtime_configuration_hash(&runtime) {
+        Ok(value) => value,
+        Err(error) => return serve_error("runtime configuration", error),
+    };
+    let deployment_hash = match lmml_substrate::deployment_manifest_hash(&deployment) {
+        Ok(value) => value,
+        Err(error) => return serve_error("deployment manifest", error),
+    };
+    let admission = lmml_substrate::compute_admission_status(
+        Some(&receipt),
+        &prompt_hash,
+        &runtime_hash,
+        &deployment_hash,
+        revoked,
+    );
+    if admission.state != lmml_substrate::AdmissionState::Approved {
+        return serve_error("runtime admission", admission.reason);
+    }
+    let model_hash = match lmml_substrate::sha256_file(&options.model) {
+        Ok(value) => value,
+        Err(error) => return serve_error("model hash", error),
+    };
+    let supplied_binary_hash = match lmml_substrate::sha256_file(&options.binary) {
+        Ok(value) => value,
+        Err(error) => return serve_error("binary hash", error),
+    };
+    if supplied_binary_hash != runtime.executable_hash {
+        return serve_error(
+            "runtime admission",
+            "supplied llama-server is not the executable bound by approval".to_string(),
+        );
+    }
+    if model_hash != prompt.artifact_hash || model_hash != deployment.artifact_hash {
+        return serve_error(
+            "runtime admission",
+            "model hash does not match approval".to_string(),
+        );
+    }
+    let model_path =
+        match resolve_snapshot_file(&options.snapshot_root, &deployment, &model_hash, "model") {
+            Ok(path) => path,
+            Err(error) => return serve_error("deployment snapshot", error),
+        };
+    let binary_path = match resolve_snapshot_file(
+        &options.snapshot_root,
+        &deployment,
+        &runtime.executable_hash,
+        "llama-server",
+    ) {
+        Ok(path) => path,
+        Err(error) => return serve_error("deployment snapshot", error),
+    };
+    if runtime.prompt_configuration_hash != prompt_hash
+        || deployment.prompt_configuration_hash != prompt_hash
+        || deployment.runtime_configuration_hash != runtime_hash
+    {
+        return serve_error(
+            "runtime admission",
+            "prompt, runtime, and deployment identities are not mutually bound".to_string(),
+        );
+    }
+    let model = match lmml_models::parse_model_file(&model_path, false).await {
+        Some(model) => model,
+        None => return serve_error("model", "not a readable GGUF model".to_string()),
+    };
+    let caps = match lmml_compat::LlamaBinaryCapabilities::probe(&binary_path).await {
+        Ok(caps) => caps,
+        Err(error) => return serve_error("llama-server capability probe", error),
+    };
+    let server_config = lmml_compat::ServerConfig {
+        model: model_path,
+        port: options.backend_port,
+        host: "127.0.0.1".into(),
+        ctx_size: options.context,
+        n_gpu_layers: options.gpu_layers,
+        batch_size: 512,
+        ubatch_size: 512,
+        threads: options.threads,
+        flash_attn: true,
+        mlock: false,
+        api_key: Some(options.backend_api_key.clone()),
+        chat_template: None,
+        jinja: false,
+        extra_args: Vec::new(),
+    };
+    let actual_argv = lmml_compat::build_argv(&server_config, &caps);
+    if actual_argv != runtime.resolved_argv {
+        return serve_error(
+            "runtime admission",
+            "resolved llama-server argv differs from the signed runtime configuration".to_string(),
+        );
+    }
+    let executable_hash = match lmml_substrate::sha256_file(&binary_path) {
+        Ok(value) => value,
+        Err(error) => return serve_error("llama-server hash", error),
+    };
+    if executable_hash != runtime.executable_hash {
+        return serve_error(
+            "runtime admission",
+            "llama-server hash differs from approval".to_string(),
+        );
+    }
+    if prompt.renderer_id != "llama.cpp/server-native"
+        || prompt.renderer_build_hash != executable_hash
+    {
+        return serve_error(
+            "runtime admission",
+            "approval does not bind the exact production llama.cpp renderer".to_string(),
+        );
+    }
+    let gateway_admission = lmml_gateway::GatewayAdmission::pending_with_store(
+        lmml_substrate::AdmissionStatus {
+            state: lmml_substrate::AdmissionState::Blocked,
+            reason: "post-load verification pending".into(),
+        },
+        lmml_gateway::ApprovalStore {
+            receipt_path: options.receipt.clone(),
+            trust_root_path: options.trust_root.clone(),
+            revocation_state_path: options.revocation_state.clone(),
+            prompt_hash: prompt_hash.clone(),
+            runtime_hash: runtime_hash.clone(),
+            deployment_hash: deployment_hash.clone(),
+        },
+    );
+    let attestation_key = match std::env::var("LMML_GATEWAY_ATTESTATION_PRIVATE_KEY_HEX") {
+        Ok(value) => match decode_hex(&value) {
+            Some(value) => Some(value),
+            None => return serve_error("gateway attestation", "invalid private key hex"),
+        },
+        Err(_) => None,
+    };
+    if attestation_key.is_none() {
+        return serve_error(
+            "gateway attestation",
+            "LMML_GATEWAY_ATTESTATION_PRIVATE_KEY_HEX is required for an approved runtime",
+        );
+    }
+    let gateway_id = match std::env::var("LMML_GATEWAY_ID") {
+        Ok(value) if !value.trim().is_empty() => value,
+        _ => return serve_error("gateway attestation", "LMML_GATEWAY_ID is required"),
+    };
+    let gateway_admission_for_activation = gateway_admission.clone();
+    let gateway = match lmml_gateway::GatewayState::new(
+        lmml_gateway::GatewayConfig {
+            listen: ([127, 0, 0, 1], options.port).into(),
+            backend_url: format!("http://127.0.0.1:{}", options.backend_port),
+            backend_api_key: Some(options.backend_api_key),
+            gateway_id: Some(gateway_id),
+            deployment_hash: Some(deployment_hash.to_string()),
+            receipt_id: Some(receipt.receipt_id.clone()),
+            receipt_sequence: receipt.sequence,
+            revocation_epoch,
+            attestation_private_key: attestation_key,
+            ..lmml_gateway::GatewayConfig::default()
+        },
+        prompt.request_schema,
+        gateway_admission,
+    ) {
+        Ok(gateway) => gateway,
+        Err(error) => return serve_error("gateway", error),
+    };
+    let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(256);
+    tokio::spawn(async move {
+        while let Some(line) = log_rx.recv().await {
+            tracing::info!(target: "lmml.approved_runtime", "{line}");
+        }
+    });
+    let manager = lmml_server::ServerManager {
+        binary: binary_path,
+        caps,
+    };
+    let environment = match approved_environment(&runtime.allowed_environment) {
+        Ok(environment) => environment,
+        Err(error) => return serve_error("runtime environment", error),
+    };
+    let handle = match manager
+        .start_with_gateway_and_env(lmml_server::GatewayStartOptions {
+            model: &model,
+            backend_config: &server_config,
+            gateway,
+            listen: ([127, 0, 0, 1], options.port).into(),
+            log_tx,
+            startup_timeout: lmml_server::default_startup_timeout(),
+            environment: Some(&environment),
+        })
+        .await
+    {
+        Ok(handle) => handle,
+        Err(error) => return serve_error("approved runtime", error),
+    };
+    match lmml_substrate::sha256_file(&server_config.model) {
+        Ok(hash) if hash == model_hash => {}
+        Ok(_) => {
+            handle.stop().await;
+            return serve_error(
+                "runtime admission",
+                "model bytes changed before or during backend load".to_string(),
+            );
+        }
+        Err(error) => {
+            handle.stop().await;
+            return serve_error("runtime admission", error.to_string());
+        }
+    }
+    if let Err(error) = verify_loaded_libraries(&handle, &runtime.loaded_libraries).await {
+        handle.stop().await;
+        return serve_error("runtime admission", error);
+    }
+    if let Err(error) = gateway_admission_for_activation
+        .activate_if_approved()
+        .await
+    {
+        handle.stop().await;
+        return serve_error("runtime admission", error);
+    }
+    let endpoint = format!("http://127.0.0.1:{}", options.port);
+    if options.json {
+        let evidence = serde_json::json!({
+            "status": "ready",
+            "endpoint": &endpoint,
+            "pid": handle.pid().await,
+            "receipt_id": receipt.receipt_id,
+            "receipt_sequence": receipt.sequence,
+            "prompt_configuration_hash": prompt_hash,
+            "runtime_configuration_hash": runtime_hash,
+            "deployment_manifest_hash": deployment_hash,
+            "model_hash": model_hash,
+            "executable_hash": executable_hash,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&evidence).unwrap_or_default()
+        );
+    } else {
+        println!("approved runtime ready at {endpoint}");
+    }
+    let _ = tokio::signal::ctrl_c().await;
+    handle.stop().await;
+    0
+}
+
+fn decode_hex(value: &str) -> Option<Vec<u8>> {
+    if !value.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..value.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&value[index..index + 2], 16).ok())
+        .collect()
+}
+
+fn approved_environment(
+    entries: &[lmml_substrate::EnvironmentIdentity],
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    let mut environment = std::collections::BTreeMap::new();
+    for entry in entries {
+        if !entry.secret_presence_only && entry.value_hash.is_none() {
+            return Err(format!(
+                "non-secret environment entry has no value hash: {}",
+                entry.name
+            ));
+        }
+        let value = std::env::var(&entry.name).map_err(|_| {
+            format!(
+                "approved environment variable is unavailable: {}",
+                entry.name
+            )
+        })?;
+        if !entry.secret_presence_only {
+            let Some(expected_hash) = entry.value_hash.as_ref() else {
+                return Err(format!("environment hash is missing: {}", entry.name));
+            };
+            let actual_hash = lmml_substrate::sha256_data(value.as_bytes());
+            if &actual_hash != expected_hash {
+                return Err(format!(
+                    "approved environment variable changed: {}",
+                    entry.name
+                ));
+            }
+        }
+        environment.insert(entry.name.clone(), value);
+    }
+    Ok(environment)
+}
+
+fn resolve_snapshot_file(
+    snapshot_root: &Path,
+    deployment: &lmml_substrate::DeploymentManifest,
+    expected_hash: &lmml_substrate::Hash256,
+    label: &str,
+) -> Result<PathBuf, String> {
+    let matches: Vec<_> = deployment
+        .files
+        .iter()
+        .filter(|identity| &identity.sha256 == expected_hash)
+        .collect();
+    let identity = match matches.as_slice() {
+        [identity] => identity,
+        [] => {
+            return Err(format!(
+                "deployment has no {label} matching the approved hash"
+            ))
+        }
+        _ => return Err(format!("deployment has multiple files matching {label}")),
+    };
+    let path = snapshot_root.join(&identity.path);
+    if !path.is_file() {
+        return Err(format!("approved {label} is missing: {}", path.display()));
+    }
+    Ok(path)
+}
+
+async fn verify_loaded_libraries(
+    handle: &lmml_server::ServerHandle,
+    declared: &[lmml_substrate::LibraryIdentity],
+) -> Result<(), String> {
+    if declared.is_empty() {
+        return Err("runtime approval declares no loader closure".into());
+    }
+    let pid = handle
+        .pid()
+        .await
+        .ok_or_else(|| "managed backend exited before library verification".to_string())?;
+    #[cfg(target_os = "linux")]
+    {
+        let maps = std::fs::read_to_string(format!("/proc/{pid}/maps"))
+            .map_err(|error| format!("read loaded-library map: {error}"))?;
+        let mut observed = std::collections::BTreeSet::new();
+        for line in maps.lines() {
+            let Some(path) = line.split_whitespace().last() else {
+                continue;
+            };
+            if path.starts_with('/') && path.contains(".so") {
+                observed.insert(std::path::PathBuf::from(path));
+            }
+        }
+        for path in &observed {
+            let identity = declared.iter().find(|identity| identity.path == *path);
+            let Some(identity) = identity else {
+                return Err(format!("unlisted loaded library: {}", path.display()));
+            };
+            let actual = lmml_substrate::sha256_file(path)
+                .map_err(|error| format!("hash loaded library {}: {error}", path.display()))?;
+            if actual != identity.sha256 {
+                return Err(format!("loaded library hash changed: {}", path.display()));
+            }
+        }
+        for identity in declared.iter().filter(|identity| identity.required) {
+            if !observed.contains(&identity.path) {
+                return Err(format!(
+                    "required declared library was not loaded: {}",
+                    identity.path.display()
+                ));
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (pid, declared);
+        Err("loaded-library admission is not implemented on this platform".into())
+    }
+}
+
+fn read_main_json<T: DeserializeOwned>(path: &Path) -> Result<T, String> {
+    let payload = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+    serde_json::from_str(&payload).map_err(|error| error.to_string())
+}
+
+fn serve_error(context: &str, error: impl std::fmt::Display) -> i32 {
+    eprintln!("{context} failed: {error}");
+    1
 }
 
 async fn run_runtime_start(profile: &str, detach: bool) -> i32 {
@@ -919,6 +1524,15 @@ async fn run_runtime_configure(state: &lmml_state::AppState, args: RuntimeConfig
                         None,
                     )
                 };
+                if runtime_cli::approval_enforcement_enabled() {
+                    if let Err(error) = verify_approval_gateway_endpoint(host, port, api_key).await
+                    {
+                        eprintln!(
+                            "refusing OpenCode routing because approval enforcement requires the LMML gateway: {error}"
+                        );
+                        return 1;
+                    }
+                }
                 match lmml_server::verify_served_model(host, port, model, api_key).await {
                     Ok(reported) => {
                         println!("verified live llama-server model: {reported}");
@@ -1000,6 +1614,34 @@ async fn run_runtime_configure(state: &lmml_state::AppState, args: RuntimeConfig
             2
         }
     }
+}
+
+async fn verify_approval_gateway_endpoint(
+    host: &str,
+    port: u16,
+    api_key: Option<&str>,
+) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let mut request = client.get(format!("http://{host}:{port}/health"));
+    if let Some(api_key) = api_key.filter(|value| !value.is_empty()) {
+        request = request.bearer_auth(api_key);
+    }
+    let response = request.send().await.map_err(|error| error.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("gateway health returned {}", response.status()));
+    }
+    if response
+        .headers()
+        .get("x-lmml-gateway")
+        .and_then(|value| value.to_str().ok())
+        != Some("approved")
+    {
+        return Err("endpoint did not identify as an approved LMML gateway".into());
+    }
+    Ok(())
 }
 
 fn print_routing(routing: &runtime_cli::RoutingPlan) {

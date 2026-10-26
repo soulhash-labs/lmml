@@ -14,11 +14,13 @@ use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 mod adapter;
+mod approval;
 mod lifecycle;
 mod storage;
 mod types;
 
 pub use adapter::*;
+pub use approval::*;
 pub use lifecycle::*;
 pub use storage::{
     append_artifact_manifest, append_gguf_candidate_manifest, manifest_json,
