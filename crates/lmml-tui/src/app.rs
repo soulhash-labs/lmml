@@ -1474,6 +1474,7 @@ impl App {
             extra_args: server.extra_args.clone(),
         };
         apply_qwen_server_safeguards(model, &mut config);
+        apply_mtp_compatibility_guard(model, has_model_profile, &mut config);
         apply_prism_initial_safeguards(model, has_model_profile, &mut config);
         config
     }
@@ -1741,6 +1742,49 @@ fn apply_qwen_server_safeguards(model: &ModelEntry, config: &mut lmml_compat::Se
             "q8_0",
         );
     }
+}
+
+fn apply_mtp_compatibility_guard(
+    model: &ModelEntry,
+    has_model_profile: bool,
+    config: &mut lmml_compat::ServerConfig,
+) {
+    if has_model_profile || is_native_mtp_model(model) {
+        return;
+    }
+
+    let mut filtered = Vec::with_capacity(config.extra_args.len());
+    let mut index = 0;
+    while index < config.extra_args.len() {
+        let flag = config.extra_args[index].as_str();
+        let removes_pair = matches!(
+            flag,
+            "-md" | "--model-draft" | "--spec-draft-model" | "--spec-draft-n-max"
+        );
+        let removes_mtp_mode = flag == "--spec-type"
+            && config
+                .extra_args
+                .get(index + 1)
+                .is_some_and(|value| value == "draft-mtp");
+        if removes_pair || removes_mtp_mode {
+            index += 2.min(config.extra_args.len().saturating_sub(index));
+            continue;
+        }
+        filtered.push(config.extra_args[index].clone());
+        index += 1;
+    }
+    config.extra_args = filtered;
+}
+
+fn is_native_mtp_model(model: &ModelEntry) -> bool {
+    let variant = lmml_models::catalog::match_known_model_name(&model.name).or_else(|| {
+        model
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(lmml_models::catalog::match_known_model_name)
+    });
+    variant.is_some_and(|variant| variant.family == lmml_models::catalog::LlmFamily::Qwen38)
 }
 
 fn apply_prism_initial_safeguards(
@@ -3063,6 +3107,29 @@ mod tests {
             .extra_args
             .windows(2)
             .any(|pair| pair == ["--top-k", "20"]));
+    }
+
+    #[test]
+    fn ordinary_model_drops_stale_global_mtp_arguments() {
+        let mut app = App::default();
+        app.state.server.extra_args = vec![
+            "--parallel".to_string(),
+            "1".to_string(),
+            "--spec-type".to_string(),
+            "draft-mtp".to_string(),
+            "--spec-draft-n-max".to_string(),
+            "3".to_string(),
+            "--temp".to_string(),
+            "1.0".to_string(),
+        ];
+        let model = ModelEntry {
+            quant: "F16".to_string(),
+            ..model_entry("Qwen35-Uncensored-Crown11-Merged-9.0B-F16.gguf")
+        };
+
+        let config = app.server_config(&model);
+
+        assert_eq!(config.extra_args, vec!["--parallel", "1", "--temp", "1.0"]);
     }
 
     #[test]
